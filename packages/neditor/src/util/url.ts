@@ -1,0 +1,64 @@
+/** Schemes that are safe to put in an `href` we render into the document. */
+const SAFE_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:']);
+
+/**
+ * Normalizes a user-supplied link, or returns null when it is not safe.
+ *
+ * A link travels with the document, so it can arrive from a paste, an import,
+ * or another user. `javascript:` and `data:` hrefs execute when clicked, so
+ * anything outside {@link SAFE_SCHEMES} is rejected rather than escaped.
+ */
+export function sanitizeUrl(input: string): string | null {
+  const trimmed = input.trim();
+
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  // In-page and site-relative links carry no scheme and cannot execute.
+  if (trimmed.startsWith('#') || trimmed.startsWith('/')) {
+    return trimmed;
+  }
+
+  // `example.com` is what people actually type; assume https rather than
+  // letting it resolve as a relative path.
+  const candidate = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(trimmed) ? trimmed : `https://${trimmed}`;
+
+  let parsed: URL;
+
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    return null;
+  }
+
+  return SAFE_SCHEMES.has(parsed.protocol) ? parsed.href : null;
+}
+
+/** Image sources may also be inline data, which cannot execute in an `<img>`. */
+const SAFE_IMAGE_DATA =
+  /^data:image\/(?:png|jpe?g|gif|webp|avif|bmp|x-icon);base64,[a-z0-9+/=\s]+$/i;
+
+/**
+ * Normalizes an image source, or returns null when it is not safe.
+ *
+ * `data:image/svg+xml` is deliberately excluded: an SVG can carry script, and
+ * while it stays inert inside an `<img>`, the same string reaching an `<object>`
+ * or a new tab would not.
+ */
+export function sanitizeImageUrl(input: string): string | null {
+  const trimmed = input.trim();
+
+  if (SAFE_IMAGE_DATA.test(trimmed)) {
+    return trimmed;
+  }
+
+  const url = sanitizeUrl(trimmed);
+
+  if (url === null) {
+    return null;
+  }
+
+  // mailto: and tel: are valid links but never images.
+  return /^(?:https?:|\/|#)/.test(url) ? url : null;
+}

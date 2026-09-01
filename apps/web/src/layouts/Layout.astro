@@ -1,0 +1,61 @@
+---
+interface Props {
+  title: string;
+  description?: string;
+}
+
+const { title, description = 'A Notion-like block editor in vanilla JavaScript.' } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="description" content={description} />
+    <title>{title}</title>
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>
+
+<style is:global>
+  :root {
+    --page-bg: #ffffff;
+    --page-fg: rgb(55 53 47);
+    --page-muted: rgb(55 53 47 / 0.55);
+    --page-border: rgb(55 53 47 / 0.1);
+    --page-panel: rgb(247 247 245);
+    color-scheme: light dark;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page-bg: #191919;
+      --page-fg: rgb(255 255 255 / 0.9);
+      --page-muted: rgb(255 255 255 / 0.45);
+      --page-border: rgb(255 255 255 / 0.11);
+      --page-panel: rgb(255 255 255 / 0.04);
+    }
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    background: var(--page-bg);
+    color: var(--page-fg);
+    font-family:
+      ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+</style>

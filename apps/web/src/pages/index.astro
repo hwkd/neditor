@@ -1,0 +1,423 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+
+<Layout title="neditor — a Notion-like editor in vanilla JS">
+  <main class="page">
+    <header class="masthead">
+      <p class="eyebrow">@neditor/core</p>
+      <h1>A Notion-like editor, in vanilla JavaScript.</h1>
+      <p class="lede">
+        No framework, no runtime dependencies. <strong>Select text</strong> for the format toolbar, or
+        press <kbd>⌘B</kbd> <kbd>⌘I</kbd> <kbd>⌘U</kbd> <kbd>⌘E</kbd> <kbd>⌘K</kbd>. Type
+        <code>**bold**</code>, <code>*italic*</code>, <code>`code`</code> or
+        <code>[text](url)</code> inline — and <kbd>/</kbd>, <code>#&nbsp;</code>,
+        <code>-&nbsp;</code>, <code>[]&nbsp;</code> for blocks. <kbd>Tab</kbd> indents,
+        <kbd>⌘⇧↑</kbd> moves a block, <kbd>⌘Z</kbd> undoes — a run of typing at a time.{' '}
+        <strong>Hover a block</strong> for its handle: click to select, drag to reorder.
+        <kbd>Esc</kbd> steps up from text to the block itself. Paste Markdown or rich
+        HTML and it arrives as real blocks. Inside a table, <kbd>Tab</kbd> walks the
+        cells and adds a row at the end.
+      </p>
+    </header>
+
+    <div class="workbench">
+      <div class="editor-column">
+        <div class="editor-actions">
+          <button type="button" data-action="undo" disabled>Undo</button>
+          <button type="button" data-action="redo" disabled>Redo</button>
+          <span class="editor-actions__hint">⌘Z / ⌘⇧Z</span>
+        </div>
+        <div id="editor" class="editor-surface"></div>
+      </div>
+
+      <aside class="inspector">
+        <div class="inspector__tabs" role="tablist">
+          <button type="button" role="tab" data-panel="markdown" aria-selected="true">
+            Markdown
+          </button>
+          <button type="button" role="tab" data-panel="json" aria-selected="false">JSON</button>
+        </div>
+        <pre class="inspector__output" data-output="markdown"></pre>
+        <pre class="inspector__output" data-output="json" hidden></pre>
+      </aside>
+    </div>
+  </main>
+</Layout>
+
+<script>
+  import { createEditor, type NEditorDocument } from '@neditor/core';
+
+  const seed: NEditorDocument = {
+    blocks: [
+      {
+        id: 'seed-1',
+        type: 'heading1',
+        content: [{ text: 'Reverse-engineering Notion' }],
+        depth: 0,
+      },
+      {
+        id: 'seed-2',
+        type: 'paragraph',
+        content: [
+          { text: 'This page runs ' },
+          { text: '@neditor/core', marks: ['code'] },
+          { text: ', the reusable package in this monorepo. Select any text to format it, or press ' },
+          { text: 'Cmd+K', marks: ['bold'] },
+          { text: ' to add a ' },
+          { text: 'link', link: 'https://developer.mozilla.org/en-US/docs/Web/API/Selection' },
+          { text: '.' },
+        ],
+        depth: 0,
+      },
+      { id: 'seed-3', type: 'heading2', content: [{ text: 'Rich text' }], depth: 0 },
+      {
+        id: 'seed-4',
+        type: 'bulleted_list',
+        content: [
+          { text: 'Bold', marks: ['bold'] },
+          { text: ', ' },
+          { text: 'italic', marks: ['italic'] },
+          { text: ', ' },
+          { text: 'underline', marks: ['underline'] },
+          { text: ', ' },
+          { text: 'strikethrough', marks: ['strikethrough'] },
+          { text: ' and ' },
+          { text: 'inline code', marks: ['code'] },
+        ],
+        depth: 0,
+      },
+      {
+        id: 'seed-5',
+        type: 'bulleted_list',
+        content: [
+          { text: 'Marks compose: ' },
+          { text: 'bold and italic together', marks: ['bold', 'italic'] },
+        ],
+        depth: 0,
+      },
+      {
+        id: 'seed-6',
+        type: 'bulleted_list',
+        content: [
+          { text: 'Type ' },
+          { text: '**bold**', marks: ['code'] },
+          { text: ' or ' },
+          { text: '[text](url)', marks: ['code'] },
+          { text: ' and it converts as you finish it' },
+        ],
+        depth: 0,
+      },
+      { id: 'seed-7', type: 'heading2', content: [{ text: 'Next up' }], depth: 0 },
+      {
+        id: 'seed-8',
+        type: 'todo',
+        content: [{ text: 'Undo and redo history' }],
+        depth: 0,
+        checked: true,
+      },
+      {
+        id: 'seed-9',
+        type: 'todo',
+        content: [{ text: 'Drag handles and block selection' }],
+        depth: 0,
+        checked: true,
+      },
+      {
+        id: 'seed-10',
+        type: 'todo',
+        content: [{ text: 'Multi-block clipboard' }],
+        depth: 0,
+        checked: true,
+      },
+      { id: 'seed-11', type: 'divider', content: [], depth: 0 },
+      {
+        id: 'seed-14',
+        type: 'callout',
+        content: [
+          { text: 'Callouts take any emoji — click the icon to change it.' },
+        ],
+        depth: 0,
+        icon: '💡',
+      },
+      {
+        id: 'seed-15',
+        type: 'toggle',
+        content: [{ text: 'Toggles hide what is nested under them' }],
+        depth: 0,
+        collapsed: false,
+      },
+      {
+        id: 'seed-16',
+        type: 'paragraph',
+        content: [
+          { text: 'Anything indented below a toggle collapses with it — press ' },
+          { text: 'Enter', marks: ['code'] },
+          { text: ' in the toggle to add another child.' },
+        ],
+        depth: 1,
+      },
+      {
+        id: 'seed-17',
+        type: 'bulleted_list',
+        content: [{ text: 'including lists' }],
+        depth: 1,
+      },
+      {
+        id: 'seed-18',
+        type: 'image',
+        content: [{ text: 'Captions are editable rich text — click the image to change its URL.' }],
+        depth: 0,
+        src: '/sample.png',
+        alt: 'A blue gradient',
+      },
+      {
+        id: 'seed-19',
+        type: 'table',
+        content: [],
+        depth: 0,
+        rows: [
+          [[{ text: 'Block' }], [{ text: 'Shortcut' }], [{ text: 'Notes' }]],
+          [
+            [{ text: 'Callout' }],
+            [{ text: '/callout', marks: ['code'] }],
+            [{ text: 'Any emoji as its icon' }],
+          ],
+          [
+            [{ text: 'Table' }],
+            [{ text: '/table', marks: ['code'] }],
+            [{ text: 'Tab walks the cells' }],
+          ],
+        ],
+      },
+      {
+        id: 'seed-12',
+        type: 'quote',
+        content: [{ text: 'A block is the atomic unit of the page.' }],
+        depth: 0,
+      },
+      { id: 'seed-13', type: 'paragraph', content: [], depth: 0 },
+    ],
+  };
+
+  const mount = document.querySelector<HTMLElement>('#editor');
+
+  if (mount) {
+    const markdownOut = document.querySelector<HTMLElement>('[data-output="markdown"]');
+    const jsonOut = document.querySelector<HTMLElement>('[data-output="json"]');
+
+    const editor = createEditor({
+      element: mount,
+      doc: seed,
+      autofocus: false,
+      onChange: (doc) => {
+        if (markdownOut) {
+          markdownOut.textContent = editor.getMarkdown();
+        }
+
+        if (jsonOut) {
+          jsonOut.textContent = JSON.stringify(doc, null, 2);
+        }
+      },
+    });
+
+    // Paint the inspector with the seed content.
+    if (markdownOut) {
+      markdownOut.textContent = editor.getMarkdown();
+    }
+
+    if (jsonOut) {
+      jsonOut.textContent = JSON.stringify(editor.getDocument(), null, 2);
+    }
+
+    const undoButton = document.querySelector<HTMLButtonElement>('[data-action="undo"]');
+    const redoButton = document.querySelector<HTMLButtonElement>('[data-action="redo"]');
+
+    for (const [button, run] of [
+      [undoButton, () => editor.undo()],
+      [redoButton, () => editor.redo()],
+    ] as const) {
+      // Keep the caret in the document so undo can restore the selection.
+      button?.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+      });
+      button?.addEventListener('click', () => {
+        run();
+      });
+    }
+
+    editor.on('history', ({ canUndo, canRedo }) => {
+      if (undoButton) {
+        undoButton.disabled = !canUndo;
+      }
+
+      if (redoButton) {
+        redoButton.disabled = !canRedo;
+      }
+    });
+
+    for (const tab of document.querySelectorAll<HTMLButtonElement>('[role="tab"]')) {
+      tab.addEventListener('click', () => {
+        const target = tab.dataset.panel;
+
+        for (const other of document.querySelectorAll<HTMLButtonElement>('[role="tab"]')) {
+          other.setAttribute('aria-selected', String(other === tab));
+        }
+
+        for (const panel of document.querySelectorAll<HTMLElement>('[data-output]')) {
+          panel.hidden = panel.dataset.output !== target;
+        }
+      });
+    }
+  }
+</script>
+
+<style>
+  .page {
+    max-width: 72rem;
+    margin: 0 auto;
+    padding: 4rem 1.5rem 6rem;
+  }
+
+  .masthead {
+    max-width: 44rem;
+    margin-bottom: 3rem;
+  }
+
+  .eyebrow {
+    margin: 0 0 0.75rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8125rem;
+    color: var(--page-muted);
+  }
+
+  h1 {
+    margin: 0 0 1rem;
+    font-size: clamp(1.875rem, 4vw, 2.75rem);
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+  }
+
+  .lede {
+    margin: 0;
+    max-width: 38rem;
+    color: var(--page-muted);
+    line-height: 1.65;
+  }
+
+  kbd,
+  code {
+    padding: 0.1em 0.4em;
+    border: 1px solid var(--page-border);
+    border-radius: 4px;
+    background: var(--page-panel);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85em;
+    color: var(--page-fg);
+    white-space: nowrap;
+  }
+
+  .workbench {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2rem;
+    align-items: start;
+  }
+
+  @media (min-width: 60rem) {
+    .workbench {
+      grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+    }
+  }
+
+  .editor-column {
+    min-width: 0;
+  }
+
+  .editor-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .editor-actions button {
+    padding: 0.3rem 0.7rem;
+    border: 1px solid var(--page-border);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--page-fg);
+    font: inherit;
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+
+  .editor-actions button:hover:not(:disabled) {
+    background: var(--page-panel);
+  }
+
+  .editor-actions button:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  .editor-actions__hint {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+    color: var(--page-muted);
+  }
+
+  .editor-surface {
+    min-height: 26rem;
+    padding: 1.5rem 1.25rem 6rem;
+    border: 1px solid var(--page-border);
+    border-radius: 10px;
+    cursor: text;
+  }
+
+  .inspector {
+    position: sticky;
+    top: 2rem;
+    border: 1px solid var(--page-border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--page-panel);
+  }
+
+  .inspector__tabs {
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.5rem;
+    border-bottom: 1px solid var(--page-border);
+  }
+
+  .inspector__tabs button {
+    padding: 0.3rem 0.7rem;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--page-muted);
+    font: inherit;
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+
+  .inspector__tabs button[aria-selected='true'] {
+    background: var(--page-bg);
+    color: var(--page-fg);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.06);
+  }
+
+  .inspector__output {
+    max-height: 32rem;
+    margin: 0;
+    padding: 1rem;
+    overflow: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+    line-height: 1.6;
+    color: var(--page-muted);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+</style>

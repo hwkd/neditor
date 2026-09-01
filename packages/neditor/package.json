@@ -1,0 +1,67 @@
+{
+  "name": "@neditor/core",
+  "version": "0.1.0",
+  "description": "A framework-agnostic, Notion-like block editor. Vanilla JavaScript, zero runtime dependencies.",
+  "keywords": [
+    "block-editor",
+    "contenteditable",
+    "editor",
+    "notion",
+    "vanilla",
+    "wysiwyg"
+  ],
+  "homepage": "https://github.com/hwkd/neditor/tree/main/packages/neditor#readme",
+  "bugs": {
+    "url": "https://github.com/hwkd/neditor/issues"
+  },
+  "license": "MIT",
+  "author": "Justin Kim",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hwkd/neditor.git",
+    "directory": "packages/neditor"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "unpkg": "./dist/index.mjs",
+  "jsdelivr": "./dist/index.mjs",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./styles.css": "./dist/styles.css",
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "vp pack && node scripts/emit-css.mjs",
+    "dev": "vp pack --watch",
+    "test": "vp test --run",
+    "prepack": "vp pack && node scripts/emit-css.mjs",
+    "prepublishOnly": "vp test --run"
+  },
+  "devDependencies": {
+    "happy-dom": "catalog:",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
