@@ -7,6 +7,25 @@ dependencies, no build step required on your side.
 pnpm add @neditor/core
 ```
 
+## Browser support
+
+**Chrome/Edge 92+, Firefox 90+, Safari 16.4+.** Node 18+ for the headless
+serializers.
+
+The build targets ES2022 and ships untranspiled, so this is a hard floor rather
+than a recommendation. Two things set it:
+
+- `Array.prototype.at()` — Chrome 92, Firefox 90, Safari 15.4.
+- **RegExp lookbehind** in the Markdown table splitter and the italic input
+  rules — Safari 16.4. This one is a parse-time `SyntaxError`, so on an older
+  Safari the whole bundle fails to load, not just those code paths. If you need
+  to go back further, transpile the package or rewrite those three patterns
+  with capture groups.
+
+`Intl.Segmenter` is used to take the first grapheme of a callout icon, but it
+is feature-detected — Firefox below 125 keeps the whole string instead of
+cutting an emoji in half.
+
 ## Usage
 
 ```js

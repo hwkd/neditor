@@ -61,6 +61,12 @@
     "vite-plus": "catalog:",
     "vitest": "catalog:"
   },
+  "browserslist": [
+    "chrome >= 92",
+    "edge >= 92",
+    "firefox >= 90",
+    "safari >= 16.4"
+  ],
   "engines": {
     "node": ">=18"
   }
