@@ -4,7 +4,7 @@ import { sanitizeUrl } from '../util/url.ts';
  * Rich text.
  *
  * A block's content is an ordered list of runs, each a slice of text carrying a
- * set of marks and an optional link. Notion uses the same shape: text is a flat
+ * set of marks and an optional link. Text is therefore a flat
  * sequence of annotated spans, not a tree of nested elements. That matters
  * because formatting is then *interval arithmetic* — bolding a selection splits
  * runs at two offsets and flips a flag — rather than DOM surgery over nested

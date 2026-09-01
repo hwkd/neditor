@@ -15,7 +15,7 @@ import {
 /**
  * The document model.
  *
- * Notion stores a page as a flat table of blocks joined by parent/child
+ * A page is a flat table of blocks joined by parent/child
  * pointers rather than a nested tree. We keep a flat, ordered list for the same
  * reason: every structural edit stays O(1)-ish and reorder never rewrites a
  * subtree. Nesting is expressed by `depth` so indent/outdent is a numeric edit

@@ -5,7 +5,9 @@ export default defineConfig({
     entry: ['src/index.ts'],
     format: ['esm', 'cjs'],
     dts: true,
-    sourcemap: true,
+    // Off deliberately: tsdown embeds every source file in the map, so shipping
+    // one publishes the full commented source alongside the bundle.
+    sourcemap: false,
     clean: true,
   },
   test: {

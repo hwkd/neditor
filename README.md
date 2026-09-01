@@ -1,6 +1,6 @@
 # neditor
 
-A monorepo for reverse-engineering Notion's editor and shipping the result as a
+A monorepo for an independently built, Notion-like block editor, shipped as a
 reusable package that any web app can drop in.
 
 - **[`packages/neditor`](packages/neditor)** — `@neditor/core`, the editor.
@@ -77,7 +77,7 @@ A few decisions worth knowing before changing dependencies:
 
 ## Status
 
-The package is a working foundation, not a finished Notion clone. Rich text
+The package is a working foundation, not a finished product. Rich text
 (bold, italic, underline, strikethrough, inline code and links), the selection
 toolbar, inline and block Markdown input rules, the slash menu, nesting,
 undo/redo, block selection with drag handles, callouts, collapsible toggles,
@@ -85,3 +85,12 @@ images, tables, and a sanitized multi-block clipboard all work. See the
 package README for the known gaps (list semantics, IME input rules, Markdown
 round-tripping of empty paragraphs). See [`packages/neditor/README.md`](packages/neditor/README.md#roadmap)
 for the full list.
+
+## License
+
+MIT.
+
+Notion is a trademark of Notion Labs, Inc. This project is an independent
+implementation, is not affiliated with, endorsed by, or derived from Notion
+Labs, Inc., and "Notion-like" is used only to describe the style of editor it
+implements.

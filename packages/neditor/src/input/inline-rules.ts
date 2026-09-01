@@ -4,8 +4,9 @@ import { sanitizeUrl } from '../util/url.ts';
 /**
  * Inline Markdown rules.
  *
- * These fire the moment the closing delimiter is typed, the way Notion turns
- * `**word**` into bold text as you finish it. A rule reports *offsets* rather
+ * These fire the moment the closing delimiter is typed, so `**word**` becomes
+ * bold text as you finish it rather than on a later pass. A rule reports
+ * *offsets* rather
  * than replacement text, so the editor can strip the delimiters and apply the
  * mark while leaving any formatting already inside the span intact.
  */

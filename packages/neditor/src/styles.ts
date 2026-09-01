@@ -137,7 +137,7 @@ export const NEDITOR_STYLES = `
   pointer-events: none;
 }
 
-/* Notion only nudges you with the command hint on the block you are in. */
+/* The command hint only nudges you on the block you are in. */
 .neditor-block[data-block-type='paragraph'] .neditor-block__content:empty::before {
   opacity: 0;
   transition: opacity 80ms ease;

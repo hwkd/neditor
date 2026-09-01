@@ -3,7 +3,7 @@ import type { BlockType } from '../model/document.ts';
 /**
  * Markdown input rules.
  *
- * Notion converts a prefix into a block type the moment you type the trailing
+ * A prefix becomes a block type the moment you type the trailing
  * space (`# ` becomes a heading). The rule set is data, not control flow, so
  * new shortcuts are one array entry.
  */

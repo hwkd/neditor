@@ -2442,7 +2442,7 @@ export class NEditor {
     this.#emitChange();
   };
 
-  /** Block-level Markdown shortcuts. Only from a plain paragraph, as in Notion. */
+  /** Block-level Markdown shortcuts. Only from a plain paragraph. */
   #tryBlockRule(block: Block, beforeCaret: string): boolean {
     if (block.type !== 'paragraph') {
       return false;
@@ -3140,7 +3140,7 @@ export class NEditor {
   }
 
   #backspaceAtStart(block: Block): void {
-    // Outdent before any destructive edit, matching Notion.
+    // Outdent before any destructive edit.
     if (block.depth > 0) {
       this.#commit(indentBlock(this.#blocks, block.id, -1));
       this.focus(block.id, 0);

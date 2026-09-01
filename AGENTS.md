@@ -28,14 +28,14 @@ release. Add a tool name to select part of the graph. For example, run
 
 # neditor
 
-A monorepo for reverse-engineering Notion's editor into a reusable, framework-free package.
+A monorepo for an independently built, Notion-like block editor, packaged as a reusable, framework-free library.
 
 - `packages/neditor` — `@neditor/core`. Vanilla TypeScript, compiled to vanilla JS. **Never add a framework dependency here**, and keep `dependencies` empty: the package must stay drop-in for any web app.
 - `apps/web` — Astro 7 site that consumes the package and serves as the dev harness.
 
 ## Conventions
 
-- The document model in `src/model/document.ts` is a **flat, ordered block list**, mirroring how Notion stores pages. Nesting is the numeric `depth` field, not a tree. Structural edits are pure functions returning new arrays — keep them that way, it is what will make undo/redo cheap.
+- The document model in `src/model/document.ts` is a **flat, ordered block list**. Nesting is the numeric `depth` field, not a tree. Structural edits are pure functions returning new arrays — keep them that way, it is what will make undo/redo cheap.
 - The renderer **reconciles**; it does not re-render. Writing `textContent` on every keystroke destroys the caret, so `#updateView` only touches the DOM when it has genuinely drifted from the model. Text-only edits update the model and deliberately skip a render.
 - Text is a list of **runs** (`model/rich-text.ts`), not a string: formatting is interval arithmetic over character offsets, never DOM surgery. Every operation there is pure, offset-based, and ends in `normalizeRuns`, so structurally equal content is deeply equal. Nothing in that module may touch the DOM — that translation lives in `view/rich-dom.ts`.
 - Typing is **DOM-first**: the browser edits the contenteditable and `#handleInput` reads it back with `parseRichText`. That is what keeps IME, autocorrect and spellcheck working, and it is why the renderer must be told (`syncFromDom`) that the DOM is already ahead of the last render. Formatting commands go the other way — model first, then re-render and restore the selection by offset.

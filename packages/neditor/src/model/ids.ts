@@ -1,7 +1,7 @@
 /**
  * Block identity.
  *
- * Notion assigns every block a stable UUID that survives moves, edits and
+ * Every block carries a stable id that survives moves, edits and
  * collaborative merges. We mirror that: ids are opaque, generated once, and
  * never derived from position or content.
  */

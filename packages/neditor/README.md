@@ -347,14 +347,14 @@ yourself: `createTableRows`, `tableInsertRow`, `tableDeleteRow`,
 
 ## Document format
 
-A document is a flat, ordered list of blocks. Notion stores pages the same way —
-a table of blocks rather than a nested tree — so reordering and indenting never
-rewrite a subtree. Nesting is the numeric `depth` field.
+A document is a flat, ordered list of blocks — a table of blocks rather than a
+nested tree — so reordering and indenting never rewrite a subtree. Nesting is the
+numeric `depth` field.
 
 A block's text is a list of _runs_: slices of text carrying marks and an optional
-link. This is also Notion's shape, and it is what makes formatting interval
-arithmetic (split at two offsets, flip a flag) instead of DOM surgery over
-partially overlapping `<strong>`/`<em>` elements.
+link. That is what makes formatting interval arithmetic (split at two offsets,
+flip a flag) instead of DOM surgery over partially overlapping
+`<strong>`/`<em>` elements.
 
 ```json
 {
@@ -513,3 +513,12 @@ Known gaps, deliberately out of scope for 0.1:
   Markdown shortcuts do not fire on composed text.
 - **Empty paragraphs are dropped by the Markdown round trip.** Markdown has no
   way to express one; the HTML path keeps them.
+
+## License
+
+MIT.
+
+Notion is a trademark of Notion Labs, Inc. This project is an independent
+implementation, is not affiliated with, endorsed by, or derived from Notion
+Labs, Inc., and "Notion-like" is used only to describe the style of editor it
+implements.

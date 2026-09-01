@@ -20,7 +20,7 @@ import { matchInlineRule } from './inline-rules.ts';
  * files and other editors, so plain text is parsed rather than dropped in
  * verbatim. Each line becomes a block: predictable, and the same rule a reader
  * can hold in their head. Soft-wrapped prose therefore arrives as several
- * paragraphs, which is also what Notion does.
+ * paragraphs.
  */
 
 /** Line prefixes, longest-first so `###` is not read as `#`. */
