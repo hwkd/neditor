@@ -237,6 +237,17 @@ describe('read-only', () => {
     expect(cells.every((cell) => cell.contentEditable === 'false')).toBe(true);
   });
 
+  test('an editable to-do checkbox toggles the document', () => {
+    // The read-only test below asserts `checked === false` after a click, which
+    // on its own cannot tell "read-only blocked the write" from "checkboxes
+    // never worked at all". This is the positive half that gives it meaning.
+    const editor = mount([block({ type: 'todo', content: [{ text: 'task' }], checked: false })]);
+
+    editor.element.querySelector<HTMLElement>('.neditor-block__checkbox')?.click();
+
+    expect(editor.getDocument().blocks[0]?.checked).toBe(true);
+  });
+
   test('a read-only to-do checkbox cannot change the document', () => {
     const editor = mount([block({ type: 'todo', content: [{ text: 'task' }], checked: false })], {
       editable: false,
@@ -616,16 +627,29 @@ describe('embedding', () => {
     );
   });
 
-  test('DOM checks are realm-agnostic, so an iframe mount still works', () => {
-    // instanceof compares against the script's own realm; a node from another
-    // document is a valid node that every such check would reject.
-    const foreign = { nodeType: 1, nodeName: 'DIV' };
-    const editor = mount([block({ content: [{ text: 'a' }] })]);
+  test('an event whose target is from another realm still resolves its block', () => {
+    // instanceof compares against the script's own realm, so a node from an
+    // iframe document is rejected by every such check even though it is valid.
+    // The duck-typed contract itself is pinned in util/dom.test.ts; this covers
+    // the editor actually routing one.
+    const editor = mount([block({ id: 'blk', content: [{ text: 'a' }] })]);
+    const host = hosts(editor)[0]!;
+    const event = new MouseEvent('mousedown', { bubbles: true });
 
-    expect(() =>
-      editor.element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })),
-    ).not.toThrow();
-    expect(foreign.nodeType).toBe(1);
+    // A real node, but presented the way a foreign one arrives: no shared
+    // constructor, only the node interface.
+    Object.defineProperty(event, 'target', {
+      value: {
+        nodeType: 1,
+        nodeName: 'DIV',
+        parentElement: host,
+        closest: (s: string) => host.closest(s),
+      },
+      configurable: true,
+    });
+
+    expect(() => editor.element.dispatchEvent(event)).not.toThrow();
+    expect(editor.getDocument().blocks[0]?.id).toBe('blk');
   });
 });
 
@@ -718,5 +742,78 @@ describe('touch', () => {
 
     expect(editor.element.dataset.dragging).toBeUndefined();
     expect(editor.element.querySelector<HTMLElement>('.neditor-drop-indicator')?.hidden).toBe(true);
+  });
+});
+
+describe('public API methods that had no coverage', () => {
+  test('getMarkdown serializes the live document', () => {
+    const editor = mount([
+      block({ type: 'heading1', content: [{ text: 'Title' }] }),
+      block({ content: [{ text: 'bold', marks: ['bold'] }] }),
+      block({ type: 'bulleted_list', content: [{ text: 'one' }] }),
+    ]);
+
+    // The documented export path: a regression returning empty or truncated
+    // Markdown would silently produce empty files for every consumer.
+    expect(editor.getMarkdown()).toBe('# Title\n\n**bold**\n\n- one');
+  });
+
+  test('getMarkdown reflects an edit rather than the mount-time document', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'before' }] })]);
+
+    editor.setDocument({
+      blocks: [{ id: 'a', type: 'paragraph', depth: 0, content: [{ text: 'after' }] }],
+    });
+
+    expect(editor.getMarkdown()).toBe('after');
+  });
+
+  test('setCalloutIcon stores one grapheme, not one code point', () => {
+    const editor = mount([block({ id: 'c', type: 'callout', content: [{ text: 'note' }] })]);
+
+    // U+26A0 plus a variation selector. Indexing or spreading keeps only the
+    // first half and renders as a different glyph.
+    editor.setCalloutIcon('c', '⚠️');
+
+    expect(editor.getDocument().blocks[0]?.icon).toBe('⚠️');
+  });
+
+  test('setCalloutIcon takes only the first grapheme of a longer string', () => {
+    const editor = mount([block({ id: 'c', type: 'callout', content: [{ text: 'note' }] })]);
+
+    editor.setCalloutIcon('c', 'AB');
+
+    expect(editor.getDocument().blocks[0]?.icon).toBe('A');
+  });
+
+  test('focus(id, offset) places the caret at that offset', () => {
+    const editor = mount([
+      block({ id: 'a', content: [{ text: 'first' }] }),
+      block({ id: 'b', content: [{ text: 'second' }] }),
+    ]);
+
+    editor.focus('b', 3);
+
+    const state = editor.getSelectionState();
+    expect(state?.blockId).toBe('b');
+    expect(state?.range.start).toBe(3);
+  });
+
+  test('focusRange selects a span rather than collapsing', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'hello world' }] })]);
+
+    editor.focusRange('a', 6, 11);
+
+    const state = editor.getSelectionState();
+    expect(state?.blockId).toBe('a');
+    expect(state?.range).toEqual({ start: 6, end: 11 });
+  });
+
+  test('focusRange clamps past the end of the content', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'abc' }] })]);
+
+    editor.focusRange('a', 1, 99);
+
+    expect(editor.getSelectionState()?.range.end).toBe(3);
   });
 });
