@@ -133,7 +133,7 @@ describe('slash menu commands', () => {
   });
 
   test('the menu renders and filters the labels it was constructed with', () => {
-    const hooks = { onSelect: () => {}, onDismiss: () => {} };
+    const hooks = { onSelect: () => {}, onDismiss: () => {}, onActiveChange: () => {} };
     const menu = new SlashMenu(document, hooks, frenchLabels());
 
     menu.setQuery('titre');

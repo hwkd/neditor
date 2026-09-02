@@ -84,6 +84,15 @@ export function filterCommands(
 export interface SlashMenuHooks {
   onSelect(command: SlashCommand): void;
   onDismiss(): void;
+  /**
+   * The highlighted option changed, so `aria-activedescendant` is now stale.
+   *
+   * The menu is a portal and the combobox wiring lives on the block being
+   * typed in, so the menu cannot fix the attribute itself — and it is the only
+   * one that knows the highlight moved. Arrow keys never reach the editor's
+   * own key handling, and a mouse moving down the list reaches nothing at all.
+   */
+  onActiveChange(): void;
 }
 
 export class SlashMenu {
@@ -275,6 +284,12 @@ export class SlashMenu {
     if (this.#anchor && this.#open) {
       positionPortal(this.#element, this.#anchor, { prefer: 'below' });
     }
+
+    // Every path that moves the highlight ends here — opening, filtering, the
+    // arrow keys, a mouse crossing an item — so this is the one place that can
+    // promise the announced option is the highlighted one. The ids exist by
+    // now, which is why it is the last thing the render does.
+    this.#hooks.onActiveChange();
   }
 
   /**

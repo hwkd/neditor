@@ -156,6 +156,17 @@ export class Renderer {
 
       host.setAttribute('aria-readonly', String(!this.#editable));
     }
+
+    // A control that cannot act is not an offer. Both image buttons open a
+    // popover the editor refuses to open while read-only, so left enabled they
+    // are tab stops that answer with nothing.
+    if (view.root.dataset.blockType === 'image') {
+      for (const control of view.root.querySelectorAll<HTMLButtonElement>(
+        '.neditor-image__trigger, .neditor-image__placeholder',
+      )) {
+        control.disabled = !this.#editable;
+      }
+    }
   }
 
   /** Every editable host a view owns: its content, or all of a table's cells. */
@@ -196,11 +207,18 @@ export class Renderer {
     return this.#views.get(id);
   }
 
-  /** Resolves the block id that owns a DOM node, if any. */
+  /**
+   * Resolves the block id that owns a DOM node, if any.
+   *
+   * Scoped to this renderer's root. `data-block-id` is an ordinary attribute
+   * that the embedding page is free to use for its own purposes, and a node
+   * from outside the editor is not ours whatever it happens to carry.
+   */
   blockIdFromNode(node: Node | null): string | undefined {
     const element = asElement(node);
     const host = element?.closest<HTMLElement>('[data-block-id]');
-    return host?.dataset.blockId;
+
+    return host && this.#root.contains(host) ? host.dataset.blockId : undefined;
   }
 
   render(blocks: readonly Block[]): void {
@@ -332,24 +350,35 @@ export class Renderer {
     figure.className = 'neditor-image';
 
     if (block.src) {
-      // Wrapped in a button so the picture is reachable and operable by
-      // keyboard: a bare <img> with a click listener cannot be focused, which
-      // left alt text impossible to correct without a mouse.
-      const trigger = doc.createElement('button');
-      trigger.type = 'button';
-      trigger.className = 'neditor-image__trigger';
-      trigger.setAttribute('aria-label', this.#labels.imageEdit);
+      // The picture and the control that edits it are two separate things, and
+      // a <button> wrapped around an <img> can only be one of them: `button`
+      // makes its children presentational, and an author `aria-label` beats
+      // name-from-content — so the alt text was collected, stored, rendered,
+      // and then never announced to anybody. The image is a sibling of the
+      // trigger instead, which is laid over it so the whole picture is still
+      // the click target a mouse expects.
+      const frame = doc.createElement('div');
+      frame.className = 'neditor-image__frame';
 
       const image = doc.createElement('img');
       image.className = 'neditor-image__img';
       image.src = block.src;
       image.alt = block.alt ?? '';
-      trigger.append(image);
+      frame.append(image);
 
+      // Still a button, and still focusable: a bare <img> with a click
+      // listener cannot be reached at all, which left alt text impossible to
+      // correct without a mouse.
+      const trigger = doc.createElement('button');
+      trigger.type = 'button';
+      trigger.className = 'neditor-image__trigger';
+      trigger.setAttribute('aria-label', this.#labels.imageEdit);
       trigger.addEventListener('click', () => {
         this.#hooks.onEditImage(block.id, trigger);
       });
-      figure.append(trigger);
+      frame.append(trigger);
+
+      figure.append(frame);
     } else {
       // Without a source there is nothing to show, so offer the way to add one.
       const placeholder = doc.createElement('button');

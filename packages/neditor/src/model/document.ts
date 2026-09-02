@@ -2,7 +2,13 @@ import { sanitizeImageUrl } from '../util/url.ts';
 import { createBlockId } from './ids.ts';
 import type { Mark, RichText, TextRun } from './rich-text.ts';
 import type { TableRows } from './table.ts';
-import { cloneTableRows, createTableRows, normalizeTableRows, tableSize } from './table.ts';
+import {
+  cloneTableRows,
+  createTableRows,
+  normalizeTableRows,
+  tableSetCell,
+  tableSize,
+} from './table.ts';
 import {
   cloneRichText,
   isRichEmpty,
@@ -211,23 +217,83 @@ export function visibleBlocks(blocks: readonly Block[]): Block[] {
  *
  * A collapsed toggle's children are invisible, so any operation on the toggle —
  * move, delete, copy — has to carry them along or they are silently orphaned.
+ *
+ * What matters is which selected block does the hiding, not whether a block
+ * happens to be hidden by something else. Testing descendants against the
+ * document-wide hidden set instead pulls a grandchild out from under a
+ * collapsed toggle that is *not* selected: select an expanded toggle holding a
+ * collapsed one and the set became {outer, grandchild}, so deleting it took a
+ * block the user could neither see nor select and left the collapsed toggle
+ * behind, empty.
+ *
+ * A collapsed toggle hides its whole contiguous run, so one pass is enough —
+ * a toggle nested inside another is already covered by the outer one's run.
  */
 export function withHiddenDescendants(
   blocks: readonly Block[],
   ids: Iterable<string>,
 ): Set<string> {
   const out = new Set(ids);
-  const hidden = hiddenBlockIds(blocks);
 
   for (const id of [...out]) {
+    const block = findBlock(blocks, id);
+
+    if (block?.type !== 'toggle' || block.collapsed !== true) {
+      continue;
+    }
+
     for (const child of descendantsOf(blocks, id)) {
-      if (hidden.has(child)) {
-        out.add(child);
-      }
+      out.add(child);
     }
   }
 
   return out;
+}
+
+/**
+ * Moves a selection one *visible* slot up or down.
+ *
+ * The step is measured in visible blocks rather than array entries, because
+ * those are two different orders. A collapsed toggle occupies one slot however
+ * many blocks it hides: what moves carries its hidden children, and so does the
+ * block it steps over. Stepping in raw array coordinates instead swaps a
+ * collapsed toggle with its own first child — which then pops out as a
+ * top-level block — or drops a neighbour into the gap between a toggle and the
+ * children it hides, where the next depth clamp adopts it.
+ */
+export function moveVisibleBlocks(
+  blocks: readonly Block[],
+  ids: ReadonlySet<string>,
+  direction: 1 | -1,
+): Block[] {
+  const moving = withHiddenDescendants(blocks, ids);
+  const visible = visibleBlocks(blocks);
+  const selected = visible.filter((block) => moving.has(block.id));
+  const first = selected[0];
+  const last = selected.at(-1);
+
+  if (!first || !last) {
+    return [...blocks];
+  }
+
+  const from = findBlockIndex(visible, first.id);
+  const to = findBlockIndex(visible, last.id);
+
+  if (from === -1 || to === -1) {
+    return [...blocks];
+  }
+
+  // Nothing to step over: already against the edge of the document.
+  if (!visible[direction === -1 ? from - 1 : to + 1]) {
+    return [...blocks];
+  }
+
+  // The landing gap, in full-document coordinates. Going up that is the slot
+  // the block above occupies; going down it is the slot two below, which is the
+  // first position past the stepped-over block *and* everything it hides.
+  const landing = direction === -1 ? visible[from - 1] : visible[to + 2];
+
+  return moveBlocks(blocks, moving, landing ? findBlockIndex(blocks, landing.id) : blocks.length);
 }
 
 /** Plain-text projection of a block, for measuring and for input rules. */
@@ -457,11 +523,22 @@ export function setBlockType(blocks: readonly Block[], id: string, type: BlockTy
 
     if (type === 'table') {
       next.rows = block.rows ? cloneTableRows(block.rows) : createTableRows();
+
+      // A table draws its rows and nothing else, so text carried in from the
+      // old type would disappear from the page while still sitting in the
+      // model — invisible to the reader, and dropped by `toMarkdown` and
+      // `blocksToHtml` alike. It moves into the first cell instead, which is
+      // also where `focus(id)` puts the caret.
+      if (!block.rows) {
+        next.rows = tableSetCell(next.rows, 0, 0, block.content);
+      }
     } else {
       delete next.rows;
     }
 
-    if (isVoidType(type)) {
+    // `content` is the whole payload of a text block, and none of a grid's or a
+    // divider's: leaving text there is how it goes missing.
+    if (isVoidType(type) || isTableType(type)) {
       next.content = [];
     } else if (type === 'code' && CODE_BLOCK_STRIPS_MARKS) {
       // A code block is uniformly monospace, so inline marks would be noise.
@@ -586,6 +663,27 @@ export function normalizeDepths(blocks: readonly Block[]): Block[] {
 
     return depth === block.depth ? block : { ...block, depth };
   });
+}
+
+/**
+ * Whether two block arrays are the same document.
+ *
+ * Every operation in this module returns a *fresh* array even when it changed
+ * nothing — `moveBlock` against the top of the document, a drag dropped back
+ * into its own gap, `indentBlock` at depth 0 — so the array's own identity
+ * proves nothing at all. The blocks' identities do: an untouched block is
+ * reused by reference (`normalizeDepths` included), so the same objects, in the
+ * same order, in an array of the same length is by construction the same
+ * document. That is one pointer compare per block, cheap enough to run before
+ * every commit, which is where it belongs: a caller that cannot tell a no-op
+ * from an edit records undo history for keystrokes that did nothing.
+ *
+ * It is deliberately conservative in the other direction. A rebuilt-but-equal
+ * block counts as a change, because proving deep equality costs more than the
+ * spurious history entry it would save.
+ */
+export function sameBlocks(a: readonly Block[], b: readonly Block[]): boolean {
+  return a === b || (a.length === b.length && a.every((block, index) => block === b[index]));
 }
 
 /** Ids from `fromId` to `toId` inclusive, in document order. */

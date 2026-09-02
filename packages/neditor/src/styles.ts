@@ -340,14 +340,25 @@ export const NEDITOR_STYLES = `
   margin: 0;
 }
 
-.neditor-image__trigger {
+/* Positions the trigger over the picture rather than around it. */
+.neditor-image__frame {
+  position: relative;
   display: block;
-  width: 100%;
+}
+
+.neditor-image__trigger {
+  position: absolute;
+  inset: 0;
   padding: 0;
   border: 0;
   border-radius: 4px;
   background: none;
   cursor: pointer;
+}
+
+.neditor-image__trigger:disabled,
+.neditor-image__placeholder:disabled {
+  cursor: default;
 }
 
 .neditor-image__img {

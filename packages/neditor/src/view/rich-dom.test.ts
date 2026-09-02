@@ -58,6 +58,22 @@ describe('render', () => {
   test('empty content renders nothing, so the placeholder still matches', () => {
     expect(render([])).toBe('');
   });
+
+  test('a trailing newline gets a <br>, or it has no line box at all', () => {
+    // Under `white-space: pre-wrap` the last newline ends the last line and
+    // there is nothing after it to fill another one — the block does not grow
+    // and the caret has nowhere to sit, so the next character lands in front of
+    // the break. The <br> is what gives that empty last line a box.
+    expect(render([{ text: 'one\n' }])).toBe('one\n<br>');
+  });
+
+  test('the filler goes outside the marks, not inside them', () => {
+    expect(render([{ text: 'one\n', marks: ['bold'] }])).toBe('<strong>one\n</strong><br>');
+  });
+
+  test('a newline anywhere else needs no filler', () => {
+    expect(render([{ text: 'one\ntwo' }])).toBe('one\ntwo');
+  });
 });
 
 describe('round trip', () => {
@@ -75,8 +91,26 @@ describe('round trip', () => {
       ],
     ],
     ['newlines', [{ text: 'line one\nline two' }]],
+    // The rendered <br> after it is filler, and `parseRichText` already reads a
+    // trailing <br> back as nothing — so the newline must not be counted twice.
+    ['a trailing newline', [{ text: 'line one\n' }]],
+    ['a trailing newline under a mark', [{ text: 'line one\n', marks: ['bold'] }]],
   ])('%s survives render then parse', (_name, content) => {
     expect(roundTrip(content)).toEqual(content);
+  });
+
+  test('the clipboard does not double a trailing newline either', () => {
+    const blocks = blocksFromHtml(
+      document,
+      blocksToHtml(document, [
+        { id: 'a', type: 'paragraph', depth: 0, content: [{ text: 'one\n' }] },
+        { id: 'b', type: 'paragraph', depth: 0, content: [{ text: 'two' }] },
+      ]),
+    );
+
+    // The <br> sits inside the <p>, so the following paragraph must not turn it
+    // into content: a block element is the root each block's runs are read from.
+    expect(blocks.map((item) => richToPlainText(item.content))).toEqual(['one\n', 'two']);
   });
 });
 

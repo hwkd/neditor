@@ -68,7 +68,7 @@ page over a CDN. Call `destroy()` when the host component unmounts.
 | `onError`         | `(error) => void`             | `console.error`      | Called when one of your listeners throws.                     |
 | `label`           | `string`                      | `'Rich text editor'` | Accessible name. Ignored if the element already has one.      |
 | `labels`          | `Partial<NEditorLabels>`      | English              | Every user-visible string, including accessible names.        |
-| `portalContainer` | `HTMLElement \| ShadowRoot`   | `document.body`      | Where toolbars and popovers are appended.                     |
+| `portalContainer` | `HTMLElement \| ShadowRoot`   | the mount's root     | Where toolbars and popovers are appended.                     |
 | `styleNonce`      | `string`                      | —                    | `nonce` for the injected `<style>`, for a strict `style-src`. |
 
 ## API
@@ -91,12 +91,12 @@ editor.clearHistory(): void
 
 editor.getSelectedBlocks(): string[]     // block-level selection, in document order
 editor.selectBlocks(ids): void          // pass [] to return to text editing
-editor.clearBlockSelection(): void
+editor.clearBlockSelection(): void      // same thing: the caret comes back
 
 editor.setBlockType(id, type): void
 editor.toggleTodo(id): void
-editor.focus(id?, offset?): void
-editor.focusRange(id, start, end): void
+editor.focus(id?, offset?): boolean      // false when nothing there can hold a caret
+editor.focusRange(id, start, end, cell?): boolean
 editor.setEditable(editable): void
 editor.destroy(): void
 
@@ -106,6 +106,19 @@ editor.on('selection', (state) => {})   // null when the caret leaves the editor
 editor.on('history', ({ canUndo, canRedo }) => {})
 editor.on('blockselection', ({ ids }) => {})
 ```
+
+`editable: false` is a hard contract: the document does not change. The controls
+the renderer draws stay reachable — a keyboard reader has to be able to move
+through them — but a read-only to-do checkbox, toggle chevron or image button
+does nothing rather than firing a `change` your persistence layer would write
+back as the author's revision. The image controls say so, too: they are
+`disabled`, not silently inert.
+
+`destroy()` is final and idempotent. It unhooks every listener and takes the
+views out of the page, and afterwards `setDocument`, `setEditable` and the edit
+methods do nothing — the instance often outlives the mount point by a callback
+or two, and rendering into a root that has no listeners left produces content
+nothing can edit, style, or remove.
 
 Every getter returns a copy, so callers cannot mutate editor state by reference.
 `getSelectionState()` gives you what you need to drive your own toolbar:
@@ -140,6 +153,14 @@ than clearing what is already bold.
 Clicking a link opens the link editor; `⌘`/`Ctrl`-click follows it. In read-only
 mode links navigate normally.
 
+The link editor, the callout icon picker and the image popover all take focus,
+and all three close on a pointer that lands anywhere outside them — leaving
+focus wherever that pointer put it, rather than dragging the caret back. Closing
+one from the inside does restore the range it was opened for, which is why
+`Escape` only dismisses the popover the current block (or table cell) opened:
+pressed anywhere else it does its usual job of stepping up from text to the
+block.
+
 ### Inline Markdown
 
 These convert the moment you type the closing delimiter:
@@ -152,6 +173,13 @@ Typing these at the start of a paragraph converts the block:
 
 `# ` `## ` `### ` `- ` `* ` `1. ` `> ` `[] ` ` ``` ` `---`
 
+Both sets fire on **typing only**. A rule reads the text before the caret and
+takes it as something you have just finished typing, which a deletion leaves
+there without anyone having typed it: backspacing the word after a `# ` would
+otherwise convert the block and swallow the prefix you were clearing. The slash
+menu is the exception once it is open — it tracks the text either way, so
+backspacing narrows the query and deleting the `/` closes the menu.
+
 ## Block selection and drag handles
 
 Hovering a block reveals a gutter to its left: **+** inserts a paragraph below,
@@ -161,10 +189,14 @@ existing selection moves the whole selection.
 
 On touch there is no hover to reveal any of this, so a tap on a block shows the
 gutter for it and a **long press** (500 ms, allowing 10 px of drift) selects the
-block — drifting further is a scroll, not a press. The handle sets
+block — drifting further is a scroll, not a press. The gutter shown that way
+stays until the next tap moves it, because a touch pointer ends by firing the
+same `pointerleave` a mouse sends on its way out. The handle sets
 `touch-action: none` so a drag on it is not stolen for scrolling, and the drag
 takes pointer capture, so a finger that leaves the window still ends the drag
-rather than leaving it live.
+rather than leaving it live. Pointer capture also aims the click that follows a
+drag at the handle; that click is treated as the tail of the drag, not a new
+one, so dropping a multi-block selection does not collapse it.
 
 The long press was verified with synthetic pointer events, not on hardware; on a
 real device it shares the gesture with the browser's own long-press text
@@ -191,12 +223,20 @@ With blocks selected:
 | `⌘`/`Ctrl` + `D`               | Duplicate them.                           |
 | `⌘`/`Ctrl` + `C` / `X`         | Copy or cut, as Markdown and HTML.        |
 | Any character                  | Replace them with a paragraph holding it. |
-| `Enter`                        | Drop back into the text of the last one.  |
+| `Enter`                        | Drop back into the text of the last one.¹ |
 | `Escape`                       | Back to text editing.                     |
 
-The two modes are mutually exclusive: entering block selection takes the caret out
-of the document, so the format toolbar hides and keystrokes address blocks rather
-than characters.
+¹ The last one that has text: a divider has no caret to take, so `Enter` walks
+back through the selection and, if none of it can hold one, keeps the selection.
+
+The two modes are mutually exclusive, in both directions: entering block selection
+takes the caret out of the document, so the format toolbar hides and keystrokes
+address blocks rather than characters — and placing a caret leaves block
+selection, so `focus()`, `focusRange()` and `setBlockType()` end it rather than
+leaving an invisible selection to swallow the next key. Both return `false` when
+there is nowhere to put the caret. An empty selection is not a mode: deselecting
+the last block returns to the text rather than holding the root focused with
+nothing selected.
 
 Depth is re-clamped after every structural change, so a block can never end up
 indented under nothing — dragging a nested item to the top pulls it to the root.
@@ -227,7 +267,11 @@ keyboard trap. `Shift`+`Tab` at the outermost level always leaves. `Escape`
 twice — once to select the block, once more — also releases focus.
 
 **Announcements.** A polite live region reports block selection, deletion,
-block-type changes, toggle state, table row and column edits, and undo/redo.
+block-type changes, toggle state, table row and column edits, and undo/redo. The
+command menu is a combobox on the block being typed in, and its
+`aria-activedescendant` follows the highlight on every path that moves it —
+arrow keys, filtering, and the mouse crossing an item — so the option announced
+is always the one `Enter` will commit.
 Selected blocks carry `aria-selected` and a border, not colour alone, and the
 stylesheet has a `forced-colors` block for Windows High Contrast.
 
@@ -259,11 +303,17 @@ number is announced as text instead of as list structure.
 menu and trackpad gestures is routed into the same history rather than letting
 the browser mutate the DOM behind the model's back.
 
-Undo works in **runs**, not keystrokes: a burst of typing in one block collapses
-into a single step. A run ends when you pause for longer than 600ms, move the
-caret, click, or switch between inserting and deleting — so typing a sentence and
-then correcting a word stay two separate undos. Anything structural (Enter, a
-block type change, indent, paste, applying a mark) is always its own step.
+Undo works in **runs**, not keystrokes: a burst of typing in one editing host
+collapses into a single step. A run ends when you pause for longer than 600ms,
+move the caret, click, switch between inserting and deleting, or move to another
+table cell — so typing a sentence and then correcting a word stay two separate
+undos. Anything structural (Enter, a block type change, indent, paste, applying a
+mark) is always its own step.
+
+A keystroke that changes nothing takes no step and emits no `change`. Pressing
+`⌘⇧↑` against the top of the document, or dropping a dragged block back in its
+own gap, leaves the history exactly as it was — otherwise holding the key down
+would push out the edits you actually wanted back.
 
 Each step restores the selection that was live when it was made, so undoing a
 format puts the same text back under the cursor, and undoing a split puts the
@@ -287,21 +337,29 @@ one pointer per block and there is no inverse operation to get wrong.
 
 ## Keyboard
 
-| Key                            | Action                                                 |
-| ------------------------------ | ------------------------------------------------------ |
-| `Enter`                        | Split the block. Lists and to-dos continue themselves. |
-| `Enter` on an empty list item  | Leave the list.                                        |
-| `Shift` + `Enter`              | Soft line break inside the block.                      |
-| `Backspace` at the start       | Outdent, then revert to paragraph, then merge upward.  |
-| `Delete` at the end            | Merge the next block in.                               |
-| `Tab` / `Shift` + `Tab`        | Indent / outdent.                                      |
-| `↑` / `↓` at a boundary        | Move to the previous / next block.                     |
-| `⌘`/`Ctrl` + `Shift` + `↑`/`↓` | Move the block itself.                                 |
-| `⌘`/`Ctrl` + `Enter`           | Toggle a to-do.                                        |
-| `⌘`/`Ctrl` + `Z`               | Undo.                                                  |
-| `⌘⇧Z` / `Ctrl` + `Y`           | Redo.                                                  |
-| `Escape`                       | Step up from text to the block.                        |
-| `/`                            | Open the command menu.                                 |
+| Key                             | Action                                                   |
+| ------------------------------- | -------------------------------------------------------- |
+| `Enter`                         | Split the block. Lists and to-dos continue themselves.   |
+| `Enter` on an empty list item   | Leave the list.                                          |
+| `Shift` + `Enter`               | Soft line break inside the block.                        |
+| `Backspace` at the start        | Outdent, then revert to paragraph, then merge upward.    |
+| `Backspace` in an image caption | Select the image. Reverting it would delete the picture. |
+| `Delete` at the end             | Merge the next block in.                                 |
+| `Tab` / `Shift` + `Tab`         | Indent / outdent.                                        |
+| `↑` / `↓` at a boundary         | Move to the previous / next block.                       |
+| `⌘`/`Ctrl` + `Shift` + `↑`/`↓`  | Move the block itself.                                   |
+| `⌘`/`Ctrl` + `Enter`            | Toggle a to-do.                                          |
+| `⌘`/`Ctrl` + `Z`                | Undo.                                                    |
+| `⌘⇧Z` / `Ctrl` + `Y`            | Redo.                                                    |
+| `Escape`                        | Step up from text to the block.                          |
+| `/`                             | Open the command menu.                                   |
+
+A line break at the very end of a block renders a trailing `<br>` alongside the
+newline. Under `white-space: pre-wrap` that last newline ends the line and has
+nothing after it to fill another, so without the filler the block did not grow
+and the next character landed in front of the break instead of after it. It is
+presentation only: the model holds one `\n`, and reading the DOM back — a paste,
+a `syncFromDom`, the clipboard — treats a trailing `<br>` as nothing.
 
 ## Block types
 
@@ -334,6 +392,11 @@ editor.setCalloutIcon(id, '⚠️');
 An **image** carries `src` and `alt`, and its `content` is the caption — ordinary
 rich text, so it can hold links and formatting. Clicking the image (or the
 placeholder on an empty one) opens a popover for the URL and the alt text.
+
+The picture is an `<img>` in its own right, with the button that edits it laid
+over it rather than wrapped around it: a `<button>` makes its children
+presentational and its own label beats name-from-content, so an `<img>` inside
+one is announced as neither an image nor its alt text.
 
 Sources are sanitized: `http`, `https`, site-relative paths, and base64
 `data:image/*` are accepted. `data:image/svg+xml` is deliberately refused — an
@@ -409,10 +472,19 @@ programmatically: `richFromPlainText`, `richSlice`, `richSplit`, `richConcat`,
 
 ## Copying and pasting
 
-Pasted content is **parsed, never inserted as markup**. `<script>`, `<style>` and
-`<iframe>` are dropped entirely, and only `http`, `https`, `mailto` and `tel`
-links survive — `javascript:` and `data:` hrefs are stripped while their text is
-kept.
+Content arriving from outside the editor is **parsed, never inserted as
+markup**. `<script>`, `<style>` and `<iframe>` are dropped entirely, and only
+`http`, `https`, `mailto` and `tel` links survive — `javascript:` and `data:`
+hrefs are stripped while their text is kept.
+
+That covers dragging as well as pasting. A native drop is cancelled and its
+payload re-entered through the same parser, because the browser's own default
+is to write the dragged fragment straight into a live editing host — and the
+editor would then read that fragment back as the block's own content, so
+nothing later would render it away. The cost is that dragging text _inside_ the
+editor copies rather than moves: the native move is one gesture, and refusing
+the drop refuses both halves of it. Use the gutter's **⠿** handle to move
+blocks.
 
 The same holds for documents loaded with `setDocument`: `normalizeDocument`
 sanitizes every link and image source, so a document written by another user is
@@ -438,6 +510,10 @@ Where the paste lands depends on its shape:
 - **Several blocks** splice into the document: the first merges into the block
   you are in, the last absorbs whatever followed the caret, and pasting into an
   empty block replaces it rather than leaving a blank line above.
+- A **table, image or divider** is spliced in whole rather than merged, because
+  only its text would survive the merge, and the text that followed the caret
+  gets a paragraph of its own rather than being parked in a field a divider or
+  a table never draws.
 - With **blocks selected**, the paste replaces them.
 
 Either way it is a single undo step.
@@ -497,9 +573,18 @@ touching the injected stylesheet:
 }
 ```
 
-The floating toolbar, slash menu and link editor render in `document.body` so
-they are never clipped. They carry the `.neditor-portal` class and read the same
-tokens, so set custom properties on both selectors if you override them globally.
+The floating toolbar, slash menu and link editor render outside the editor
+element so they are never clipped. They carry the `.neditor-portal` class and
+read the same tokens, so set custom properties on both selectors if you override
+them globally.
+
+They are appended to the mount point's own root node, which is `document.body`
+for an ordinary mount and the shadow root for an editor inside a custom element
+— a shadow tree does not inherit the document's stylesheets, so a portal in the
+body would render with none of this. Pass `portalContainer` to put them
+somewhere else (a modal `<dialog>` is promoted to the top layer and paints above
+any z-index, so pass the dialog itself); the stylesheet is injected into that
+tree as well as the editor's.
 
 The layout uses logical properties throughout, so `dir="rtl"` mirrors
 indentation, list markers, the quote bar and the drag handle correctly.

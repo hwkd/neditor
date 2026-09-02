@@ -22,12 +22,13 @@ import {
   isContinuingType,
   isRichEmpty,
   isVoidType,
-  moveBlock,
   moveBlocks,
+  moveVisibleBlocks,
   normalizeDepths,
   normalizeDocument,
   removeBlock,
   removeBlocks,
+  sameBlocks,
   sliceDocument,
   setBlockType,
   toMarkdown,
@@ -67,7 +68,7 @@ import {
   sortMarks,
 } from './model/rich-text.ts';
 import type { NEditorLabels } from './labels.ts';
-import { formatLabel, resolveLabels } from './labels.ts';
+import { formatLabel, pluralLabel, resolveLabels } from './labels.ts';
 import { injectStyles } from './styles.ts';
 import { FormatToolbar } from './ui/format-toolbar.ts';
 import { Gutter } from './ui/gutter.ts';
@@ -140,11 +141,55 @@ export interface NEditorOptions {
   styleNonce?: string;
 }
 
+/** Where a table cell sits, row-major, as `data-cell="row:column"` carries it. */
+interface CellCoords {
+  readonly row: number;
+  readonly column: number;
+}
+
+/**
+ * Where the floating UI belongs when the caller does not name a container.
+ *
+ * `document.body` is outside a shadow root, and a stylesheet injected into that
+ * root does not reach it: every menu, toolbar and popover would render with no
+ * tokens, no layout and no `position: fixed` at all. The mount point's own root
+ * node is the tree the editor was put into, which is the tree its floating UI
+ * has to live in too.
+ */
+function defaultPortalContainer(element: HTMLElement): HTMLElement | ShadowRoot {
+  const root = element.getRootNode();
+
+  // Duck-typed, not `instanceof ShadowRoot`: the editor is mounted into foreign
+  // documents on purpose and a realm check would reject a perfectly real one.
+  return 'host' in root ? (root as ShadowRoot) : element.ownerDocument.body;
+}
+
+/** True when two hosts are the same cell — or both are a block's own content. */
+function sameCell(a: CellCoords | undefined, b: CellCoords | undefined): boolean {
+  return a?.row === b?.row && a?.column === b?.column;
+}
+
 /** One editable host: a block's own content, or a single table cell. */
 interface ResolvedTarget {
   readonly block: Block;
   readonly content: HTMLElement;
-  readonly cell?: { row: number; column: number };
+  readonly cell?: CellCoords;
+}
+
+/**
+ * An open popover, described by the two questions anyone dismissing it asks.
+ *
+ * These are `role="dialog"` portals: they render outside the editor root and
+ * take focus away from it, so nothing in the editor's own event path can tell
+ * that the pointer landed elsewhere or that the caret is now in another block.
+ * Both answers live behind this shape so no call site has to guess.
+ */
+interface AnchoredPopover {
+  /** True when the popover was opened from that editing host. */
+  ownedBy(blockId: string, cell: CellCoords | undefined): boolean;
+  /** True when a node is inside the popover, so a gesture is not "outside". */
+  contains(node: Node | null): boolean;
+  close(restoreFocus: boolean): void;
 }
 
 /**
@@ -190,7 +235,7 @@ function applyTableCommand(
 }
 
 /** Reads the `row:column` a cell host carries, if it is one. */
-function parseCellCoords(host: HTMLElement): { row: number; column: number } | undefined {
+function parseCellCoords(host: HTMLElement): CellCoords | undefined {
   const parts = host.dataset.cell?.split(':').map(Number);
 
   if (!parts || parts.length !== 2 || !parts.every(Number.isInteger)) {
@@ -198,6 +243,28 @@ function parseCellCoords(host: HTMLElement): { row: number; column: number } | u
   }
 
   return { row: parts[0] ?? 0, column: parts[1] ?? 0 };
+}
+
+/**
+ * Flattens blocks into one run of rich text, one line each.
+ *
+ * A table cell holds text rather than structure, so pasted blocks collapse into
+ * it — but the marks and links come along, exactly as they do when a paragraph
+ * is pasted into any other host.
+ */
+function richFromBlocks(blocks: readonly Block[]): RichText {
+  const parts: RichText[] = [];
+
+  for (const block of blocks) {
+    if (parts.length > 0) {
+      parts.push(richFromPlainText('\n'));
+    }
+
+    // A table keeps its text in `rows`, so it has no runs of its own to carry.
+    parts.push(block.type === 'table' ? richFromPlainText(blockText(block)) : block.content);
+  }
+
+  return richConcat(...parts);
 }
 
 /** Formatting that applies to the current selection. */
@@ -242,24 +309,66 @@ const CARET_KEYS = new Set([
 ]);
 
 /**
- * Groups a burst of same-kind input in one block into a single undo step.
+ * What a run of typing is scoped to: one editable host, not merely one block.
+ *
+ * A table is one block with a host per cell, so keying a run by block id alone
+ * folds a correction in the last cell into the sentence typed in the first.
+ */
+function hostScope(id: string, cell?: CellCoords): string {
+  return cell ? `${id}:${cell.row}:${cell.column}` : id;
+}
+
+/**
+ * Groups a burst of same-kind input in one host into a single undo step.
  *
  * Typing folds with typing and deleting with deleting, but never across each
  * other, so typing a word and then correcting it stays two undo steps.
  */
-function inputRunKey(event: Event, blockId: string): string | null {
+function inputRunKey(event: Event, scope: string): string | null {
   const inputType = hasInputType(event) ? event.inputType : '';
 
   if (inputType.startsWith('insert')) {
-    return `insert:${blockId}`;
+    return `insert:${scope}`;
   }
 
   if (inputType.startsWith('delete')) {
-    return `delete:${blockId}`;
+    return `delete:${scope}`;
   }
 
   return null;
 }
+
+/**
+ * True when this input event added text rather than removing or reformatting it.
+ *
+ * An event that does not say what it did is not taken to be a deletion: a
+ * synthesized `input` and a realm without `InputEvent` both look like that, and
+ * refusing them would silently disable the Markdown shortcuts for either.
+ */
+function isInsertion(event: Event): boolean {
+  return !hasInputType(event) || event.inputType.startsWith('insert');
+}
+
+/**
+ * Input types that would write markup the editor never parsed.
+ *
+ * A drop or a paste hands the browser a fragment authored somewhere else — an
+ * `<iframe>`, a password form, a fixed overlay covering the page — and the
+ * browser's default is to put it straight into a live editing host. Worse, it
+ * then *persists*: `#syncFromDom` reads the host back as the block's own
+ * content, so the model agrees with the DOM and no later render removes it.
+ * Each of these has an editor-owned path that parses the payload instead, so
+ * reaching `beforeinput` at all means something slipped past one of them.
+ *
+ * `insertReplacementText` is deliberately absent: that is the spellchecker
+ * correcting a word, which is text the user's own document already held.
+ */
+const UNPARSED_INPUT_TYPES: ReadonlySet<string> = new Set([
+  'insertFromDrop',
+  'insertFromPaste',
+  'insertFromPasteAsQuotation',
+  'insertHTML',
+]);
 
 /** Single-letter shortcuts, all under the platform modifier. */
 const MARK_SHORTCUTS: Readonly<Record<string, Mark>> = {
@@ -278,6 +387,8 @@ const MARK_SHORTCUTS: Readonly<Record<string, Mark>> = {
 export class NEditor {
   readonly #root: HTMLElement;
   readonly #document: Document;
+  /** The tree the floating UI is appended to, which is not always the body. */
+  readonly #portalRoot: HTMLElement | ShadowRoot;
   readonly #renderer: Renderer;
   readonly #slashMenu: SlashMenu;
   readonly #toolbar: FormatToolbar;
@@ -306,7 +417,7 @@ export class NEditor {
     blockId: string;
     start: number;
     end: number;
-    cell?: { row: number; column: number };
+    cell?: CellCoords;
   } | null = null;
 
   /**
@@ -314,9 +425,15 @@ export class NEditor {
    *
    * Pressing ⌘B with nothing selected cannot change any existing character, so
    * the intent is parked here and applied to the next typed run. It is tied to
-   * an exact position: move the caret and it is discarded.
+   * an exact host and position: a table has one host per cell, so offset 0 of
+   * the header cell and offset 0 of the cell below it are different places.
    */
-  #pending: { blockId: string; offset: number; marks: Mark[] } | null = null;
+  #pending: {
+    blockId: string;
+    offset: number;
+    marks: Mark[];
+    cell?: CellCoords;
+  } | null = null;
 
   /**
    * The selection as it stood before the browser applied the current edit.
@@ -347,6 +464,14 @@ export class NEditor {
 
   /** True between pointerdown and pointerup anywhere, so drag-select can settle. */
   #pointerDown = false;
+
+  /**
+   * True while the next handle click is the tail of a drag, not a click.
+   *
+   * Armed when a drag ends and consumed by the handle's click hook. A drag and
+   * the click it produces are one gesture; only the drag is allowed to act.
+   */
+  #clickEndedDrag = false;
 
   /**
    * A resting touch that will become a block selection.
@@ -404,10 +529,18 @@ export class NEditor {
     this.#labels = resolveLabels(options.labels);
     this.#blocks = normalizeDocument(options.doc ?? createEmptyDocument()).blocks;
 
+    // Resolved before the styles, because the two can land in different trees:
+    // the blocks live where the editor was mounted, the floating UI wherever
+    // `portalContainer` says.
+    this.#portalRoot = options.portalContainer ?? defaultPortalContainer(element);
+
     if (options.injectStyles ?? true) {
       // Resolved from the mount point, so an editor inside a shadow root gets
       // its styles in that tree rather than a document head it cannot see.
       injectStyles(element, options.styleNonce);
+      // And again for the portals' tree. `injectStyles` is idempotent per root,
+      // so this is a no-op in the ordinary case where they are the same tree.
+      injectStyles(this.#portalRoot, options.styleNonce);
     }
 
     const theme = options.theme ?? 'auto';
@@ -532,6 +665,9 @@ export class NEditor {
         onDismiss: () => {
           this.#closeSlashMenu();
         },
+        onActiveChange: () => {
+          this.#describeSlashMenu();
+        },
       },
       this.#labels,
     );
@@ -565,8 +701,6 @@ export class NEditor {
       this.#labels,
     );
 
-    const portalRoot = options.portalContainer ?? this.#document.body;
-
     for (const portal of [
       this.#slashMenu,
       this.#toolbar,
@@ -576,7 +710,7 @@ export class NEditor {
       this.#tableToolbar,
     ]) {
       portal.setTheme(theme);
-      portalRoot.append(portal.element);
+      this.#portalRoot.append(portal.element);
     }
 
     if (options.onError) {
@@ -598,6 +732,7 @@ export class NEditor {
     this.#root.addEventListener('paste', this.#handlePaste);
     this.#root.addEventListener('copy', this.#handleCopy);
     this.#root.addEventListener('cut', this.#handleCopy);
+    this.#root.addEventListener('drop', this.#handleDrop);
     this.#root.addEventListener('pointerdown', this.#handleRootPointerDown);
     this.#root.addEventListener('pointerover', this.#handlePointerOver);
     this.#root.addEventListener('pointerleave', this.#handlePointerLeave);
@@ -635,6 +770,10 @@ export class NEditor {
    * the user cannot undo past content they never saw.
    */
   setDocument(doc: NEditorDocument, options: { silent?: boolean } = {}): void {
+    if (this.#destroyed) {
+      return;
+    }
+
     this.#blocks = normalizeDocument(doc).blocks;
     this.#pending = null;
     this.#clearBlockSelection();
@@ -754,7 +893,12 @@ export class NEditor {
         ? current.filter((existing) => existing !== mark)
         : sortMarks([...current, mark]);
 
-      this.#pending = { blockId: block.id, offset: range.start, marks };
+      this.#pending = {
+        blockId: block.id,
+        offset: range.start,
+        marks,
+        ...(target.cell ? { cell: target.cell } : {}),
+      };
       this.#toolbar.update({ marks, link: null });
       this.#emitter.emit('selection', this.getSelectionState());
       return;
@@ -812,35 +956,63 @@ export class NEditor {
     );
   }
 
-  /** Focuses a block, or the first editable one when no id is given. */
-  focus(id?: string, offset = 0): void {
+  /**
+   * Focuses a block, or the first editable one when no id is given.
+   *
+   * Returns false when there is nowhere to put a caret — an unknown id, a block
+   * inside a collapsed toggle, or a void one such as a divider. Silence was the
+   * bug: the caller went on believing the editor was back in text mode while it
+   * was in neither, and the next keystroke reached nothing at all.
+   */
+  focus(id?: string, offset = 0): boolean {
     const target = id ?? this.#visible().find((block) => !isVoidType(block.type))?.id;
 
     if (!target) {
-      return;
+      return false;
     }
 
     const view = this.#renderer.getView(target);
 
     if (!view?.content) {
-      return;
+      return false;
     }
+
+    // A caret and a block selection are the two modes, and they exclude each
+    // other: entering one leaves the other. Both at once routed the next
+    // printable key to the block selection, which replaced blocks the reader
+    // could no longer see were selected.
+    this.#clearBlockSelection();
 
     view.content.focus({ preventScroll: true });
     setCaretOffset(view.content, offset);
     this.#emitter.emit('focus', { blockId: target });
+
+    return true;
   }
 
-  /** Selects a range within a block. */
-  focusRange(id: string, start: number, end: number): void {
-    const view = this.#renderer.getView(id);
+  /**
+   * Selects a range within a block, or within one of its table cells.
+   *
+   * A table has one editable host per cell, so `cell` says which one the
+   * offsets belong to. Without it a table resolves to its first cell — the same
+   * place {@link focus} lands — which is only ever right for the header.
+   *
+   * Reports failure the same way {@link focus} does, and leaves block selection
+   * for the same reason.
+   */
+  focusRange(id: string, start: number, end: number, cell?: CellCoords): boolean {
+    const host = this.#hostFor(id, cell);
 
-    if (!view?.content) {
-      return;
+    if (!host) {
+      return false;
     }
 
-    view.content.focus({ preventScroll: true });
-    setSelectionRange(view.content, start, end);
+    this.#clearBlockSelection();
+
+    host.focus({ preventScroll: true });
+    setSelectionRange(host, start, end);
+
+    return true;
   }
 
   /** Converts a block to another type, the same edit the slash menu performs. */
@@ -854,7 +1026,7 @@ export class NEditor {
   toggleCollapsed(id: string): void {
     const block = findBlock(this.#blocks, id);
 
-    if (!block || block.type !== 'toggle') {
+    if (!block || block.type !== 'toggle' || !this.#canEdit()) {
       return;
     }
 
@@ -874,7 +1046,7 @@ export class NEditor {
     const block = findBlock(this.#blocks, id);
     const first = firstGrapheme(icon);
 
-    if (!block || block.type !== 'callout' || first === undefined) {
+    if (!block || block.type !== 'callout' || first === undefined || !this.#canEdit()) {
       return;
     }
 
@@ -884,7 +1056,7 @@ export class NEditor {
   toggleTodo(id: string): void {
     const block = findBlock(this.#blocks, id);
 
-    if (!block || block.type !== 'todo' || !this.#editable) {
+    if (!block || block.type !== 'todo' || !this.#canEdit()) {
       return;
     }
 
@@ -908,6 +1080,7 @@ export class NEditor {
     this.#root.removeEventListener('paste', this.#handlePaste);
     this.#root.removeEventListener('copy', this.#handleCopy);
     this.#root.removeEventListener('cut', this.#handleCopy);
+    this.#root.removeEventListener('drop', this.#handleDrop);
     this.#root.removeEventListener('pointerdown', this.#handleRootPointerDown);
     this.#root.removeEventListener('pointerover', this.#handlePointerOver);
     this.#root.removeEventListener('pointerleave', this.#handlePointerLeave);
@@ -935,7 +1108,35 @@ export class NEditor {
 
   /* ------------------------------------------------------------ internal -- */
 
+  /**
+   * True when a public entry point may still change the document.
+   *
+   * Two different reasons say no, and every mutating control owes both an
+   * answer. A read-only view must not be edited by the controls the renderer
+   * still draws — the to-do checkbox and the toggle chevron are focusable
+   * precisely so a keyboard reader can reach them, and reaching one is not
+   * permission to write: `editable: false` is the contract that this document
+   * does not change, and a `change` event a persistence layer writes back is
+   * the reader's copy overwriting the author's.
+   *
+   * A destroyed editor says no for the other reason: it has no listeners, no
+   * styles and no views left, so an edit would rebuild DOM that nothing can
+   * take away again.
+   */
+  #canEdit(): boolean {
+    return this.#editable && !this.#destroyed;
+  }
+
   #render(): void {
+    // `destroy()` is final. Rendering after it puts contenteditable hosts back
+    // into a root that has had every listener removed and its `neditor` class
+    // taken off, and the second `destroy()` returns early — so nothing could
+    // ever remove them. This is the one place views are built, so it is the
+    // one place that has to refuse.
+    if (this.#destroyed) {
+      return;
+    }
+
     // A collapsed toggle's children are not in the document the reader sees.
     this.#renderer.render(this.#visible());
 
@@ -958,13 +1159,16 @@ export class NEditor {
     this.#emitChange();
   }
 
-  /** Drops selected ids that the new document no longer contains. */
+  /** Drops selected ids the new document no longer shows. */
   #pruneBlockSelection(): void {
     if (this.#selected.size === 0) {
       return;
     }
 
-    const alive = new Set(this.#blocks.map((block) => block.id));
+    // Visible rather than merely alive: an edit that collapsed a toggle over
+    // these blocks has taken them off screen, and the selection may only ever
+    // hold anchors the reader can see.
+    const alive = new Set(this.#visible().map((block) => block.id));
     const kept = [...this.#selected].filter((id) => alive.has(id));
 
     if (kept.length === this.#selected.size) {
@@ -991,9 +1195,31 @@ export class NEditor {
     }
   }
 
-  /** Applies a new block array as a single undoable edit. */
-  #commit(blocks: Block[]): void {
-    this.#recordHistory();
+  /**
+   * Applies a new block array as a single undoable edit.
+   *
+   * This is the *only* recorder on the structural path. A caller that wants its
+   * edit keyed or wants undo to restore a particular selection passes them here
+   * rather than calling `#recordHistory` itself: recording and then committing
+   * pushes the same snapshot twice, and two identical entries make the first
+   * Ctrl+Z look broken — it restores a document the user is already looking at.
+   *
+   * A commit that changes nothing is not an edit and records nothing. The pure
+   * operations hand back a fresh array either way, so without this test an arrow
+   * at the edge of the document cost a full history entry and a `change` event;
+   * held down, auto-repeat evicted the real undo stack within seconds and an
+   * autosave listener wrote an identical revision each time.
+   */
+  #commit(
+    blocks: Block[],
+    runKey: string | null = null,
+    selection?: SelectionSnapshot | null,
+  ): void {
+    if (sameBlocks(this.#blocks, blocks)) {
+      return;
+    }
+
+    this.#recordHistory(runKey, selection);
     this.#applyBlocks(blocks);
   }
 
@@ -1073,20 +1299,28 @@ export class NEditor {
 
   /** Selects whole blocks. Pass an empty list to return to text editing. */
   selectBlocks(ids: readonly string[]): void {
-    if (ids.length === 0) {
-      this.#clearBlockSelection();
-      return;
-    }
-
     this.#setBlockSelection(ids);
   }
 
+  /** Leaves block selection, handing the caret back to the text. */
   clearBlockSelection(): void {
-    this.#clearBlockSelection();
+    this.#setBlockSelection([]);
   }
 
   #orderedSelection(): string[] {
     return this.#blocks.filter((block) => this.#selected.has(block.id)).map((block) => block.id);
+  }
+
+  /**
+   * The blocks an edit has to touch.
+   *
+   * The selection itself holds only what the reader can see; a collapsed toggle
+   * in it stands for everything nested under it. Structural edits expand here,
+   * at the moment they run, rather than carrying invisible ids around in the
+   * selection where every later index lookup misses them.
+   */
+  #selectionForEdit(): Set<string> {
+    return withHiddenDescendants(this.#blocks, this.#selected);
   }
 
   /**
@@ -1101,10 +1335,36 @@ export class NEditor {
     anchorId?: string,
     options: { takeFocus?: boolean } = {},
   ): void {
-    // A collapsed toggle's children are invisible, so every operation on it has
-    // to carry them or they are silently orphaned.
-    this.#selected = withHiddenDescendants(this.#blocks, ids);
-    this.#selectionAnchor = anchorId ?? ids[0] ?? null;
+    // Selection anchors live in visible space. A block inside a collapsed
+    // toggle is not something the reader can point at, and an invisible id in
+    // this set poisons every `findBlockIndex(visible, …)` downstream — that is
+    // how an arrow key off a collapsed toggle used to teleport to block zero.
+    // The hidden children are pulled back in by #selectionForEdit.
+    const visible = new Set(this.#visible().map((block) => block.id));
+    const anchors = [...new Set(ids)].filter((id) => visible.has(id));
+
+    if (anchors.length === 0) {
+      const previous = this.#orderedSelection();
+
+      // Nothing was selected and nothing will be: this is not an exit from
+      // anywhere, so leave the caret — or the deliberate lack of one — alone.
+      if (previous.length === 0) {
+        return;
+      }
+
+      // An empty selection is not a mode. Deselecting the last block leaves
+      // block selection outright rather than holding the root focused with
+      // nothing selected and no caret, which is neither mode and swallows
+      // every key.
+      this.#clearBlockSelection();
+      this.#announceSelectionCount(0);
+      this.#focusFirst([anchorId, ...previous]);
+      return;
+    }
+
+    this.#selected = new Set(anchors);
+    this.#selectionAnchor =
+      anchorId !== undefined && visible.has(anchorId) ? anchorId : (anchors[0] ?? null);
     this.#renderer.setSelected(this.#selected);
 
     this.#pending = null;
@@ -1120,12 +1380,25 @@ export class NEditor {
     }
 
     this.#emitter.emit('blockselection', { ids: [...this.#selected] });
+    this.#announceSelectionCount(this.#selected.size);
+  }
 
-    const count = this.#selected.size;
+  /**
+   * Announces how many blocks are selected.
+   *
+   * Zero is its own sentence. Reading it as the plural announced "0 blocks
+   * selected", which describes a mode the editor is not supposed to have.
+   */
+  #announceSelectionCount(count: number): void {
     this.#announce(
-      count === 1
-        ? this.#labels.blockSelected
-        : formatLabel(this.#labels.blocksSelected, { count }),
+      pluralLabel(
+        {
+          zero: this.#labels.noBlocksSelected,
+          one: this.#labels.blockSelected,
+          other: this.#labels.blocksSelected,
+        },
+        count,
+      ),
     );
   }
 
@@ -1140,18 +1413,48 @@ export class NEditor {
     this.#emitter.emit('blockselection', { ids: [] });
   }
 
-  /** Leaves block selection, putting the caret back into a block. */
+  /**
+   * Leaves block selection, putting the caret back into a block.
+   *
+   * Every selected block is a candidate, not just the one asked for: a
+   * selection can end on a block that has no caret to give — a divider, an
+   * image — and a single blind `focus()` there left neither a caret nor a
+   * selection. If none of them can hold one, the selection stays. Being in one
+   * mode beats being in neither.
+   */
   #exitBlockSelection(blockId?: string, offset = 0): void {
-    const target = blockId ?? this.#orderedSelection()[0];
-    this.#clearBlockSelection();
+    const ordered = this.#orderedSelection();
 
-    if (target) {
-      this.focus(target, offset);
+    this.#focusFirst(
+      [blockId, ...(offset === CARET_END ? [...ordered].reverse() : ordered)],
+      offset,
+    );
+  }
+
+  /** Puts the caret in the first of `ids` that can take one. */
+  #focusFirst(ids: readonly (string | undefined)[], offset = 0): boolean {
+    for (const id of ids) {
+      if (id !== undefined && this.focus(id, offset)) {
+        return true;
+      }
     }
+
+    return false;
   }
 
   /** Handle click: plain selects, shift extends, modifier toggles. */
   #selectFromHandle(blockId: string, event: MouseEvent): void {
+    // The drag took pointer capture on the handle, which retargets the
+    // compatibility click that follows `pointerup` to it — so a drag ends by
+    // firing this hook as if the handle had merely been clicked, and the
+    // selection the user dragged collapses to the one block they grabbed.
+    // The flag is armed by the drag and consumed here, so exactly one click is
+    // swallowed and a press that never became a drag still selects.
+    if (this.#clickEndedDrag) {
+      this.#clickEndedDrag = false;
+      return;
+    }
+
     if (event.shiftKey && this.#selectionAnchor) {
       this.#setBlockSelection(
         blockIdRange(this.#blocks, this.#selectionAnchor, blockId),
@@ -1198,7 +1501,7 @@ export class NEditor {
     }
 
     const index = findBlockIndex(this.#blocks, firstId);
-    const next = removeBlocks(this.#blocks, this.#selected);
+    const next = removeBlocks(this.#blocks, this.#selectionForEdit());
 
     this.#commit(next);
     this.#clearBlockSelection();
@@ -1217,7 +1520,7 @@ export class NEditor {
   }
 
   #duplicateSelectedBlocks(): void {
-    const result = duplicateBlocks(this.#blocks, this.#selected);
+    const result = duplicateBlocks(this.#blocks, this.#selectionForEdit());
 
     if (result.ids.length === 0) {
       return;
@@ -1237,7 +1540,8 @@ export class NEditor {
 
     const index = findBlockIndex(this.#blocks, firstId);
     const created = createBlock('paragraph', char, this.#blocks[index]?.depth ?? 0);
-    const kept = this.#blocks.filter((block) => !this.#selected.has(block.id));
+    const removing = this.#selectionForEdit();
+    const kept = this.#blocks.filter((block) => !removing.has(block.id));
 
     this.#commit(normalizeDepths(insertBlockAt(kept, index, created)));
     this.#clearBlockSelection();
@@ -1245,37 +1549,33 @@ export class NEditor {
   }
 
   #moveSelectedBlocks(direction: 1 | -1): void {
-    const ordered = this.#orderedSelection();
-    const firstId = ordered[0];
-    const lastId = ordered.at(-1);
+    this.#moveVisible(this.#selected, direction);
+  }
 
-    if (!firstId || !lastId) {
-      return;
-    }
-
-    // Gaps are in original coordinates: one above the first, two past the last.
-    const gap =
-      direction === -1
-        ? findBlockIndex(this.#blocks, firstId) - 1
-        : findBlockIndex(this.#blocks, lastId) + 2;
-
-    if (gap < 0 || gap > this.#blocks.length) {
-      return;
-    }
-
-    this.#commit(moveBlocks(this.#blocks, this.#selected, gap));
+  /**
+   * Moves blocks one visible slot.
+   *
+   * One slot as the reader sees it: what moves carries the children it hides,
+   * and it steps clear over a collapsed toggle rather than into the gap between
+   * that toggle and its own children, where the next depth clamp adopts it.
+   */
+  #moveVisible(ids: ReadonlySet<string>, direction: 1 | -1): void {
+    // A move against the edge of the document comes back unchanged, and `#commit`
+    // drops it — the same test that keeps a drag dropped into its own gap, or any
+    // other op that hands back a fresh copy of what it was given, off the stack.
+    this.#commit(moveVisibleBlocks(this.#blocks, ids, direction));
   }
 
   #stepBlockSelection(direction: 1 | -1): void {
-    const ordered = this.#orderedSelection();
-    const edge = direction === -1 ? ordered[0] : ordered.at(-1);
+    const visible = this.#visible();
+    const edges = this.#selectedVisibleIndices(visible);
+    const edge = direction === -1 ? edges[0] : edges.at(-1);
 
-    if (!edge) {
+    if (edge === undefined) {
       return;
     }
 
-    const visible = this.#visible();
-    const target = visible[findBlockIndex(visible, edge) + direction];
+    const target = visible[edge + direction];
 
     if (target) {
       this.#setBlockSelection([target.id], target.id);
@@ -1283,21 +1583,35 @@ export class NEditor {
   }
 
   #extendBlockSelection(direction: 1 | -1): void {
-    const ordered = this.#orderedSelection();
-    const anchorId = this.#selectionAnchor ?? ordered[0];
+    const visible = this.#visible();
+    const edges = this.#selectedVisibleIndices(visible);
+    const first = edges[0];
+    const last = edges.at(-1);
 
-    if (!anchorId) {
+    if (first === undefined || last === undefined) {
       return;
     }
 
-    // The moving edge is whichever end is not the anchor.
-    const focusId = ordered[0] === anchorId ? (ordered.at(-1) ?? anchorId) : ordered[0];
-    const visible = this.#visible();
-    const target = visible[findBlockIndex(visible, focusId ?? anchorId) + direction];
+    const anchorId = this.#selectionAnchor ?? visible[first]?.id;
 
-    if (target) {
+    // The moving edge is whichever end is not the anchor.
+    const target = visible[(visible[first]?.id === anchorId ? last : first) + direction];
+
+    if (anchorId && target) {
       this.#setBlockSelection(blockIdRange(this.#blocks, anchorId, target.id), anchorId);
     }
+  }
+
+  /**
+   * Where the selected blocks sit in the *visible* list.
+   *
+   * Positions rather than ids, so a step can never be taken by looking an id up
+   * in a list it does not belong to: `findBlockIndex` answers -1 for a block it
+   * cannot see, and `visible[-1 + 1]` is the first block of the document — the
+   * teleport that made an arrow key on a collapsed toggle jump to the top.
+   */
+  #selectedVisibleIndices(visible: readonly Block[]): number[] {
+    return visible.flatMap((block, index) => (this.#selected.has(block.id) ? [index] : []));
   }
 
   #handleBlockSelectionKeys(event: KeyboardEvent): void {
@@ -1367,7 +1681,11 @@ export class NEditor {
         return;
 
       case 'Tab': {
-        const indented = indentBlocks(this.#blocks, this.#selected, event.shiftKey ? -1 : 1);
+        const indented = indentBlocks(
+          this.#blocks,
+          this.#selectionForEdit(),
+          event.shiftKey ? -1 : 1,
+        );
 
         // Same escape as in text mode: a Tab that changes nothing moves focus.
         if (indented.every((next, index) => next.depth === this.#blocks[index]?.depth)) {
@@ -1461,13 +1779,15 @@ export class NEditor {
     this.focus(id, 0);
   }
 
-  #closeImageEditor(): void {
+  #closeImageEditor(restoreFocus = true): void {
     const id = this.#imageContext;
 
     this.#imageEditor.close();
     this.#imageContext = null;
 
-    if (id) {
+    // A pointer that dismissed the popover from outside is placing focus
+    // itself; handing the caret back to the block would fight it.
+    if (id && restoreFocus) {
       this.focus(id, CARET_END);
     }
   }
@@ -1663,15 +1983,16 @@ export class NEditor {
     }
   }
 
-  #closeIconPicker(): void {
+  #closeIconPicker(restoreFocus = true): void {
     const id = this.#iconContext;
 
     this.#iconPicker.close();
     this.#iconContext = null;
 
     // The picker took focus on open; hiding it would otherwise leave focus on
-    // document.body and lose the user's place.
-    if (id) {
+    // document.body and lose the user's place. The exception is a dismissal
+    // from outside, where the pointer is already choosing where focus goes.
+    if (id && restoreFocus) {
       this.focus(id, CARET_END);
     }
   }
@@ -1685,7 +2006,7 @@ export class NEditor {
 
     event.preventDefault();
 
-    const doc = sliceDocument(this.#blocks, this.#selected);
+    const doc = sliceDocument(this.#blocks, this.#selectionForEdit());
     event.clipboardData.setData('text/plain', toMarkdown(doc));
     event.clipboardData.setData('text/html', blocksToHtml(this.#document, doc.blocks));
 
@@ -1719,10 +2040,16 @@ export class NEditor {
     }
   };
 
-  #handlePointerLeave = (): void => {
-    if (!this.#drag) {
-      this.#gutter.hide();
+  #handlePointerLeave = (event: PointerEvent): void => {
+    // Only hover retracts the gutter. A touch pointer stops existing when the
+    // finger lifts, and the UA reports that as pointerout/pointerleave — so
+    // hiding here pulled the controls away the instant they were offered on
+    // pointerdown, and the + and the handle could never be tapped at all.
+    if (event.pointerType === 'touch' || this.#drag) {
+      return;
     }
+
+    this.#gutter.hide();
   };
 
   /** Points the gutter at a block, aligned to that block's indentation. */
@@ -1745,6 +2072,11 @@ export class NEditor {
   }
 
   #beginDrag(blockId: string, event: PointerEvent): void {
+    // A fresh press on the handle is a fresh gesture, so whatever the last one
+    // left armed is stale. Reset before the guard: a gesture that never became
+    // a drag must not inherit a suppression from one that did.
+    this.#clickEndedDrag = false;
+
     if (!this.#editable) {
       return;
     }
@@ -1845,8 +2177,77 @@ export class NEditor {
     this.#promoteCrossBlockSelection();
   };
 
-  #handleDocumentPointerDown = (): void => {
+  /**
+   * The popovers that are open right now, newest concern first.
+   *
+   * One list, so "is the pointer outside it" and "does this block own it" are
+   * answered the same way everywhere. The format toolbar is not here: it has no
+   * caret to hand back and is re-synced from the selection on its own.
+   */
+  #openPopovers(): readonly AnchoredPopover[] {
+    const popovers: AnchoredPopover[] = [];
+
+    if (this.#linkEditor.isOpen) {
+      const context = this.#linkContext;
+
+      popovers.push({
+        // A table cell is its own editing host, so the row and column are part
+        // of the answer: the link popover of one cell is not the caret's.
+        ownedBy: (blockId, cell) => context?.blockId === blockId && sameCell(context.cell, cell),
+        contains: (node) => this.#linkEditor.contains(node),
+        close: (restoreFocus) => {
+          this.#closeLinkEditor(restoreFocus);
+        },
+      });
+    }
+
+    if (this.#iconPicker.isOpen) {
+      const id = this.#iconContext;
+
+      popovers.push({
+        ownedBy: (blockId) => id === blockId,
+        contains: (node) => this.#iconPicker.contains(node),
+        close: (restoreFocus) => {
+          this.#closeIconPicker(restoreFocus);
+        },
+      });
+    }
+
+    if (this.#imageEditor.isOpen) {
+      const id = this.#imageContext;
+
+      popovers.push({
+        ownedBy: (blockId) => id === blockId,
+        contains: (node) => this.#imageEditor.contains(node),
+        close: (restoreFocus) => {
+          this.#closeImageEditor(restoreFocus);
+        },
+      });
+    }
+
+    return popovers;
+  }
+
+  /**
+   * A pointer anywhere in the page — the only signal a portal gets that the
+   * user has moved on.
+   *
+   * The popovers render outside the editor root, so no listener on the root
+   * ever hears a click that lands elsewhere: without this they stay open for
+   * the rest of the session, still pointing at the block they were opened
+   * from. Focus is deliberately not restored, because the pointer that
+   * dismissed them is placing it itself.
+   */
+  #handleDocumentPointerDown = (event: PointerEvent): void => {
     this.#pointerDown = true;
+
+    const node = isNode(event.target) ? event.target : null;
+
+    for (const popover of this.#openPopovers()) {
+      if (!popover.contains(node)) {
+        popover.close(false);
+      }
+    }
   };
 
   /** Remembers which block a text drag started in. */
@@ -1965,7 +2366,12 @@ export class NEditor {
 
   /** Steps from a text caret at a block edge into a block selection. */
   #extendFromTextToBlocks(blockId: string, direction: 1 | -1): void {
-    const sibling = this.#blocks[findBlockIndex(this.#blocks, blockId) + direction];
+    // Stepped through the visible list: the raw array puts a block hidden
+    // inside a collapsed toggle next to the caret, and Backspace would then
+    // destroy something that was never on screen.
+    const visible = this.#visible();
+    const index = findBlockIndex(visible, blockId);
+    const sibling = index === -1 ? undefined : visible[index + direction];
 
     this.#setBlockSelection(
       sibling ? blockIdRange(this.#blocks, blockId, sibling.id) : [blockId],
@@ -1988,13 +2394,22 @@ export class NEditor {
   };
 
   #endDrag(commit: { ids: Set<string>; gap: number } | null): void {
+    // A drag that actually moved is followed by a compatibility click on the
+    // handle that holds the pointer capture. That click is the tail of this
+    // gesture, not a new one, so the handle's click hook has to skip it —
+    // abandoned and cancelled drags included, since they end the same way.
+    this.#clickEndedDrag = this.#drag?.active ?? false;
     this.#drag = null;
     this.#gutter.setDragging(false);
     delete this.#root.dataset.dragging;
     this.#dropIndicator.hidden = true;
 
     if (commit) {
-      this.#commit(moveBlocks(this.#blocks, commit.ids, commit.gap));
+      // The drag carries visible anchors; a collapsed toggle's children join
+      // here, or they stay behind and are re-parented under whatever follows.
+      this.#commit(
+        moveBlocks(this.#blocks, withHiddenDescendants(this.#blocks, commit.ids), commit.gap),
+      );
     }
   }
 
@@ -2056,7 +2471,15 @@ export class NEditor {
       return false;
     }
 
-    this.#setBlockSelection(blockIdRange(this.#blocks, from, to), from);
+    const ids = blockIdRange(this.#blocks, from, to);
+
+    // An id this editor does not own yields an empty range. Selecting nothing
+    // still clears the caret and takes focus, so leave the selection be.
+    if (ids.length === 0) {
+      return false;
+    }
+
+    this.#setBlockSelection(ids, from);
     return true;
   }
 
@@ -2066,22 +2489,16 @@ export class NEditor {
       return;
     }
 
-    if (snapshot.cell) {
-      this.#focusCell(
-        snapshot.blockId,
-        snapshot.cell.row,
-        snapshot.cell.column,
-        snapshot.start,
-        snapshot.end,
-      );
-      return;
-    }
-
-    this.focusRange(snapshot.blockId, snapshot.start, snapshot.end);
+    this.focusRange(snapshot.blockId, snapshot.start, snapshot.end, snapshot.cell);
   }
 
-  #commitContent(id: string, content: RichText): void {
-    this.#commit(updateBlock(this.#blocks, id, { content }));
+  #commitContent(
+    id: string,
+    content: RichText,
+    runKey: string | null = null,
+    selection?: SelectionSnapshot | null,
+  ): void {
+    this.#commit(updateBlock(this.#blocks, id, { content }), runKey, selection);
   }
 
   /** Speaks a short message to assistive technology. */
@@ -2102,6 +2519,31 @@ export class NEditor {
     return element?.closest<HTMLElement>('.neditor-block__content') ?? null;
   }
 
+  /** The editable host of a block, or of one named cell of its table. */
+  #hostFor(id: string, cell?: CellCoords): HTMLElement | null {
+    const view = this.#renderer.getView(id);
+
+    return (cell ? view?.cells?.[cell.row]?.[cell.column] : view?.content) ?? null;
+  }
+
+  /**
+   * Rebuilds a resolved target from ids alone.
+   *
+   * For state that outlives the event it came from — the link popover holds a
+   * range while focus is in its input — where re-reading `getView(id).content`
+   * would answer with a table's first cell whatever cell was recorded.
+   */
+  #targetFor(id: string, cell?: CellCoords): ResolvedTarget | null {
+    const block = findBlock(this.#blocks, id);
+    const content = this.#hostFor(id, cell);
+
+    if (!block || !content) {
+      return null;
+    }
+
+    return { block, content, ...(cell ? { cell } : {}) };
+  }
+
   /**
    * Resolves the block and the editable host from an event target.
    *
@@ -2118,7 +2560,11 @@ export class NEditor {
     }
 
     const block = findBlock(this.#blocks, id);
-    const content = this.#hostFromNode(node) ?? this.#renderer.getView(id)?.content;
+    // Never guessed: a node inside a block but outside every editable host — a
+    // toggle's chevron, a callout's icon, an image's button — is not text at
+    // all, and answering with the block's own content would let Enter split a
+    // block the user was only trying to activate a control in.
+    const content = this.#hostFromNode(node);
 
     if (!block || !content) {
       return null;
@@ -2134,10 +2580,21 @@ export class NEditor {
       : target.block.content;
   }
 
-  /** Writes rich text back to wherever it came from, as one undoable edit. */
-  #commitResolved(target: ResolvedTarget, content: RichText): void {
+  /**
+   * Writes rich text back to wherever it came from, as one undoable edit.
+   *
+   * `runKey` and `selection` ride along to `#commit`, which is the recorder.
+   * A caller with a run of its own states it here instead of snapshotting first
+   * and committing second — that pushed the entry twice.
+   */
+  #commitResolved(
+    target: ResolvedTarget,
+    content: RichText,
+    runKey: string | null = null,
+    selection?: SelectionSnapshot | null,
+  ): void {
     if (!target.cell) {
-      this.#commitContent(target.block.id, content);
+      this.#commitContent(target.block.id, content, runKey, selection);
       return;
     }
 
@@ -2148,28 +2605,17 @@ export class NEditor {
       content,
     );
 
-    this.#commit(updateBlock(this.#blocks, target.block.id, { rows }));
+    this.#commit(updateBlock(this.#blocks, target.block.id, { rows }), runKey, selection);
   }
 
   /** Places the caret in a table cell. */
   #focusCell(id: string, row: number, column: number, start: number, end = start): void {
-    const host = this.#renderer.getView(id)?.cells?.[row]?.[column];
-
-    if (!host) {
-      return;
-    }
-
-    host.focus({ preventScroll: true });
-    setSelectionRange(host, start, end);
+    this.focusRange(id, start, end, { row, column });
   }
 
   /** Restores a selection to whichever host it came from. */
   #focusResolved(target: ResolvedTarget, start: number, end = start): void {
-    if (target.cell) {
-      this.#focusCell(target.block.id, target.cell.row, target.cell.column, start, end);
-    } else {
-      this.focusRange(target.block.id, start, end);
-    }
+    this.focusRange(target.block.id, start, end, target.cell);
   }
 
   /** The editable host the selection sits in, when both ends share one. */
@@ -2285,10 +2731,12 @@ export class NEditor {
     const id = resolved.block.id;
     const parsed = parseRichText(content);
 
-    // An input event that changed nothing is not an edit worth undoing.
+    // An input event that changed nothing is not an edit worth undoing. This
+    // path writes `#blocks` itself rather than going through `#commit` — the
+    // DOM is already ahead, and re-rendering it would drop the caret — so it
+    // carries its own copy of that test.
     if (event && !richEquals(this.#contentOf(resolved), parsed)) {
-      const scope = cell ? `${id}:${cell.row}:${cell.column}` : id;
-      this.#recordHistory(inputRunKey(event, scope), this.#selectionBeforeInput);
+      this.#recordHistory(inputRunKey(event, hostScope(id, cell)), this.#selectionBeforeInput);
     }
 
     if (cell) {
@@ -2353,6 +2801,16 @@ export class NEditor {
       return;
     }
 
+    // Content from outside the editor only ever enters through the parser. The
+    // `paste` and `drop` handlers take over both gestures, so anything of this
+    // kind arriving here is a path neither of them saw — a host that would not
+    // resolve, an unusual browser ordering — and the safe answer to markup we
+    // cannot account for is to refuse it, not to let the DOM win by default.
+    if (UNPARSED_INPUT_TYPES.has(event.inputType)) {
+      event.preventDefault();
+      return;
+    }
+
     const pending = this.#pending;
 
     if (!pending) {
@@ -2366,7 +2824,12 @@ export class NEditor {
     const resolved = this.#resolve(event.target);
     const range = resolved ? getSelectionRange(resolved.content) : null;
 
-    if (!resolved || !range || resolved.block.id !== pending.blockId) {
+    if (
+      !resolved ||
+      !range ||
+      resolved.block.id !== pending.blockId ||
+      !sameCell(resolved.cell, pending.cell)
+    ) {
       return;
     }
 
@@ -2382,8 +2845,15 @@ export class NEditor {
     );
     const caret = range.start + inserted.length;
 
-    this.#recordHistory(`insert:${resolved.block.id}`, this.#selectionBeforeInput);
-    this.#commitResolved(resolved, next);
+    // Keyed and snapshotted through the commit, not before it: recording here
+    // and committing after pushed the pre-edit document twice, and the first
+    // Ctrl+Z then restored the document already on screen.
+    this.#commitResolved(
+      resolved,
+      next,
+      `insert:${hostScope(resolved.block.id, resolved.cell)}`,
+      this.#selectionBeforeInput,
+    );
     this.#focusResolved(resolved, caret);
   };
 
@@ -2417,14 +2887,28 @@ export class NEditor {
     const caret = getCaretOffset(content);
     const beforeCaret = richToPlainText(parsed).slice(0, caret);
 
+    // An open slash menu tracks the text in both directions: backspacing
+    // narrows the query, and deleting the `/` closes the menu. It reads the
+    // text rather than acting on it, so it runs before the gate below.
+    if (!cell && this.#slashContext?.blockId === id) {
+      this.#updateSlashQuery(beforeCaret, caret);
+      this.#emitChange();
+      return;
+    }
+
+    // Every rule below reads the text before the caret and treats it as
+    // something just typed. A deletion leaves the very same text sitting there
+    // without anyone having typed it — delete the word after a `# ` and the
+    // prefix is suddenly "complete" — so the rules convert the block and eat
+    // the prefix the user was in the middle of clearing. Only an insertion
+    // arms them.
+    if (!isInsertion(event)) {
+      this.#emitChange();
+      return;
+    }
+
     // The slash menu and block rules act on a block; a cell has neither.
     if (!cell) {
-      if (this.#slashContext?.blockId === id) {
-        this.#updateSlashQuery(beforeCaret, caret);
-        this.#emitChange();
-        return;
-      }
-
       if (this.#tryOpenSlashMenu(id, beforeCaret, caret, content)) {
         this.#emitChange();
         return;
@@ -2510,7 +2994,12 @@ export class NEditor {
     this.#focusResolved(target, end);
 
     // Text typed after a completed span should not inherit its formatting.
-    this.#pending = { blockId: target.block.id, offset: end, marks: [] };
+    this.#pending = {
+      blockId: target.block.id,
+      offset: end,
+      marks: [],
+      ...(target.cell ? { cell: target.cell } : {}),
+    };
     return true;
   }
 
@@ -2550,31 +3039,37 @@ export class NEditor {
       return;
     }
 
+    // The re-render this triggers reports the highlight back through
+    // `onActiveChange`, so the description follows the filtered list.
     this.#slashMenu.setQuery(beforeCaret.slice(context.start + 1));
-
-    const content = this.#renderer.getView(context.blockId)?.content;
-
-    if (content) {
-      this.#describeSlashMenu(content);
-    }
   }
 
   /**
    * Wires the combobox relationship onto the block being typed in.
    *
    * The menu is a portal, so without this a screen reader has no way to know it
-   * opened, what it contains, or which option is highlighted.
+   * opened, what it contains, or which option is highlighted. It is called
+   * again on every highlight change: the attribute is a pointer at one option
+   * id, and a stale one has the reader announce "Text" for every arrow press
+   * while the menu commits something else entirely.
    */
-  #describeSlashMenu(content: HTMLElement): void {
-    content.setAttribute('role', 'combobox');
-    content.setAttribute('aria-expanded', 'true');
-    content.setAttribute('aria-haspopup', 'listbox');
-    content.setAttribute('aria-controls', this.#slashMenu.listId);
+  #describeSlashMenu(content?: HTMLElement): void {
+    const context = this.#slashContext;
+    const host = content ?? (context ? this.#renderer.getView(context.blockId)?.content : null);
+
+    if (!host) {
+      return;
+    }
+
+    host.setAttribute('role', 'combobox');
+    host.setAttribute('aria-expanded', 'true');
+    host.setAttribute('aria-haspopup', 'listbox');
+    host.setAttribute('aria-controls', this.#slashMenu.listId);
 
     const active = this.#slashMenu.activeOptionId;
 
     if (active) {
-      content.setAttribute('aria-activedescendant', active);
+      host.setAttribute('aria-activedescendant', active);
     }
   }
 
@@ -2659,19 +3154,10 @@ export class NEditor {
       return;
     }
 
-    const block = findBlock(this.#blocks, context.blockId);
-
     this.#linkEditor.close();
     this.#linkContext = null;
 
-    if (!block) {
-      return;
-    }
-
-    const host = this.#renderer.getView(block.id)?.content;
-    const target: ResolvedTarget | null = host
-      ? { block, content: host, ...(context.cell ? { cell: context.cell } : {}) }
-      : null;
+    const target = this.#targetFor(context.blockId, context.cell);
 
     if (!target) {
       return;
@@ -2685,14 +3171,20 @@ export class NEditor {
     this.#syncToolbar();
   }
 
-  #closeLinkEditor(): void {
+  #closeLinkEditor(restoreFocus = true): void {
     const context = this.#linkContext;
 
     this.#linkEditor.close();
     this.#linkContext = null;
 
-    if (context) {
-      this.focusRange(context.blockId, context.start, context.end);
+    // Restoring the range is right when the user dismissed this popover from
+    // inside it, and wrong when a pointer landed somewhere else entirely: the
+    // caret would be yanked back to whichever block the popover was opened
+    // from, over the block the user just pointed at.
+    if (context && restoreFocus) {
+      // The cell was recorded when the popover opened; dropping it here put the
+      // caret back in the table's header rather than the cell being edited.
+      this.focusRange(context.blockId, context.start, context.end, context.cell);
       this.#syncToolbar();
     }
   }
@@ -2721,17 +3213,16 @@ export class NEditor {
       return;
     }
 
-    const id = this.#renderer.blockIdFromNode(anchor);
     // Resolved from the anchor itself: a table has one host per cell, and the
     // view's `content` is only ever the first of them.
-    const content = this.#hostFromNode(anchor);
-    const offsets = content ? offsetsOfNode(content, anchor) : null;
+    const target = this.#resolve(anchor);
+    const offsets = target ? offsetsOfNode(target.content, anchor) : null;
 
-    if (!id || !offsets) {
+    if (!target || !offsets) {
       return;
     }
 
-    this.focusRange(id, offsets.start, offsets.end);
+    this.#focusResolved(target, offsets.start, offsets.end);
     this.openLinkEditor();
   };
 
@@ -2743,12 +3234,15 @@ export class NEditor {
     }
 
     // Always take over: an unhandled paste injects arbitrary markup that the
-    // parser would have to guess at, and scripts along with it.
+    // parser would have to guess at, and scripts along with it. Cancelled up
+    // front, so a target we cannot resolve refuses the paste rather than
+    // handing it back to the browser.
+    event.preventDefault();
+
     const html = event.clipboardData.getData('text/html');
     const plain = event.clipboardData.getData('text/plain');
 
     if (this.#selected.size > 0) {
-      event.preventDefault();
       this.#pasteOverBlockSelection(html, plain);
       return;
     }
@@ -2759,8 +3253,53 @@ export class NEditor {
       return;
     }
 
+    this.#insertForeignContent(resolved, html, plain);
+  };
+
+  /**
+   * A drag from another page or another app, refused as a native edit.
+   *
+   * The browser's default is to write the dragged fragment straight into the
+   * host under the pointer — an `<iframe>`, a password form, a fixed overlay
+   * across the whole viewport — and `#syncFromDom` then reads that back as the
+   * block's own content, so the model agrees with the DOM and nothing later
+   * renders it away. A drop carries the same flavours as a clipboard, so it is
+   * parsed by the same code: dropped content becomes blocks, never markup.
+   *
+   * The cost is that dragging text inside the editor copies rather than moves,
+   * because the native move is one gesture and cancelling the drop cancels
+   * both halves of it. Losing a move is a great deal cheaper than keeping the
+   * hole, and the block handles in the gutter still move blocks properly.
+   */
+  #handleDrop = (event: DragEvent): void => {
+    // Unconditional, and first: every branch below that gives up is a case
+    // where we could not account for the payload, which is a reason to drop it
+    // on the floor rather than to let the default insertion happen.
     event.preventDefault();
 
+    const data = event.dataTransfer;
+
+    if (!this.#editable || !data) {
+      return;
+    }
+
+    const resolved = this.#resolve(event.target);
+
+    if (!resolved) {
+      return;
+    }
+
+    this.#insertForeignContent(resolved, data.getData('text/html'), data.getData('text/plain'));
+  };
+
+  /**
+   * The one way content from outside the editor enters a block.
+   *
+   * Paste and drop both land here, so neither can grow a path the other lacks:
+   * the payload is parsed into blocks, and where those blocks go is decided by
+   * what the target can actually hold.
+   */
+  #insertForeignContent(resolved: ResolvedTarget, html: string, plain: string): void {
     const pasted = this.#parseClipboard(html, plain);
 
     if (pasted.length === 0) {
@@ -2768,9 +3307,9 @@ export class NEditor {
     }
 
     // A cell holds text, so structure flattens rather than splitting the table.
+    // Only the structure: marks and links render in a cell like anywhere else.
     if (resolved.cell) {
-      const literal = plain.length > 0 ? plain : pasted.map(blockText).join('\n');
-      this.#pasteInline(resolved, richFromPlainText(literal));
+      this.#pasteInline(resolved, richFromBlocks(pasted));
       return;
     }
 
@@ -2791,7 +3330,7 @@ export class NEditor {
     }
 
     this.#pasteBlocks(resolved.block, resolved.content, pasted);
-  };
+  }
 
   /** HTML first, since it carries structure; Markdown is the fallback. */
   #parseClipboard(html: string, plain: string): Block[] {
@@ -2819,12 +3358,17 @@ export class NEditor {
    * The first pasted block merges into the block being typed in and the last
    * one absorbs whatever followed the caret, so pasting into the middle of a
    * paragraph splits it rather than leaving an empty remnant.
+   *
+   * Both of those moves carry text and nothing else, which is only the whole of
+   * a block when the block is text. A table, an image or a divider keeps its
+   * payload beside `content`, so one is spliced in as a block of its own rather
+   * than merged into a paragraph — and never handed text it cannot show.
    */
   #pasteBlocks(target: Block, content: HTMLElement, pasted: Block[]): void {
     const range = getSelectionRange(content) ?? { start: 0, end: 0 };
     const trimmed = richDelete(target.content, range.start, range.end);
     const [before, after] = richSplit(trimmed, range.start);
-    const [first, ...rest] = pasted;
+    const [first] = pasted;
 
     if (!first) {
       return;
@@ -2832,36 +3376,71 @@ export class NEditor {
 
     // Pasting into a genuinely empty block replaces it outright. Retyping it
     // through setBlockType would rebuild the payload from the *target*, which
-    // blanks a pasted table's rows and an image's src.
-    const replaceable = isRichEmpty(trimmed) && target.type !== 'table' && target.type !== 'image';
+    // blanks a pasted table's rows and an image's src. A table or an image is
+    // never empty here whatever its cells or caption say: its payload is not
+    // text, so there is nothing for a paste to take the place of.
+    const replaceable = isRichEmpty(trimmed) && canMergeText(target.type);
 
-    // The id is the target's and stays put; only the payload is replaced.
-    const { id: _pastedId, ...payload } = cloneBlock(first);
+    // Only text merges into text. Merging a pasted table would keep its
+    // (always empty) content and drop every row — for a lone table pasted into
+    // a paragraph, a paste that changed nothing at all.
+    const merges = replaceable || canMergeText(first.type);
 
-    let blocks = replaceable
-      ? updateBlock(this.#blocks, target.id, {
-          ...payload,
-          depth: target.depth,
-          content: rest.length === 0 ? richConcat(first.content, after) : first.content,
-        })
-      : updateBlock(this.#blocks, target.id, {
-          content:
-            rest.length === 0
-              ? richConcat(before, first.content, after)
-              : richConcat(before, first.content),
-        });
-
-    const created = rest.map((block, index) => ({
+    let created = pasted.slice(merges ? 1 : 0).map((block) => ({
       ...cloneBlock(block),
       depth: target.depth + block.depth,
-      content: index === rest.length - 1 ? richConcat(block.content, after) : block.content,
     }));
+
+    // Where the text that followed the caret lands, and the type it lands in.
+    const tail = created.at(-1);
+    const tailType = tail?.type ?? (replaceable ? first.type : target.type);
+
+    // Appending that text to a divider or a table parks it in a field nothing
+    // renders and `normalizeDocument` erases on the next load, so it gets a
+    // block of its own — the rehousing `/divider` already does. A divider holds
+    // no caret either, so it earns one even with no text to carry.
+    const rehoused =
+      canMergeText(tailType) || (isRichEmpty(after) && !isVoidType(tailType))
+        ? null
+        : createBlock(typeAfterSplit(target.type), after, target.depth);
+
+    let targetContent = merges ? richConcat(before, first.content) : before;
+
+    if (rehoused) {
+      created = [...created, rehoused];
+    } else if (tail) {
+      created[created.length - 1] = { ...tail, content: richConcat(tail.content, after) };
+    } else {
+      targetContent = richConcat(targetContent, after);
+    }
+
+    let blocks: Block[];
+
+    if (replaceable) {
+      // The id is the target's and stays put; only the payload is replaced.
+      const { id: _pastedId, ...payload } = cloneBlock(first);
+
+      blocks = updateBlock(this.#blocks, target.id, {
+        ...payload,
+        depth: target.depth,
+        content: targetContent,
+      });
+    } else {
+      blocks = updateBlock(this.#blocks, target.id, { content: targetContent });
+    }
 
     let at = findBlockIndex(blocks, target.id);
 
     for (const block of created) {
       at += 1;
       blocks = insertBlockAt(blocks, at, block);
+    }
+
+    // Pasting a block that could not merge leaves the target holding only the
+    // text before the caret. At offset 0 there is none, and keeping the husk
+    // would put an empty line above every table pasted at the start of one.
+    if (!merges && isRichEmpty(targetContent) && canMergeText(target.type)) {
+      blocks = removeBlock(blocks, target.id);
     }
 
     this.#commit(normalizeDepths(blocks));
@@ -2888,7 +3467,8 @@ export class NEditor {
     const depth = this.#blocks[index]?.depth ?? 0;
     const created = pasted.map((block) => ({ ...block, depth: depth + block.depth }));
 
-    let blocks = this.#blocks.filter((block) => !this.#selected.has(block.id));
+    const removing = this.#selectionForEdit();
+    let blocks = this.#blocks.filter((block) => !removing.has(block.id));
     let at = index;
 
     for (const block of created) {
@@ -2993,10 +3573,18 @@ export class NEditor {
     }
 
     switch (event.key) {
-      case 'Escape':
-        if (this.#linkEditor.isOpen) {
+      case 'Escape': {
+        // Only a popover this very host opened. Asking whether one is open
+        // anywhere let an Escape typed in an unrelated block close a popover
+        // it had never seen — and closing hands the caret back to the block
+        // that opened it, so the key silently teleported the user away.
+        const own = this.#openPopovers().find((popover) =>
+          popover.ownedBy(block.id, resolved.cell),
+        );
+
+        if (own) {
           event.preventDefault();
-          this.#closeLinkEditor();
+          own.close(true);
         } else if (this.#toolbar.isOpen) {
           event.preventDefault();
           this.#toolbar.hide();
@@ -3007,6 +3595,7 @@ export class NEditor {
         }
 
         return;
+      }
 
       case 'Enter':
         if (modifier && block.type === 'todo') {
@@ -3061,7 +3650,7 @@ export class NEditor {
       case 'ArrowUp':
         if (modifier && event.shiftKey) {
           event.preventDefault();
-          this.#commit(moveBlock(this.#blocks, block.id, -1));
+          this.#moveVisible(new Set([block.id]), -1);
           this.focus(block.id, getCaretOffset(content));
         } else if (event.shiftKey && isCaretAtStart(content)) {
           // Shift-extending past the top of a block selects whole blocks: the
@@ -3077,7 +3666,7 @@ export class NEditor {
       case 'ArrowDown':
         if (modifier && event.shiftKey) {
           event.preventDefault();
-          this.#commit(moveBlock(this.#blocks, block.id, 1));
+          this.#moveVisible(new Set([block.id]), 1);
           this.focus(block.id, getCaretOffset(content));
         } else if (event.shiftKey && isCaretAtEnd(content)) {
           event.preventDefault();
@@ -3144,6 +3733,17 @@ export class NEditor {
     if (block.depth > 0) {
       this.#commit(indentBlock(this.#blocks, block.id, -1));
       this.focus(block.id, 0);
+      return;
+    }
+
+    // Retyping to a paragraph is the "undo this block type" gesture, and it is
+    // only non-destructive while the text *is* the block. An image's caption
+    // sits beside a payload a paragraph cannot hold, so `setBlockType` drops
+    // `src` and `alt`: one Backspace in the caption deleted the picture. Step
+    // up to the block instead — deleting it stays one keystroke away, but it
+    // has to be asked for.
+    if (!canMergeText(block.type)) {
+      this.#setBlockSelection([block.id], block.id);
       return;
     }
 
@@ -3292,6 +3892,7 @@ export class NEditor {
       this.#pending &&
       (!target ||
         target.block.id !== this.#pending.blockId ||
+        !sameCell(target.cell, this.#pending.cell) ||
         target.range.start !== this.#pending.offset ||
         target.range.start !== target.range.end)
     ) {

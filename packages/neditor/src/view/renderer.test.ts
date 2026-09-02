@@ -240,6 +240,17 @@ describe('blockIdFromNode', () => {
 
     expect(renderer.blockIdFromNode(stray)).toBeUndefined();
   });
+
+  test('ignores a matching data-block-id outside this renderer', () => {
+    renderer.render([block({ id: 'a' })]);
+    // The embedding page is free to use the attribute for its own purposes, and
+    // free to collide with an id this renderer happens to hold.
+    const stray = document.createElement('div');
+    stray.dataset.blockId = 'a';
+    document.body.append(stray);
+
+    expect(renderer.blockIdFromNode(stray)).toBeUndefined();
+  });
 });
 
 describe('destroy', () => {

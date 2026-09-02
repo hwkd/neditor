@@ -205,11 +205,26 @@ function renderRun(doc: Document, run: TextRun): Node {
  */
 export function renderRichText(doc: Document, content: readonly TextRun[]): DocumentFragment {
   const fragment = doc.createDocumentFragment();
+  let last: TextRun | undefined;
 
   for (const run of content) {
     if (run.text.length > 0) {
       fragment.append(renderRun(doc, run));
+      last = run;
     }
+  }
+
+  // A newline at the very end of a block gets no line box of its own: under
+  // `white-space: pre-wrap` the break ends the last line and there is nothing
+  // after it to fill another, so Shift+Enter (and Enter in a table cell) left
+  // the block exactly the same height and the caret with nowhere to go — the
+  // next character landed in front of the break instead of after it. A
+  // trailing <br> is what gives that empty last line a box.
+  //
+  // It is filler, not content, and `parseRichText` already reads a trailing
+  // <br> back as nothing, so the newline is never counted twice on the way in.
+  if (last?.text.endsWith('\n')) {
+    fragment.append(doc.createElement('br'));
   }
 
   return fragment;
