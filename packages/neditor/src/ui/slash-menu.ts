@@ -1,3 +1,4 @@
+import { DEFAULT_LABELS, DEFAULT_SLASH_COMMANDS } from '../labels.ts';
 import type { NEditorLabels } from '../labels.ts';
 import type { BlockType } from '../model/document.ts';
 import type { PortalTheme } from './portal.ts';
@@ -19,118 +20,64 @@ export interface SlashCommand {
   readonly keywords: readonly string[];
 }
 
-export const SLASH_COMMANDS: readonly SlashCommand[] = [
-  {
-    type: 'paragraph',
-    label: 'Text',
-    description: 'Just start writing with plain text.',
-    icon: 'T',
-    keywords: ['text', 'paragraph', 'plain'],
-  },
-  {
-    type: 'heading1',
-    label: 'Heading 1',
-    description: 'Big section heading.',
-    icon: 'H1',
-    keywords: ['heading', 'h1', 'title', 'large'],
-  },
-  {
-    type: 'heading2',
-    label: 'Heading 2',
-    description: 'Medium section heading.',
-    icon: 'H2',
-    keywords: ['heading', 'h2', 'subtitle', 'medium'],
-  },
-  {
-    type: 'heading3',
-    label: 'Heading 3',
-    description: 'Small section heading.',
-    icon: 'H3',
-    keywords: ['heading', 'h3', 'small'],
-  },
-  {
-    type: 'bulleted_list',
-    label: 'Bulleted list',
-    description: 'Create a simple bulleted list.',
-    icon: '•',
-    keywords: ['bullet', 'list', 'unordered', 'ul'],
-  },
-  {
-    type: 'numbered_list',
-    label: 'Numbered list',
-    description: 'Create a list with numbering.',
-    icon: '1.',
-    keywords: ['number', 'list', 'ordered', 'ol'],
-  },
-  {
-    type: 'todo',
-    label: 'To-do list',
-    description: 'Track tasks with a checkbox.',
-    icon: '☐',
-    keywords: ['todo', 'task', 'checkbox', 'check'],
-  },
-  {
-    type: 'quote',
-    label: 'Quote',
-    description: 'Capture a quote.',
-    icon: '❝',
-    keywords: ['quote', 'blockquote', 'cite'],
-  },
-  {
-    type: 'code',
-    label: 'Code',
-    description: 'Capture a code snippet.',
-    icon: '</>',
-    keywords: ['code', 'snippet', 'pre', 'monospace'],
-  },
-  {
-    type: 'callout',
-    label: 'Callout',
-    description: 'Make writing stand out.',
-    icon: '\u{1F4A1}',
-    keywords: ['callout', 'note', 'info', 'aside', 'tip', 'warning'],
-  },
-  {
-    type: 'toggle',
-    label: 'Toggle list',
-    description: 'Hide content inside a collapsible block.',
-    icon: '\u25B8',
-    keywords: ['toggle', 'collapse', 'details', 'accordion', 'fold'],
-  },
-  {
-    type: 'image',
-    label: 'Image',
-    description: 'Embed a picture by URL.',
-    icon: '\u{1F5BC}',
-    keywords: ['image', 'picture', 'photo', 'img', 'embed'],
-  },
-  {
-    type: 'table',
-    label: 'Table',
-    description: 'Add a simple table.',
-    icon: '\u25A6',
-    keywords: ['table', 'grid', 'rows', 'columns'],
-  },
-  {
-    type: 'divider',
-    label: 'Divider',
-    description: 'Visually divide blocks.',
-    icon: '—',
-    keywords: ['divider', 'separator', 'hr', 'line'],
-  },
+/**
+ * Menu order and icon per block type.
+ *
+ * Only the untranslatable half lives here; every string a translator has to
+ * touch is in the label set, so a menu built from French labels also filters
+ * on French words.
+ */
+const COMMAND_ORDER: readonly { readonly type: BlockType; readonly icon: string }[] = [
+  { type: 'paragraph', icon: 'T' },
+  { type: 'heading1', icon: 'H1' },
+  { type: 'heading2', icon: 'H2' },
+  { type: 'heading3', icon: 'H3' },
+  { type: 'bulleted_list', icon: '•' },
+  { type: 'numbered_list', icon: '1.' },
+  { type: 'todo', icon: '☐' },
+  { type: 'quote', icon: '❝' },
+  { type: 'code', icon: '</>' },
+  { type: 'callout', icon: '\u{1F4A1}' },
+  { type: 'toggle', icon: '\u25B8' },
+  { type: 'image', icon: '\u{1F5BC}' },
+  { type: 'table', icon: '\u25A6' },
+  { type: 'divider', icon: '—' },
 ];
 
-export function filterCommands(query: string): readonly SlashCommand[] {
+/** Builds the menu for one label set. */
+export function createSlashCommands(labels: NEditorLabels): readonly SlashCommand[] {
+  return COMMAND_ORDER.map(({ type, icon }) => {
+    // A caller may override one entry and leave the rest out; falling back per
+    // entry keeps the command in the menu rather than silently dropping it.
+    const text = labels.slashCommands[type] ?? DEFAULT_SLASH_COMMANDS[type];
+
+    return {
+      type,
+      icon,
+      label: text.label,
+      description: text.description,
+      keywords: text.keywords,
+    };
+  });
+}
+
+/** The menu in the built-in English. */
+export const SLASH_COMMANDS: readonly SlashCommand[] = createSlashCommands(DEFAULT_LABELS);
+
+export function filterCommands(
+  query: string,
+  commands: readonly SlashCommand[] = SLASH_COMMANDS,
+): readonly SlashCommand[] {
   const needle = query.trim().toLowerCase();
 
   if (needle.length === 0) {
-    return SLASH_COMMANDS;
+    return commands;
   }
 
-  return SLASH_COMMANDS.filter(
+  return commands.filter(
     (command) =>
       command.label.toLowerCase().includes(needle) ||
-      command.keywords.some((keyword) => keyword.startsWith(needle)),
+      command.keywords.some((keyword) => keyword.toLowerCase().startsWith(needle)),
   );
 }
 
@@ -143,14 +90,18 @@ export class SlashMenu {
   readonly #element: HTMLElement;
   readonly #list: HTMLElement;
   readonly #hooks: SlashMenuHooks;
+  /** Built once from the label set this menu was constructed with. */
+  readonly #allCommands: readonly SlashCommand[];
 
-  #commands: readonly SlashCommand[] = SLASH_COMMANDS;
+  #commands: readonly SlashCommand[];
   #anchor: DOMRect | null = null;
   #activeIndex = 0;
   #open = false;
 
   constructor(doc: Document, hooks: SlashMenuHooks, labels: NEditorLabels) {
     this.#hooks = hooks;
+    this.#allCommands = createSlashCommands(labels);
+    this.#commands = this.#allCommands;
 
     this.#element = createPortal(doc, 'neditor-slash-menu');
 
@@ -206,7 +157,7 @@ export class SlashMenu {
   }
 
   setQuery(query: string): void {
-    this.#commands = filterCommands(query);
+    this.#commands = filterCommands(query, this.#allCommands);
 
     if (this.#commands.length === 0) {
       this.close();

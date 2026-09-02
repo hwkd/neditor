@@ -1,6 +1,21 @@
 import type { BlockType } from './model/document.ts';
 
 /**
+ * One entry in the slash menu.
+ *
+ * The icon and the menu order are presentation and stay in the menu itself;
+ * everything a translator has to touch lives here.
+ */
+export interface SlashCommandLabel {
+  /** Name of the entry, and the first thing typing filters against. */
+  label: string;
+  /** The line under the label. */
+  description: string;
+  /** Extra terms the filter matches by prefix, beyond the label. */
+  keywords: readonly string[];
+}
+
+/**
  * Every user-visible string the editor produces.
  *
  * Most are accessible names rather than visible text, which is why they cannot
@@ -50,6 +65,13 @@ export interface NEditorLabels {
 
   /** Slash menu. */
   slashMenu: string;
+  /**
+   * Slash menu entries, keyed by the block type each one inserts.
+   *
+   * Filtering runs over these, so a translated menu is searchable in its own
+   * language rather than only in English.
+   */
+  slashCommands: Partial<Record<BlockType, SlashCommandLabel>>;
 
   /** Formatting toolbar's own name. */
   formatToolbar: string;
@@ -66,6 +88,8 @@ export interface NEditorLabels {
   /** Live-region announcements. `{count}` and `{type}` are substituted. */
   blocksSelected: string;
   blockSelected: string;
+  /** Zero is its own sentence, not the plural with a `0` in front of it. */
+  noBlocksSelected: string;
   blocksDeleted: string;
   blockDeleted: string;
   toggleCollapsed: string;
@@ -82,6 +106,83 @@ export interface NEditorLabels {
   redone: string;
   leftEditor: string;
 }
+
+/**
+ * Every block type the slash menu offers, so a partial override can always fall
+ * back to a complete set rather than dropping an entry from the menu.
+ */
+export const DEFAULT_SLASH_COMMANDS: Record<BlockType, SlashCommandLabel> = {
+  paragraph: {
+    label: 'Text',
+    description: 'Just start writing with plain text.',
+    keywords: ['text', 'paragraph', 'plain'],
+  },
+  heading1: {
+    label: 'Heading 1',
+    description: 'Big section heading.',
+    keywords: ['heading', 'h1', 'title', 'large'],
+  },
+  heading2: {
+    label: 'Heading 2',
+    description: 'Medium section heading.',
+    keywords: ['heading', 'h2', 'subtitle', 'medium'],
+  },
+  heading3: {
+    label: 'Heading 3',
+    description: 'Small section heading.',
+    keywords: ['heading', 'h3', 'small'],
+  },
+  bulleted_list: {
+    label: 'Bulleted list',
+    description: 'Create a simple bulleted list.',
+    keywords: ['bullet', 'list', 'unordered', 'ul'],
+  },
+  numbered_list: {
+    label: 'Numbered list',
+    description: 'Create a list with numbering.',
+    keywords: ['number', 'list', 'ordered', 'ol'],
+  },
+  todo: {
+    label: 'To-do list',
+    description: 'Track tasks with a checkbox.',
+    keywords: ['todo', 'task', 'checkbox', 'check'],
+  },
+  quote: {
+    label: 'Quote',
+    description: 'Capture a quote.',
+    keywords: ['quote', 'blockquote', 'cite'],
+  },
+  code: {
+    label: 'Code',
+    description: 'Capture a code snippet.',
+    keywords: ['code', 'snippet', 'pre', 'monospace'],
+  },
+  callout: {
+    label: 'Callout',
+    description: 'Make writing stand out.',
+    keywords: ['callout', 'note', 'info', 'aside', 'tip', 'warning'],
+  },
+  toggle: {
+    label: 'Toggle list',
+    description: 'Hide content inside a collapsible block.',
+    keywords: ['toggle', 'collapse', 'details', 'accordion', 'fold'],
+  },
+  image: {
+    label: 'Image',
+    description: 'Embed a picture by URL.',
+    keywords: ['image', 'picture', 'photo', 'img', 'embed'],
+  },
+  table: {
+    label: 'Table',
+    description: 'Add a simple table.',
+    keywords: ['table', 'grid', 'rows', 'columns'],
+  },
+  divider: {
+    label: 'Divider',
+    description: 'Visually divide blocks.',
+    keywords: ['divider', 'separator', 'hr', 'line'],
+  },
+};
 
 export const DEFAULT_LABELS: NEditorLabels = {
   editor: 'Rich text editor',
@@ -130,6 +231,7 @@ export const DEFAULT_LABELS: NEditorLabels = {
   iconCustom: 'Custom icon',
 
   slashMenu: 'Block types',
+  slashCommands: DEFAULT_SLASH_COMMANDS,
 
   formatToolbar: 'Text formatting',
 
@@ -143,6 +245,7 @@ export const DEFAULT_LABELS: NEditorLabels = {
 
   blocksSelected: '{count} blocks selected',
   blockSelected: '1 block selected',
+  noBlocksSelected: 'No blocks selected',
   blocksDeleted: '{count} blocks deleted',
   blockDeleted: 'Block deleted',
   toggleCollapsed: 'Toggle collapsed',
@@ -166,7 +269,26 @@ export function resolveLabels(overrides?: Partial<NEditorLabels>): NEditorLabels
     ...DEFAULT_LABELS,
     ...overrides,
     placeholders: { ...DEFAULT_LABELS.placeholders, ...overrides?.placeholders },
+    // Per entry, like placeholders: translating one command must not blank the
+    // other thirteen.
+    slashCommands: { ...DEFAULT_LABELS.slashCommands, ...overrides?.slashCommands },
   };
+}
+
+/**
+ * Picks the plural form for a count, then substitutes into it.
+ *
+ * English needs three forms here, not two. Zero is a different sentence — "No
+ * blocks selected" — and a live region that reads "0 blocks selected" is how a
+ * screen-reader user hears an empty selection otherwise.
+ */
+export function pluralLabel(
+  forms: { readonly zero: string; readonly one: string; readonly other: string },
+  count: number,
+): string {
+  const template = count === 0 ? forms.zero : count === 1 ? forms.one : forms.other;
+
+  return formatLabel(template, { count });
 }
 
 /** Substitutes `{name}` placeholders in a label. */

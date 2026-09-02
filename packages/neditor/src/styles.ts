@@ -401,7 +401,9 @@ export const NEDITOR_STYLES = `
   min-width: 6rem;
   padding: 0;
   border: 1px solid var(--neditor-table-border);
-  text-align: left;
+  /* Logical, like every other alignment here: a physical left would park the
+     text against the closing edge of every cell under dir="rtl". */
+  text-align: start;
   vertical-align: top;
 }
 
@@ -556,7 +558,9 @@ export const NEDITOR_STYLES = `
   /* Exactly the reserved width, so it never overhangs the editor. */
   width: var(--neditor-gutter-width);
   height: 1.75rem;
-  padding-right: 0.25rem;
+  /* The gap sits between the handle and the text, which is the inline-end side
+     in both directions; a physical right puts it behind the handle in RTL. */
+  padding-inline-end: 0.25rem;
   /* Anchored by its inline-end edge to where the block's text starts. */
   transform: translateX(-100%);
   opacity: 0;
@@ -921,6 +925,15 @@ export const NEDITOR_STYLES = `
     color: HighlightText;
     box-shadow: none;
     outline: 2px solid Highlight;
+  }
+
+  /* forced-color-adjust inherits, so the opt-out above took the whole subtree
+     with it: bullets and completed to-dos kept their author colour and were
+     painted onto the system Highlight, at around 1.2:1. Only the block box
+     itself opts out; everything inside it goes back to the system palette,
+     where an unforced colour is dropped and HighlightText is inherited. */
+  .neditor-block[data-selected='true'] * {
+    forced-color-adjust: auto;
   }
 
   .neditor-slash-menu__item[data-active='true'],

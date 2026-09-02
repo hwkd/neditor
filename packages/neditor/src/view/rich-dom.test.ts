@@ -103,6 +103,30 @@ describe('parsing foreign HTML', () => {
     ]);
   });
 
+  test('an explicit style clears the mark its tag implies', () => {
+    // Google Docs wraps its whole payload in <b style="font-weight:normal">, so
+    // a tag that can only add marks makes every Google Docs paste bold.
+    expect(fromHtml('<b style="font-weight:normal">a</b>')).toEqual([{ text: 'a' }]);
+    expect(fromHtml('<strong style="font-weight:400">a</strong>')).toEqual([{ text: 'a' }]);
+    expect(fromHtml('<i style="font-style:normal">a</i>')).toEqual([{ text: 'a' }]);
+    expect(fromHtml('<u style="text-decoration:none">a</u>')).toEqual([{ text: 'a' }]);
+    expect(fromHtml('<s style="text-decoration-line:none">a</s>')).toEqual([{ text: 'a' }]);
+  });
+
+  test('a style clears a mark inherited from an ancestor', () => {
+    expect(fromHtml('<b>a<span style="font-weight:400">b</span></b>')).toEqual([
+      { text: 'a', marks: ['bold'] },
+      { text: 'b' },
+    ]);
+  });
+
+  test('a style that says nothing about a mark leaves the tag alone', () => {
+    expect(fromHtml('<b style="color:red">a</b>')).toEqual([{ text: 'a', marks: ['bold'] }]);
+    expect(fromHtml('<u style="font-weight:normal">a</u>')).toEqual([
+      { text: 'a', marks: ['underline'] },
+    ]);
+  });
+
   test('unknown wrappers contribute nothing but their text', () => {
     expect(fromHtml('<div><span><font color="red">a</font></span></div>')).toEqual([{ text: 'a' }]);
   });
@@ -149,6 +173,15 @@ describe('parsing foreign HTML', () => {
 
       expect(richToPlainText(parsed)).toBe('hello');
     });
+
+    test('an <svg> is skipped, source text and all', () => {
+      // Outside the HTML namespace `tagName` keeps its source case, so only an
+      // uppercased comparison matches: <svg><style> and <svg><title> are read
+      // as document text otherwise.
+      expect(richToPlainText(fromHtml('<p>a</p><svg><title>tip</title><desc>d</desc></svg>'))).toBe(
+        'a',
+      );
+    });
   });
 
   test('a trailing filler <br> is not content', () => {
@@ -169,7 +202,7 @@ describe('blocksFromHtml', () => {
 
   test('nothing in, nothing out', () => {
     expect(parse('')).toEqual([]);
-    expect(parse('<p></p><div></div>')).toEqual([]);
+    expect(parse('<div></div>')).toEqual([]);
   });
 
   test.each([
@@ -253,6 +286,121 @@ describe('blocksFromHtml', () => {
 
   test('scripts and styles never become blocks', () => {
     expect(texts('<script>alert(1)</script><style>a{}</style><p>safe</p>')).toEqual(['safe']);
+    expect(texts('<iframe src="https://a.test/">x</iframe><p>safe</p>')).toEqual(['safe']);
+  });
+
+  test('an <svg> never becomes a block, whatever it holds', () => {
+    // Its tags are lowercase, so they only match the skip list uppercased.
+    expect(texts('<svg><title>tip</title><desc>d</desc></svg><p>safe</p>')).toEqual(['safe']);
+  });
+
+  describe('an inline wrapper holding blocks', () => {
+    test('does not collapse the blocks inside it', () => {
+      // Google Docs wraps its entire clipboard payload in one <b>.
+      const html =
+        '<b style="font-weight:normal" id="docs-internal-guid-1">' +
+        '<h1>Title</h1><p>Body</p><ul><li>one</li><li>two</li></ul></b>';
+
+      expect(types(html)).toEqual(['heading1', 'paragraph', 'bulleted_list', 'bulleted_list']);
+      expect(texts(html)).toEqual(['Title', 'Body', 'one', 'two']);
+    });
+
+    test('carries only the bold the source really had', () => {
+      // The whole point of that wrapper's font-weight:normal: without it every
+      // Google Docs paste arrives bold from end to end.
+      const blocks = parse(
+        '<b style="font-weight:normal" id="docs-internal-guid-1"><p>plain</p>' +
+          '<p><span style="font-weight:700">loud</span></p></b>',
+      );
+
+      expect(blocks.map((block) => block.content)).toEqual([
+        [{ text: 'plain' }],
+        [{ text: 'loud', marks: ['bold'] }],
+      ]);
+    });
+
+    test('keeps its own formatting on the blocks it holds', () => {
+      expect(parse('<b><p>one</p><p>two</p></b>').map((block) => block.content)).toEqual([
+        [{ text: 'one', marks: ['bold'] }],
+        [{ text: 'two', marks: ['bold'] }],
+      ]);
+    });
+
+    test('keeps its href on the blocks it holds', () => {
+      expect(parse('<a href="https://a.test/"><p>one</p></a>')[0]?.content).toEqual([
+        { text: 'one', link: 'https://a.test/' },
+      ]);
+    });
+
+    test('keeps a table it holds readable', () => {
+      // The formatting has to reach the cell text without moving a single
+      // section, row or cell: pushTable reads the grid with `:scope >` queries.
+      const rows = parse(
+        '<b><table><thead><tr><th>h</th></tr></thead>' +
+          '<tbody><tr><td>a</td></tr></tbody></table></b>',
+      )[0]?.rows;
+
+      expect(rows).toEqual([
+        [[{ text: 'h', marks: ['bold'] }]],
+        [[{ text: 'a', marks: ['bold'] }]],
+      ]);
+    });
+
+    test('reaches the text of a caption or a summary', () => {
+      const image = parse(
+        '<b><figure><img src="https://a.test/x.png"><figcaption>Cap</figcaption></figure></b>',
+      );
+      const toggle = parse('<b><details><summary>T</summary></details></b>');
+
+      expect(image[0]?.content).toEqual([{ text: 'Cap', marks: ['bold'] }]);
+      expect(toggle[0]?.content).toEqual([{ text: 'T', marks: ['bold'] }]);
+    });
+
+    test('keeps the space between two elements it wraps', () => {
+      expect(texts('<b><p><span>a</span> <span>b</span></p></b>')).toEqual(['a b']);
+    });
+
+    test('is descended into however deeply it is wrapped', () => {
+      expect(texts('<span><em><span><p>a</p><p>b</p></span></em></span>')).toEqual(['a', 'b']);
+    });
+
+    test('still reads inline text of its own', () => {
+      expect(texts('<b>lead<p>para</p></b>')).toEqual(['lead', 'para']);
+    });
+
+    test('is still inline when it holds no blocks', () => {
+      expect(texts('<b>just <em>text</em></b>')).toEqual(['just text']);
+    });
+  });
+
+  describe('empty blocks', () => {
+    test('an empty element is a blank block, not nothing', () => {
+      // blocksToHtml writes an empty block as an empty element, so dropping it
+      // loses a line on every copy-paste. README documents this for the HTML path.
+      expect(types('<p></p>')).toEqual(['paragraph']);
+      expect(types('<h1></h1>')).toEqual(['heading1']);
+      expect(types('<blockquote></blockquote>')).toEqual(['quote']);
+      expect(types('<ul><li></li></ul>')).toEqual(['bulleted_list']);
+      expect(texts('<p>A</p><p></p><p>B</p>')).toEqual(['A', '', 'B']);
+    });
+
+    test('an empty to-do keeps its checkbox', () => {
+      const blocks = parse('<ul><li>☐ </li><li>☑ </li></ul>');
+
+      expect(blocks.map((block) => block.type)).toEqual(['todo', 'todo']);
+      expect(blocks.map((block) => block.checked)).toEqual([false, true]);
+    });
+
+    test('an item that only holds a nested list is not a blank bullet', () => {
+      expect(types('<ul><li><ul><li>a</li></ul></li></ul>')).toEqual(['bulleted_list']);
+    });
+
+    test('a blank line survives a round trip through the serializer', () => {
+      const source = parse('<p>A</p><p></p><p>B</p>');
+      const round = blocksFromHtml(document, blocksToHtml(document, source));
+
+      expect(round.map(blockText)).toEqual(['A', '', 'B']);
+    });
   });
 
   test('a document round-trips through blocksToHtml', () => {
@@ -380,6 +528,38 @@ describe('callouts and toggles in HTML', () => {
     expect(parse('<blockquote>note</blockquote>')[0]?.type).toBe('quote');
   });
 
+  test('a quoted list survives, nested under the quote', () => {
+    // `> - item` on GitHub, Wikipedia and Stack Overflow.
+    const blocks = parse('<blockquote><p>intro</p><ul><li>a</li><li>b</li></ul></blockquote>');
+
+    expect(blocks.map((block) => block.type)).toEqual(['quote', 'bulleted_list', 'bulleted_list']);
+    expect(blocks.map(blockText)).toEqual(['intro', 'a', 'b']);
+    expect(blocks.map((block) => block.depth)).toEqual([0, 1, 1]);
+  });
+
+  test('a nested quoted list keeps its own nesting', () => {
+    const blocks = parse('<blockquote><p>q</p><ul><li>a<ul><li>b</li></ul></li></ul></blockquote>');
+
+    expect(blocks.map(blockText)).toEqual(['q', 'a', 'b']);
+    expect(blocks.map((block) => block.depth)).toEqual([0, 1, 2]);
+  });
+
+  test('a blockquote holding nothing but a list is that list', () => {
+    const blocks = parse('<blockquote><ul><li>a</li></ul></blockquote>');
+
+    expect(blocks.map((block) => block.type)).toEqual(['bulleted_list']);
+    expect(blocks.map((block) => block.depth)).toEqual([0]);
+  });
+
+  test('a callout keeps both its text and its list', () => {
+    const blocks = parse(
+      '<blockquote data-neditor-callout="📌"><p>note</p><ol><li>step</li></ol></blockquote>',
+    );
+
+    expect(blocks.map((block) => block.type)).toEqual(['callout', 'numbered_list']);
+    expect(blocks.map(blockText)).toEqual(['note', 'step']);
+  });
+
   test('a <details> becomes a toggle from its summary', () => {
     const blocks = parse('<details open><summary>Title</summary><p>Body</p></details>');
 
@@ -441,6 +621,14 @@ describe('images and tables in HTML', () => {
 
     expect(blocks[0]?.type).toBe('image');
     expect(blockText(blocks[0]!)).toBe('');
+  });
+
+  test('a linked image is still an image', () => {
+    // A wrapper with nothing but an image inside has no block to hand its href
+    // to, so it is walked as it stands rather than copied inward.
+    expect(
+      parse('<a href="https://a.test/"><img src="https://a.test/x.png"></a>')[0],
+    ).toMatchObject({ type: 'image', src: 'https://a.test/x.png' });
   });
 
   test('an unsafe or missing source drops the block entirely', () => {

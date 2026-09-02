@@ -310,6 +310,16 @@ describe('selection is not signalled by colour alone', () => {
     expect(NEDITOR_STYLES).toMatch(/\[data-selected='true'\][^}]*box-shadow/);
     expect(NEDITOR_STYLES).toContain(':focus-visible');
   });
+
+  test('the forced-colors opt-out stops at the selected block', () => {
+    // forced-color-adjust is inherited, so opting the block out took its whole
+    // subtree with it: the bullet of a selected list and the text of a selected
+    // completed to-do kept their author colour on the system Highlight, at
+    // roughly 1.2:1. Descendants have to be handed back to the system palette.
+    expect(NEDITOR_STYLES).toMatch(
+      /\.neditor-block\[data-selected='true'\] \*\s*\{\s*forced-color-adjust: auto;/,
+    );
+  });
 });
 
 describe('the slash menu is announced', () => {
@@ -366,6 +376,41 @@ describe('localisation', () => {
     ).toBe('Développer ou réduire');
     expect(editor.element.querySelector('.neditor-block__icon')?.getAttribute('aria-label')).toBe(
       "Changer l'icône",
+    );
+  });
+
+  test('the drag handle takes its name from the labels', () => {
+    const editor = mount([block({ content: [{ text: 'a' }] })], {
+      labels: { gutterHandle: 'Glisser pour déplacer, cliquer pour sélectionner' },
+    });
+
+    const handle = editor.element.querySelector('.neditor-gutter__handle');
+
+    expect(handle?.getAttribute('aria-label')).toBe(
+      'Glisser pour déplacer, cliquer pour sélectionner',
+    );
+    expect(handle?.getAttribute('title')).toBe('Glisser pour déplacer, cliquer pour sélectionner');
+  });
+
+  test('the slash menu is built from the labels', () => {
+    const editor = mount([block({})], {
+      labels: {
+        slashCommands: {
+          paragraph: {
+            label: 'Texte',
+            description: 'Commencez simplement à écrire.',
+            keywords: ['texte'],
+          },
+        },
+      },
+    });
+    const content = editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
+    content.focus();
+
+    typeSlash(content);
+
+    expect(document.querySelector('[role="option"] .neditor-slash-menu__label')?.textContent).toBe(
+      'Texte',
     );
   });
 

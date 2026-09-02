@@ -99,35 +99,13 @@ const CORPUS: Record<string, Block[]> = {
 
 /** Currently broken through `toMarkdown` -> `blocksFromMarkdown`. */
 const KNOWN_MARKDOWN_FAILURES: Record<string, string> = {
-  'italic after word char': '#46 the italic rule refuses to fire after a word character',
-  'bold+italic': '#46 `a***b***` comes back as bold with stray asterisks in the text',
-  'link with paren': '#49 the destination is not escaped, so the first `)` closes the link',
-  'empty heading1': '#10 the marker loses its trailing space to trimEnd before matching',
-  'empty quote': '#10',
-  'empty todo': '#10 and the checked flag is lost with it',
-  'empty bulleted': '#10',
-  'empty callout': '#10',
-  'empty toggle': '#10',
-  'quote starting with emoji': '#48 the parser promotes any emoji-led quote to a callout',
-  'callout arrow icon': '#48 an icon outside the pictographic classes demotes it to a quote',
-  'paragraph of dashes': '#50 `-` is not escaped, so the text is read back as a divider',
-  'code block with fence': '#11 the fence is never lengthened past an inner fence',
-  'image with paren in src': '#51 the src is not escaped, so IMAGE_LINE stops matching',
+  // Markdown has no way to express an empty paragraph: the writer emits a blank
+  // line and the reader skips blank lines. The HTML path preserves them.
   'empty paragraph between': 'documented gap: Markdown cannot express an empty paragraph',
-  'long block with bold': '#47 past INLINE_LIMIT the delimiters are left in the text',
 };
 
 /** Currently broken through `blocksToHtml` -> `blocksFromHtml`. */
-const KNOWN_HTML_FAILURES: Record<string, string> = {
-  // Wider than the audit's #16, which named only empty paragraphs: pushBlock
-  // drops ANY block whose runs are empty, so every empty non-paragraph block
-  // is lost by the clipboard path too.
-  'empty heading1': '#16 pushBlock drops a block whose runs are empty',
-  'empty quote': '#16',
-  'empty todo': '#16',
-  'empty bulleted': '#16',
-  'empty paragraph between': '#16 — and README:534 claims the HTML path keeps these',
-};
+const KNOWN_HTML_FAILURES: Record<string, string> = {};
 
 /** The parts of a block a round trip has to preserve. */
 function shape(blocks: readonly Block[]): unknown {

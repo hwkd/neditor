@@ -329,6 +329,41 @@ describe('rich markdown serialization', () => {
     expect(toMarkdown({ blocks: [block] })).toContain('const a = **not bold**;');
   });
 
+  test('the fence is longer than any backtick run in the code', () => {
+    const block = { ...createBlock('code'), content: richFromPlainText('```js\nx\n```') };
+
+    // A three-backtick fence would be closed by the first line of its own
+    // payload, and the block would come back as three.
+    expect(toMarkdown({ blocks: [block] })).toBe('````\n```js\nx\n```\n````');
+  });
+
+  test('a destination holding a paren is written in angle brackets', () => {
+    const content = richSetLink(richFromPlainText('Mercury'), 0, 7, 'https://a.test/M_(planet)');
+    const block = { ...createBlock('paragraph'), content };
+
+    expect(toMarkdown({ blocks: [block] })).toBe('[Mercury](<https://a.test/M_(planet)>)');
+  });
+
+  test('an empty block is written as a bare marker', () => {
+    const empty = [
+      createBlock('heading1'),
+      createBlock('todo'),
+      { ...createBlock('callout'), icon: '★' },
+    ];
+
+    expect(toMarkdown({ blocks: empty })).toBe('#\n\n- [ ]\n\n> [!★]');
+  });
+
+  test('a callout names its icon in brackets, so a quote cannot imitate it', () => {
+    const block = { ...createBlock('callout', 'note'), icon: '→' };
+
+    expect(toMarkdown({ blocks: [block] })).toBe('> [!→] note');
+  });
+
+  test('a paragraph that reads as a divider is escaped', () => {
+    expect(toMarkdown({ blocks: [createBlock('paragraph', '---')] })).toBe('\\---');
+  });
+
   test('converting to a code block strips inline marks', () => {
     const content = richSetMark(richFromPlainText('abc'), 0, 3, 'bold', true);
     const block = { ...createBlock('paragraph'), content };

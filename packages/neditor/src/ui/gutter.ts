@@ -60,7 +60,7 @@ export class Gutter {
       doc,
       'neditor-gutter__handle',
       HANDLE_ICON,
-      'Drag to move, click to select',
+      labels.gutterHandle,
     );
 
     this.#addButton.addEventListener('click', (event) => {

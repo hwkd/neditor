@@ -11,7 +11,7 @@ import {
   richSetLink,
   richSetMark,
 } from '../model/rich-text.ts';
-import { matchInlineRule } from './inline-rules.ts';
+import { INLINE_SPAN_LIMIT, matchInlineRule } from './inline-rules.ts';
 
 /**
  * Markdown → blocks, for pasted plain text.
@@ -23,35 +23,49 @@ import { matchInlineRule } from './inline-rules.ts';
  * paragraphs.
  */
 
-/** Line prefixes, longest-first so `###` is not read as `#`. */
+/**
+ * Line prefixes, longest-first so `###` is not read as `#`.
+ *
+ * Each ends in `\s+|$`, not `\s+`: an empty block is a marker with nothing
+ * after it, and a marker that needs a trailing space to be recognised is a
+ * marker that any trailing-whitespace trim silently turns into a paragraph.
+ */
 const BLOCK_PREFIXES: ReadonlyArray<readonly [RegExp, BlockType]> = [
-  [/^###\s+/, 'heading3'],
-  [/^##\s+/, 'heading2'],
-  [/^#\s+/, 'heading1'],
+  [/^###(?:\s+|$)/, 'heading3'],
+  [/^##(?:\s+|$)/, 'heading2'],
+  [/^#(?:\s+|$)/, 'heading1'],
   // A to-do is a list item whose marker is a checkbox, so it wins over the list.
-  [/^[-*+]\s+\[[ xX]\]\s+/, 'todo'],
-  [/^\[[ xX]\]\s+/, 'todo'],
-  [/^[-*+]\s+/, 'bulleted_list'],
-  [/^\d+[.)]\s+/, 'numbered_list'],
-  [/^>\s+/, 'quote'],
+  [/^[-*+]\s+\[[ xX]\](?:\s+|$)/, 'todo'],
+  [/^\[[ xX]\](?:\s+|$)/, 'todo'],
+  [/^[-*+](?:\s+|$)/, 'bulleted_list'],
+  [/^\d+[.)](?:\s+|$)/, 'numbered_list'],
+  [/^>(?:\s+|$)/, 'quote'],
 ];
 
 const DIVIDER = /^(?:-{3,}|\*{3,}|_{3,})$/;
 
 /**
- * A quote whose first character is a symbol is a callout.
+ * A callout is a quote whose first token is its bracketed icon.
  *
- * Widened past Extended_Pictographic because the icon picker accepts any
- * grapheme: `★` is a perfectly good callout icon and used to degrade the whole
- * block back to a quote.
+ * Reading any emoji-led quote as a callout was ambiguous in both directions: a
+ * quote that legitimately opened with an emoji came back retyped, and an icon
+ * outside the pictographic classes came back as a quote with the icon stuck to
+ * the front of its text. The brackets say which one it is, and `toMarkdown`
+ * escapes `[` in text, so no quote can imitate the marker.
  */
-const CALLOUT_ICON = /^(\p{Extended_Pictographic}\uFE0F?|[\p{So}\p{Sk}])\s+/u;
+const CALLOUT_MARKER = /^\[!((?:\\.|[^\]\n])+)\](?:\s+|$)/;
 
 /** The markers `toMarkdown` uses for a toggle, collapsed and expanded. */
-const TOGGLE_MARKER = /^([\u25B8\u25BE])\s+/;
+const TOGGLE_MARKER = /^([\u25B8\u25BE])(?:\s+|$)/;
 
-/** A line that is nothing but an image. */
-const IMAGE_LINE = /^!\[([^\]]*)\]\(([^)\s]+)\)$/;
+/**
+ * A line that is nothing but an image.
+ *
+ * The destination comes in either form CommonMark allows, because a `)` in a
+ * URL has to go inside angle brackets to survive; the alt text may carry
+ * escapes, since a bare `]` would close the label early.
+ */
+const IMAGE_LINE = /^!\[((?:\\.|[^\]\n])*)\]\((?:<([^<>\n]*)>|([^)\s]+))\)$/;
 
 /** A GFM table row; the leading pipe is what identifies one. */
 const TABLE_ROW = /^\|/;
@@ -115,11 +129,40 @@ function parseTableLines(lines: readonly string[]): TableRows {
 
   return rows;
 }
-const FENCE = /^```/;
+/** An opening fence: three or more backticks, plus an optional info string. */
+const FENCE_OPEN = /^(`{3,})/;
+
 const CHECKED = /\[[xX]\]/;
 
-/** Long lines skip inline parsing; the scan below is quadratic in line length. */
-const INLINE_LIMIT = 2000;
+/**
+ * The length of the fence this line closes, or 0 for a line that closes none.
+ *
+ * A closing fence is backticks and nothing else, and at least as long as the
+ * one that opened the block — otherwise ```` ``` ```` inside the code ends it
+ * three lines early and one block comes back as three.
+ */
+function closingFenceLength(line: string): number {
+  const match = /^(`{3,})\s*$/.exec(line);
+
+  return match?.[1]?.length ?? 0;
+}
+
+/**
+ * Characters that can close an inline rule.
+ *
+ * Every rule is anchored at the caret, so a character that ends none of them
+ * cannot complete a match and the scan can skip the rules entirely.
+ */
+const CLOSERS = new Set(['*', '_', '~', '`', '>', ')']);
+
+/**
+ * How many runs a rule may reach back over, alongside the character window.
+ *
+ * Applying a match rebuilds the runs it can still reach, so without this a line
+ * that is nothing but emphasis costs the square of the number of spans on it. A
+ * span crossing this many changes of formatting is not one anybody wrote.
+ */
+const RUN_WINDOW = 32;
 
 /** Characters `escapeMarkdownText` protects, and which `\\` therefore makes literal. */
 const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!]/;
@@ -152,18 +195,31 @@ function endsWithSoftBreak(line: string): boolean {
  */
 function joinSoftBreaks(lines: readonly string[]): string[] {
   const out: string[] = [];
-  let fenced = false;
+  let fence = 0;
 
   for (const line of lines) {
-    if (FENCE.test(line.trimStart())) {
-      fenced = !fenced;
+    const trimmed = line.trimStart();
+
+    if (fence > 0) {
+      if (closingFenceLength(trimmed) >= fence) {
+        fence = 0;
+      }
+
+      out.push(line);
+      continue;
+    }
+
+    const opening = FENCE_OPEN.exec(trimmed);
+
+    if (opening?.[1]) {
+      fence = opening[1].length;
       out.push(line);
       continue;
     }
 
     const previous = out.at(-1);
 
-    if (!fenced && previous !== undefined && endsWithSoftBreak(previous)) {
+    if (previous !== undefined && endsWithSoftBreak(previous)) {
       out[out.length - 1] = `${previous.slice(0, -1)}\n${line}`;
       continue;
     }
@@ -185,18 +241,62 @@ function stripEscapes(text: string): string {
  * Rather than a second grammar, this replays {@link matchInlineRule} over each
  * growing prefix — exactly what typing the text would have produced, so pasting
  * `**a**` and typing it cannot diverge.
+ *
+ * Plain text is buffered and folded into the runs only where a rule fires, the
+ * rules are only tried on a character that could close one, and text the rules
+ * can no longer reach is set aside — so the pass is linear in the length of the
+ * line rather than quadratic. There used to be a length cap here instead, past
+ * which a pasted paragraph kept its raw `**` markup.
  */
 export function parseInlineMarkdown(text: string): RichText {
   if (text.length === 0) {
     return [];
   }
 
-  if (text.length > INLINE_LIMIT) {
-    return richFromPlainText(stripEscapes(text));
-  }
-
+  // What a rule can still reach, plus the character of context the lookbehinds
+  // need. Everything before it is finished and moves to `done`.
+  const window = INLINE_SPAN_LIMIT + 1;
+  const done: RichText = [];
   let content: RichText = [];
+  let pending = '';
   let matchable = '';
+  let retired = false;
+
+  const flush = (): void => {
+    if (pending.length > 0) {
+      content = richConcat(content, richFromPlainText(pending));
+      pending = '';
+    }
+  };
+
+  /**
+   * Retires the runs no later match can reach.
+   *
+   * `content` and `matchable` are the same text, offset for offset — `pending`
+   * is the tail of both — so cutting the same count off the front of each keeps
+   * every offset a rule reports valid. What stays is a character longer than
+   * the window, so a rule always has the context its lookbehind needs and never
+   * matches against the cut.
+   */
+  const retire = (): void => {
+    let cut = 0;
+    let runs = 0;
+
+    while (
+      runs < content.length &&
+      (matchable.length - cut - content[runs]!.text.length > window ||
+        content.length - runs > RUN_WINDOW)
+    ) {
+      cut += content[runs]!.text.length;
+      runs += 1;
+    }
+
+    if (runs > 0) {
+      done.push(...content.splice(0, runs));
+      matchable = matchable.slice(cut);
+      retired = true;
+    }
+  };
 
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index] ?? '';
@@ -212,12 +312,26 @@ export function parseInlineMarkdown(text: string): RichText {
       projected = ESCAPED;
     }
 
-    content = richConcat(content, richFromPlainText(literal));
+    pending += literal;
     matchable += projected;
+
+    if (matchable.length > window || content.length > RUN_WINDOW) {
+      retire();
+    }
+
+    if (!CLOSERS.has(projected)) {
+      continue;
+    }
 
     const match = matchInlineRule(matchable);
 
     if (!match) {
+      continue;
+    }
+
+    // The first retained character is the one place a lookbehind has nothing to
+    // look at, so a span opening there is not trusted rather than guessed at.
+    if (retired && match.start === 0) {
       continue;
     }
 
@@ -227,6 +341,8 @@ export function parseInlineMarkdown(text: string): RichText {
     if (innerEnd <= innerStart) {
       continue;
     }
+
+    flush();
 
     // Strip the closing delimiter first, so the opening offsets stay valid —
     // and apply the identical splice to the projection to keep them aligned.
@@ -245,7 +361,9 @@ export function parseInlineMarkdown(text: string): RichText {
     }
   }
 
-  return content;
+  flush();
+
+  return done.length > 0 ? richConcat(done, content) : content;
 }
 
 /** Leading whitespace as an indent level: two spaces or one tab per level. */
@@ -288,6 +406,7 @@ export function blocksFromMarkdown(text: string): Block[] {
   const blocks: Block[] = [];
   let fence: string[] | null = null;
   let fenceDepth = 0;
+  let fenceLength = 0;
   let table: string[] | null = null;
   let tableDepth = 0;
 
@@ -330,20 +449,25 @@ export function blocksFromMarkdown(text: string): Block[] {
 
     flushTable();
 
-    if (FENCE.test(trimmedStart)) {
-      if (fence) {
+    if (fence) {
+      // Only a fence at least as long as the opening one closes the block; a
+      // shorter one, or one carrying an info string, is code.
+      if (closingFenceLength(trimmedStart) >= fenceLength) {
         blocks.push(createBlock('code', fence.join('\n'), fenceDepth));
         fence = null;
       } else {
-        fence = [];
-        fenceDepth = indentOf(raw);
+        fence.push(raw);
       }
 
       continue;
     }
 
-    if (fence) {
-      fence.push(raw);
+    const opening = FENCE_OPEN.exec(trimmedStart);
+
+    if (opening?.[1]) {
+      fence = [];
+      fenceLength = opening[1].length;
+      fenceDepth = indentOf(raw);
       continue;
     }
 
@@ -359,12 +483,12 @@ export function blocksFromMarkdown(text: string): Block[] {
     const image = IMAGE_LINE.exec(line);
 
     if (image) {
-      const src = sanitizeImageUrl(image[2] ?? '');
+      const src = sanitizeImageUrl(image[2] ?? image[3] ?? '');
 
       if (src) {
         const block = createBlock('image', [], depth);
         block.src = src;
-        block.alt = image[1] ?? '';
+        block.alt = stripEscapes(image[1] ?? '');
         blocks.push(block);
         continue;
       }
@@ -382,11 +506,11 @@ export function blocksFromMarkdown(text: string): Block[] {
     let collapsed: boolean | undefined;
 
     if (type === 'quote') {
-      const callout = CALLOUT_ICON.exec(rest);
+      const callout = CALLOUT_MARKER.exec(rest);
 
       if (callout) {
         type = 'callout';
-        icon = callout[1];
+        icon = stripEscapes(callout[1] ?? '');
         rest = rest.slice(callout[0].length);
       }
     } else if (type === 'bulleted_list') {

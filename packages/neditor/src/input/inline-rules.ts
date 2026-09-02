@@ -23,15 +23,34 @@ const INLINE_RULES: readonly InlineRule[] = [
   // Bold before italic: `**x**` must not be read as an italic `*x*`.
   { pattern: /\*\*([^*\n]+)\*\*$/, mark: 'bold' },
   { pattern: /__([^_\n]+)__$/, mark: 'bold' },
-  { pattern: /(?<![*\w])\*([^*\n]+)\*$/, mark: 'italic' },
+  // Only the opening `*` of a longer run is refused, so `***x***` closes as
+  // bold and then as italic. A word character before it is not a reason to
+  // refuse: CommonMark restricts intra-word emphasis to `_`, and `toMarkdown`
+  // writes `*x*` whatever precedes it, so refusing left `Chapter*One*` sitting
+  // in the text as literal asterisks.
+  { pattern: /(?<!\*)\*([^*\n]+)\*$/, mark: 'italic' },
   { pattern: /(?<![_\w])_([^_\n]+)_$/, mark: 'italic' },
   { pattern: /~~([^~\n]+)~~$/, mark: 'strikethrough' },
   { pattern: /`([^`\n]+)`$/, mark: 'code' },
   // Markdown has no underline, so `toMarkdown` writes the HTML tag; this is
   // what reads it back rather than leaving seven junk characters in the text.
   { pattern: /<u>([^<\n]+)<\/u>$/, mark: 'underline' },
+  // The angle-bracket form first: it is how a destination holding a `)` — the
+  // character that would otherwise close the link — is written.
+  { pattern: /\[([^\]\n]+)\]\(<([^<>\n]*)>\)$/, isLink: true },
   { pattern: /\[([^\]\n]+)\]\(([^)\s]+)\)$/, isLink: true },
 ];
+
+/**
+ * How far back from the caret a rule may reach.
+ *
+ * Every pattern is anchored at the caret, so an unbounded scan costs the length
+ * of the block on each keystroke — and on each character of a paste, which made
+ * parsing a long line quadratic. A span longer than this is not emphasis anyone
+ * typed, and the previous answer to the cost was worse: lines past a couple of
+ * thousand characters were not parsed at all and kept their raw `**` markup.
+ */
+export const INLINE_SPAN_LIMIT = 2000;
 
 export interface InlineRuleMatch {
   /** Offset of the opening delimiter. */
@@ -53,12 +72,23 @@ export interface InlineRuleMatch {
  * offsets returned here are block offsets.
  */
 export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null {
+  // One character past the window, so the lookbehinds see what really precedes
+  // a candidate opening delimiter rather than the cut.
+  const offset = Math.max(0, textBeforeCaret.length - INLINE_SPAN_LIMIT - 1);
+  const window = offset === 0 ? textBeforeCaret : textBeforeCaret.slice(offset);
+
   for (const rule of INLINE_RULES) {
-    const match = rule.pattern.exec(textBeforeCaret);
+    const match = rule.pattern.exec(window);
     const whole = match?.[0];
     const inner = match?.[1];
 
     if (!match || whole === undefined || inner === undefined || inner.length === 0) {
+      continue;
+    }
+
+    // A match starting on the cut is the one place the lookbehind has no
+    // context, so it is not trusted; it would span the window entirely anyway.
+    if (offset > 0 && match.index === 0) {
       continue;
     }
 
@@ -80,8 +110,8 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
     const closeLength = whole.length - openLength - inner.length;
 
     return {
-      start: match.index,
-      end: match.index + whole.length,
+      start: offset + match.index,
+      end: offset + match.index + whole.length,
       openLength,
       closeLength,
       mark: rule.mark,

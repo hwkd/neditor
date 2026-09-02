@@ -1,7 +1,13 @@
 import { describe, expect, test } from 'vitest';
 
+import type { Block } from '../model/document.ts';
 import { blockText, createBlock, toMarkdown } from '../model/document.ts';
-import { richFromPlainText, richSetMark, richToPlainText } from '../model/rich-text.ts';
+import {
+  richFromPlainText,
+  richSetLink,
+  richSetMark,
+  richToPlainText,
+} from '../model/rich-text.ts';
 import { blocksFromMarkdown, parseInlineMarkdown } from './markdown.ts';
 
 const types = (md: string) => blocksFromMarkdown(md).map((b) => b.type);
@@ -160,8 +166,8 @@ describe('blocksFromMarkdown', () => {
 });
 
 describe('callouts and toggles', () => {
-  test('a quote led by an emoji is a callout', () => {
-    const blocks = blocksFromMarkdown('> 💡 remember this');
+  test('a quote whose first token is a bracketed icon is a callout', () => {
+    const blocks = blocksFromMarkdown('> [!💡] remember this');
 
     expect(blocks[0]?.type).toBe('callout');
     expect(blocks[0]?.icon).toBe('💡');
@@ -170,7 +176,23 @@ describe('callouts and toggles', () => {
 
   test('a multi-code-point emoji survives intact', () => {
     // ⚠️ is U+26A0 plus a variation selector.
-    expect(blocksFromMarkdown('> ⚠️ careful')[0]?.icon).toBe('⚠️');
+    expect(blocksFromMarkdown('> [!⚠️] careful')[0]?.icon).toBe('⚠️');
+  });
+
+  test('an icon that is not an emoji at all still names a callout', () => {
+    expect(blocksFromMarkdown('> [!→] onwards')[0]).toMatchObject({
+      type: 'callout',
+      icon: '→',
+    });
+  });
+
+  test('a quote that merely opens with an emoji is not a callout', () => {
+    // The emoji is the user's text, not an icon, and reading it as one both
+    // retyped the block and ate the character.
+    const blocks = blocksFromMarkdown('> 🔥 hot take');
+
+    expect(blocks[0]?.type).toBe('quote');
+    expect(blockText(blocks[0]!)).toBe('🔥 hot take');
   });
 
   test('a plain quote stays a quote', () => {
@@ -197,7 +219,7 @@ describe('callouts and toggles', () => {
   });
 
   test('inline marks still apply inside both', () => {
-    expect(blocksFromMarkdown('> 💡 a **b**')[0]?.content.at(-1)).toEqual({
+    expect(blocksFromMarkdown('> [!💡] a **b**')[0]?.content.at(-1)).toEqual({
       text: 'b',
       marks: ['bold'],
     });
@@ -209,7 +231,7 @@ describe('callouts and toggles', () => {
 
   test('both round-trip through toMarkdown', () => {
     const source = blocksFromMarkdown(
-      ['> 📌 pinned note', '- ▸ collapsed toggle', '- ▾ open toggle'].join('\n'),
+      ['> [!📌] pinned note', '- ▸ collapsed toggle', '- ▾ open toggle'].join('\n'),
     );
     const round = blocksFromMarkdown(toMarkdown({ blocks: source }));
 
@@ -400,6 +422,144 @@ describe('round-trip fidelity', () => {
     expect(back[0]?.type).toBe('table');
     expect(richToPlainText(cell ?? [])).toBe('a | b');
     expect(cell?.[0]?.marks).toEqual(['bold']);
+  });
+});
+
+/**
+ * The property the clipboard depends on: `toMarkdown` output parsed again is
+ * the document it came from. Each case below is a way the two used to disagree.
+ */
+describe('markdown round trip', () => {
+  const round = (blocks: Block[]): Block[] => blocksFromMarkdown(toMarkdown({ blocks }));
+  const only = (blocks: Block[]): Block => {
+    const back = round(blocks);
+
+    expect(back).toHaveLength(1);
+
+    return back[0]!;
+  };
+
+  test('a code fence inside a code block does not end it', () => {
+    const source = '```js\nx = 1\n```';
+
+    expect(blockText(only([createBlock('code', source)]))).toBe(source);
+  });
+
+  test('a fence longer than the block is still what closes it', () => {
+    const blocks = blocksFromMarkdown('````\n```\nx\n```\n````');
+
+    expect(blocks).toHaveLength(1);
+    expect(blockText(blocks[0]!)).toBe('```\nx\n```');
+  });
+
+  test('a link destination holding a paren survives', () => {
+    const link = 'https://a.test/M_(planet)';
+    const content = richSetLink(richFromPlainText('Mercury'), 0, 7, link);
+    const block = only([{ ...createBlock('paragraph'), content }]);
+
+    expect(blockText(block)).toBe('Mercury');
+    expect(block.content[0]?.link).toBe(link);
+  });
+
+  test('an image source holding a paren survives', () => {
+    const image = { ...createBlock('image'), src: 'https://a.test/a(1).png', alt: 'cat' };
+
+    expect(only([image])).toMatchObject({
+      type: 'image',
+      src: 'https://a.test/a(1).png',
+      alt: 'cat',
+    });
+  });
+
+  test('an image alt holding a bracket survives', () => {
+    const image = { ...createBlock('image'), src: 'https://a.test/x.png', alt: 'a ] b [c]' };
+
+    expect(only([image]).alt).toBe('a ] b [c]');
+  });
+
+  test('a paragraph of dashes is not read back as a divider', () => {
+    expect(only([createBlock('paragraph', '---')])).toMatchObject({ type: 'paragraph' });
+    expect(blockText(only([createBlock('paragraph', '---')]))).toBe('---');
+  });
+
+  test.each(['-', '#', '>', '+', '1.', '---', '--- x'])(
+    'a paragraph reading %s stays a paragraph',
+    (text: string) => {
+      const block = only([createBlock('paragraph', text)]);
+
+      expect(block.type).toBe('paragraph');
+      expect(blockText(block)).toBe(text);
+    },
+  );
+
+  test.each([
+    ['heading1', {}],
+    ['heading2', {}],
+    ['heading3', {}],
+    ['quote', {}],
+    ['bulleted_list', {}],
+    ['numbered_list', {}],
+    ['todo', { checked: true }],
+    ['callout', { icon: '★' }],
+    ['toggle', { collapsed: true }],
+  ] as const)('an empty %s keeps its type', (type, extra) => {
+    // The marker is written with nothing after it, and a marker that needs a
+    // trailing space to be read back is a marker any trim silently destroys.
+    expect(only([{ ...createBlock(type), ...extra }])).toMatchObject({ type, ...extra });
+  });
+
+  test('italic after a word character survives', () => {
+    const content = richSetMark(richFromPlainText('ChapterOne'), 7, 10, 'italic', true);
+    const block = only([{ ...createBlock('paragraph'), content }]);
+
+    expect(blockText(block)).toBe('ChapterOne');
+    expect(block.content.at(-1)?.marks).toEqual(['italic']);
+  });
+
+  test('bold and italic on the same run survive together', () => {
+    let content = richSetMark(richFromPlainText('ab'), 1, 2, 'bold', true);
+    content = richSetMark(content, 1, 2, 'italic', true);
+
+    const block = only([{ ...createBlock('paragraph'), content }]);
+
+    expect(blockText(block)).toBe('ab');
+    expect(block.content.at(-1)?.marks).toEqual(['bold', 'italic']);
+  });
+
+  test('a quote that starts with an emoji is not retyped as a callout', () => {
+    const quote = createBlock('quote', '🔥 hot take');
+    const block = only([quote]);
+
+    expect(block.type).toBe('quote');
+    expect(blockText(block)).toBe('🔥 hot take');
+  });
+
+  test.each(['💡', '→', '★', ']'])('a callout keeps the icon %s', (icon: string) => {
+    const callout = { ...createBlock('callout', 'note'), icon };
+
+    expect(only([callout])).toMatchObject({ type: 'callout', icon });
+    expect(blockText(only([callout]))).toBe('note');
+  });
+
+  test('a paragraph past the inline scan limit still parses its markup', () => {
+    // The scan used to bail out past a couple of thousand characters, leaving
+    // the raw `**` in the text of any long paragraph.
+    const long = 'x'.repeat(2100);
+    const content = richSetMark(richFromPlainText(`${long}bold`), 2100, 2104, 'bold', true);
+    const block = only([{ ...createBlock('paragraph'), content }]);
+
+    expect(blockText(block)).toBe(`${long}bold`);
+    expect(block.content.at(-1)).toEqual({ text: 'bold', marks: ['bold'] });
+  });
+
+  test('a long line of emphasis stays linear, not quadratic', () => {
+    const started = performance.now();
+    const runs = parseInlineMarkdown('**b** '.repeat(4000));
+
+    // Two orders of magnitude off the ~40ms this takes, and well under the six
+    // seconds it took when the cost of a span grew with the spans before it.
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(runs.filter((run) => run.marks?.includes('bold'))).toHaveLength(4000);
   });
 });
 

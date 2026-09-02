@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import { matchInlineRule } from './inline-rules.ts';
+import { INLINE_SPAN_LIMIT, matchInlineRule } from './inline-rules.ts';
 
 /** Reproduces what the editor does with a match: strip delimiters, keep inner. */
 function apply(input: string): { text: string; mark?: string; link?: string } | null {
@@ -57,6 +57,36 @@ describe('inline markdown rules', () => {
     expect(matchInlineRule('snake_case_')).toBe(null);
   });
 
+  test('an asterisk after a word character does fire', () => {
+    // CommonMark restricts intra-word emphasis to `_`, and `toMarkdown` writes
+    // `*x*` whatever precedes it — refusing here left the asterisks in the text.
+    expect(apply('Chapter*One*')).toEqual({ text: 'ChapterOne', mark: 'italic', link: undefined });
+  });
+
+  test('bold closes before the italic wrapped around it', () => {
+    expect(matchInlineRule('a***b**')?.mark).toBe('bold');
+    // ...leaving `a*b*`, which is the italic half of the same span.
+    expect(matchInlineRule('a*b*')?.mark).toBe('italic');
+  });
+
+  test('a span longer than the window does not fire', () => {
+    const inside = `*${'x'.repeat(INLINE_SPAN_LIMIT - 2)}*`;
+    const beyond = `*${'x'.repeat(INLINE_SPAN_LIMIT + 10)}*`;
+
+    // The bound is what lets the parser scan a long line at all; without it the
+    // scan is quadratic and long lines used not to be parsed whatsoever.
+    expect(matchInlineRule(inside)?.mark).toBe('italic');
+    expect(matchInlineRule(beyond)).toBe(null);
+  });
+
+  test('offsets stay absolute once the window has moved', () => {
+    const prefix = 'y'.repeat(INLINE_SPAN_LIMIT);
+    const match = matchInlineRule(`${prefix} **b**`);
+
+    expect(match?.start).toBe(prefix.length + 1);
+    expect(match?.end).toBe(prefix.length + 6);
+  });
+
   test('a delimiter spanning a newline does not fire', () => {
     expect(matchInlineRule('*a\nb*')).toBe(null);
   });
@@ -84,6 +114,14 @@ describe('inline markdown rules', () => {
 
     test('an unsafe href leaves the literal text alone', () => {
       expect(matchInlineRule('[click](javascript:alert(1))')).toBe(null);
+    });
+
+    test('an angle-bracketed destination keeps its parens', () => {
+      expect(apply('[Mercury](<https://a.test/M_(planet)>)')).toEqual({
+        text: 'Mercury',
+        mark: undefined,
+        link: 'https://a.test/M_(planet)',
+      });
     });
 
     test('an empty label does not fire', () => {

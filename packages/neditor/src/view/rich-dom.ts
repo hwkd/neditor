@@ -95,43 +95,74 @@ const TAG_MARKS: Readonly<Record<string, Mark>> = {
   TT: 'code',
 };
 
-/** Marks a pasted element implies, from its tag and its inline styles. */
-function marksForElement(element: Element): Mark[] {
-  const marks: Mark[] = [];
-  const tagMark = TAG_MARKS[element.tagName];
+/**
+ * A node's tag name, always uppercase.
+ *
+ * `tagName` only reports uppercase inside the HTML namespace. An `<svg>` and
+ * everything under it keeps its source case, so comparing the raw value against
+ * SKIP_TAGS walks straight into an SVG `<style>` or `<title>` and reads its
+ * source out as document text.
+ */
+function tagNameOf(node: Node): string {
+  return node.nodeName.toUpperCase();
+}
+
+/** The marks a pasted element turns on and off, from its tag and inline styles. */
+interface MarkChange {
+  add: Mark[];
+  remove: Mark[];
+}
+
+/**
+ * Reads an element's formatting, letting an inline style override its tag.
+ *
+ * A tag is only the default: `font-weight: normal` on a `<b>` really does mean
+ * not bold. Google Docs wraps its entire clipboard payload in
+ * `<b style="font-weight:normal" id="docs-internal-guid-…">`, so treating the
+ * tag as the last word makes every Google Docs paste arrive bold.
+ */
+function marksForElement(element: Element): MarkChange {
+  const add = new Set<Mark>();
+  const remove = new Set<Mark>();
+  const set = (mark: Mark, on: boolean): void => {
+    (on ? add : remove).add(mark);
+    (on ? remove : add).delete(mark);
+  };
+
+  const tagMark = TAG_MARKS[tagNameOf(element)];
 
   if (tagMark) {
-    marks.push(tagMark);
+    add.add(tagMark);
   }
 
   const style = (element as HTMLElement).style as CSSStyleDeclaration | undefined;
 
   if (!style) {
-    return marks;
+    return { add: [...add], remove: [...remove] };
   }
 
   // Word, Google Docs and browser-native formatting all emit styled spans.
   const weight = style.fontWeight;
 
-  if (weight === 'bold' || weight === 'bolder' || Number.parseInt(weight, 10) >= 600) {
-    marks.push('bold');
+  if (weight) {
+    set('bold', weight === 'bold' || weight === 'bolder' || Number.parseInt(weight, 10) >= 600);
   }
 
-  if (style.fontStyle === 'italic' || style.fontStyle === 'oblique') {
-    marks.push('italic');
+  if (style.fontStyle) {
+    set('italic', style.fontStyle === 'italic' || style.fontStyle === 'oblique');
   }
 
-  const decoration = `${style.textDecorationLine} ${style.textDecoration}`;
+  // Shorthand and longhand both turn up in pasted markup, and either one is the
+  // element's own decoration — including `none`, which clears what `<u>` or
+  // `<s>` implied.
+  const decoration = `${style.textDecorationLine} ${style.textDecoration}`.trim();
 
-  if (decoration.includes('underline')) {
-    marks.push('underline');
+  if (decoration) {
+    set('underline', decoration.includes('underline'));
+    set('strikethrough', decoration.includes('line-through'));
   }
 
-  if (decoration.includes('line-through')) {
-    marks.push('strikethrough');
-  }
-
-  return marks;
+  return { add: [...add], remove: [...remove] };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -203,7 +234,7 @@ function hasContentAfter(node: Node, root: Node): boolean {
       // FILTER_REJECT skips the element *and* its subtree, so a following
       // <script> never counts as content.
       acceptNode: (candidate) =>
-        SKIP_TAGS.has(candidate.nodeName) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+        SKIP_TAGS.has(tagNameOf(candidate)) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
     },
   );
 
@@ -249,7 +280,7 @@ function hasContentAfter(node: Node, root: Node): boolean {
 function isBetweenBlocks(node: Node): boolean {
   const isBlock = (sibling: Node | null): boolean =>
     sibling === null ||
-    (sibling.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.has((sibling as Element).tagName));
+    (sibling.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.has(tagNameOf(sibling)));
 
   return isBlock(node.previousSibling) && isBlock(node.nextSibling);
 }
@@ -290,7 +321,7 @@ function walk(
       continue;
     }
 
-    if (child.nodeName === 'BR') {
+    if (tagNameOf(child) === 'BR') {
       if (hasContentAfter(child, root)) {
         out.push({ text: '\n', marks: [...marks], link });
       }
@@ -303,24 +334,26 @@ function walk(
     }
 
     const element = child as Element;
+    const tag = tagNameOf(element);
 
-    if (SKIP_TAGS.has(element.tagName)) {
+    if (SKIP_TAGS.has(tag)) {
       continue;
     }
 
     // A block element breaks the line on both edges: before it when something
     // precedes it, and after it when something follows. `breakLine` collapses
     // the two where blocks are adjacent, so they never double up.
-    const isBlock = BLOCK_TAGS.has(element.tagName);
+    const isBlock = BLOCK_TAGS.has(tag);
 
     if (isBlock) {
       breakLine(out, marks, link);
     }
 
-    const nextMarks = [...marks, ...marksForElement(element)];
+    const { add, remove } = marksForElement(element);
+    const nextMarks = [...marks, ...add].filter((mark) => !remove.includes(mark));
     let nextLink = link;
 
-    if (element.tagName === 'A') {
+    if (tag === 'A') {
       // An unsafe href is dropped, but its text is kept.
       nextLink = sanitizeUrl(element.getAttribute('href') ?? '') ?? undefined;
     }
@@ -566,6 +599,133 @@ const CONTAINER_TAGS = new Set([
   'DD',
 ]);
 
+/**
+ * Tags `visitBlocks` turns into a block of their own.
+ *
+ * Finding one inside an unrecognised element is what separates a wrapper that
+ * only styles text from one that carries the document, so the second kind can
+ * be descended into rather than flattened into a single paragraph.
+ */
+const BLOCK_LEVEL_TAGS = new Set([
+  ...Object.keys(HEADING_TYPES),
+  ...CONTAINER_TAGS,
+  'P',
+  'UL',
+  'OL',
+  'LI',
+  'BLOCKQUOTE',
+  'DETAILS',
+  'PRE',
+  'TABLE',
+  'FIGURE',
+  'HR',
+]);
+
+const BLOCK_LEVEL_SELECTOR = [...BLOCK_LEVEL_TAGS].join(',');
+
+/**
+ * Elements a wrapper's formatting has to be carried *through*, not around.
+ *
+ * Each of these is found by walking from its parent — the table reader queries
+ * the child axis, and the caption and summary readers parse the element itself
+ * — so moving one inside a `<b>` would hide its rows, or leave its text outside
+ * the marks that reach it.
+ */
+const STRUCTURE_TAGS = new Set([
+  ...BLOCK_LEVEL_TAGS,
+  'THEAD',
+  'TBODY',
+  'TFOOT',
+  'TR',
+  'TD',
+  'TH',
+  'CAPTION',
+  'COLGROUP',
+  'COL',
+  'FIGCAPTION',
+  'SUMMARY',
+]);
+
+function containsBlockLevel(element: Element): boolean {
+  return element.querySelector(BLOCK_LEVEL_SELECTOR) !== null;
+}
+
+/**
+ * The children of an inline wrapper, with its formatting moved inside the
+ * blocks it holds: `<b><p>x</p></b>` becomes `<p><b>x</b></p>`.
+ *
+ * Descending into the wrapper is the only way to see those blocks, and
+ * `visitBlocks` reads formatting from each block's own subtree — so without
+ * this, descending would silently drop the marks (or href) the wrapper carried.
+ * The copy goes around each innermost run of inline content, which leaves the
+ * document's own formatting nested inside it and therefore winning.
+ */
+function pushFormattingInward(doc: Document, wrapper: Element): DocumentFragment {
+  const fragment = doc.createDocumentFragment();
+  const distribute = (parent: Node): void => {
+    /** The inline nodes waiting for a copy of the wrapper around them. */
+    let run: Node[] = [];
+
+    // One copy around the whole run, not one per node: a space between two
+    // elements would read as separating blocks once it had a copy of its own,
+    // and be dropped as indentation.
+    const wrapRun = (): void => {
+      const first = run[0];
+
+      if (!first) {
+        return;
+      }
+
+      const shell = wrapper.cloneNode(false) as Element;
+
+      parent.insertBefore(shell, first);
+      shell.append(...run);
+      run = [];
+    };
+
+    for (const child of [...parent.childNodes]) {
+      const element = child.nodeType === Node.ELEMENT_NODE ? (child as Element) : null;
+
+      if (element && (STRUCTURE_TAGS.has(tagNameOf(element)) || containsBlockLevel(element))) {
+        wrapRun();
+        distribute(element);
+        continue;
+      }
+
+      // Indentation between two blocks joins a run already under way, but never
+      // starts one — on its own it is source formatting, not content.
+      if (!element && run.length === 0 && (child.nodeValue ?? '').trim().length === 0) {
+        continue;
+      }
+
+      run.push(child);
+    }
+
+    wrapRun();
+  };
+
+  fragment.append(...[...(wrapper.cloneNode(true) as Element).childNodes]);
+  distribute(fragment);
+
+  return fragment;
+}
+
+/**
+ * What to walk when descending into an element that is not a block itself.
+ *
+ * Its formatting travels down to the content inside, but only where a block is
+ * there to receive it: an `<a>` around a lone `<img>` has nothing to push into
+ * and a copy of it would only wrap the image again, for ever. A block element's
+ * formatting stays behind either way — a copy of one placed around inline
+ * content would read back as a line break.
+ */
+function contentsOf(doc: Document, element: Element): Node {
+  const tag = tagNameOf(element);
+  const inline = !BLOCK_TAGS.has(tag) && (tag === 'A' || marksForElement(element).add.length > 0);
+
+  return inline && containsBlockLevel(element) ? pushFormattingInward(doc, element) : element;
+}
+
 /** A checkbox written as text, including what `blocksToHtml` emits. */
 const TODO_PREFIX = /^\s*(?:\[([ xX])\]|☐|☑|✅)\s*/;
 
@@ -594,13 +754,15 @@ function withoutNestedLists(element: Element): Element {
   return clone;
 }
 
+/**
+ * Emits one block, empty or not.
+ *
+ * An empty `<p>` is a blank line the author put there, and the clipboard is a
+ * round trip: `blocksToHtml` writes an empty block as an empty element, so
+ * dropping it here loses a paragraph, heading or quote on every copy-paste.
+ */
 function pushBlock(out: Block[], type: BlockType, element: Element, depth: number): void {
   const runs = parseRichText(withoutNestedLists(element));
-
-  // An empty <p> is a blank line, not a block.
-  if (isRichEmpty(runs) && type !== 'divider') {
-    return;
-  }
 
   out.push(createBlock(type, runs, depthOf(element, depth)));
 }
@@ -676,9 +838,54 @@ function pushTable(out: Block[], element: Element, depth: number): void {
   out.push(block);
 }
 
+/**
+ * A blockquote becomes a quote (or callout), with any list it held underneath.
+ *
+ * The quote's own text is read from a copy with every list stripped out, so
+ * without visiting them separately a quoted list — the ordinary shape on
+ * GitHub, Wikipedia and Stack Overflow — is dropped on the floor.
+ */
+function visitQuote(element: Element, depth: number, out: Block[]): void {
+  const icon = element.getAttribute(CALLOUT_ATTR);
+  const lists = outermostLists(element);
+  const quoteDepth = depthOf(element, depth);
+
+  // A blockquote holding nothing but a list is that list: an empty quote above
+  // it would be a block the source never had. Our own callouts keep theirs,
+  // since the marker says the block was really there.
+  const bare =
+    icon === null && lists.length > 0 && isRichEmpty(parseRichText(withoutNestedLists(element)));
+
+  if (!bare) {
+    if (icon === null) {
+      pushBlock(out, 'quote', element, depth);
+    } else {
+      pushCallout(out, element, depth, icon.length > 0 ? icon : DEFAULT_CALLOUT_ICON);
+    }
+  }
+
+  for (const list of lists) {
+    visitList(list, bare ? quoteDepth : quoteDepth + 1, out);
+  }
+}
+
+/**
+ * The lists inside an element, outermost only.
+ *
+ * A list nested in one of them is left out: `visitList` descends into those
+ * itself, and returning both would emit their items twice.
+ */
+function outermostLists(element: Element): Element[] {
+  return [...element.querySelectorAll('ul, ol')].filter((list) => {
+    const enclosing = list.parentElement?.closest('ul, ol') ?? null;
+
+    return enclosing === null || !element.contains(enclosing);
+  });
+}
+
 /** A `<figure>` carries the caption; a bare `<img>` is just the image. */
 function pushImage(out: Block[], element: Element, depth: number): boolean {
-  const image = element.tagName === 'IMG' ? element : element.querySelector('img');
+  const image = tagNameOf(element) === 'IMG' ? element : element.querySelector('img');
   const src = sanitizeImageUrl(image?.getAttribute('src') ?? '');
 
   // An unusable source would only render as a broken block. The caller
@@ -700,8 +907,18 @@ function pushImage(out: Block[], element: Element, depth: number): boolean {
   return true;
 }
 
+/** The lists an element holds directly, which continue one level deeper. */
+function childLists(element: Element): Element[] {
+  return [...element.children].filter((child) => {
+    const tag = tagNameOf(child);
+
+    return tag === 'UL' || tag === 'OL';
+  });
+}
+
 function visitListItem(item: Element, fallback: BlockType, depth: number, out: Block[]): void {
   const itemDepth = depthOf(item, depth);
+  const nested = childLists(item);
   const clone = withoutNestedLists(item);
   const checkbox = clone.querySelector('input[type="checkbox"]');
   let runs = parseRichText(clone);
@@ -721,7 +938,9 @@ function visitListItem(item: Element, fallback: BlockType, depth: number, out: B
     }
   }
 
-  if (!isRichEmpty(runs)) {
+  // An empty item is a real blank bullet — unless it exists only to hold the
+  // list nested under it, which is how indentation alone is written.
+  if (!isRichEmpty(runs) || nested.length === 0) {
     const block = createBlock(type, runs, itemDepth);
 
     if (type === 'todo') {
@@ -732,18 +951,16 @@ function visitListItem(item: Element, fallback: BlockType, depth: number, out: B
   }
 
   // A list nested inside the item continues one level deeper.
-  for (const child of item.children) {
-    if (child.tagName === 'UL' || child.tagName === 'OL') {
-      visitList(child, itemDepth + 1, out);
-    }
+  for (const child of nested) {
+    visitList(child, itemDepth + 1, out);
   }
 }
 
 function visitList(list: Element, depth: number, out: Block[]): void {
-  const fallback: BlockType = list.tagName === 'OL' ? 'numbered_list' : 'bulleted_list';
+  const fallback: BlockType = tagNameOf(list) === 'OL' ? 'numbered_list' : 'bulleted_list';
 
   for (const child of list.children) {
-    if (child.tagName === 'LI') {
+    if (tagNameOf(child) === 'LI') {
       visitListItem(child, fallback, depth, out);
     }
   }
@@ -791,7 +1008,7 @@ function visitBlocks(doc: Document, node: Node, depth: number, out: Block[]): vo
     }
 
     const element = child as Element;
-    const tag = element.tagName;
+    const tag = tagNameOf(element);
 
     if (SKIP_TAGS.has(tag)) {
       continue;
@@ -824,14 +1041,7 @@ function visitBlocks(doc: Document, node: Node, depth: number, out: Block[]): vo
 
     if (tag === 'BLOCKQUOTE') {
       flushInline();
-      const icon = element.getAttribute(CALLOUT_ATTR);
-
-      if (icon === null) {
-        pushBlock(out, 'quote', element, depth);
-      } else {
-        pushCallout(out, element, depth, icon.length > 0 ? icon : DEFAULT_CALLOUT_ICON);
-      }
-
+      visitQuote(element, depth, out);
       continue;
     }
 
@@ -868,7 +1078,7 @@ function visitBlocks(doc: Document, node: Node, depth: number, out: Block[]): vo
     // Without this the image is buffered as inline content and emits nothing.
     if (element.querySelector('img')) {
       flushInline();
-      visitBlocks(doc, element, depth, out);
+      visitBlocks(doc, contentsOf(doc, element), depth, out);
       continue;
     }
 
@@ -887,6 +1097,16 @@ function visitBlocks(doc: Document, node: Node, depth: number, out: Block[]): vo
     if (CONTAINER_TAGS.has(tag)) {
       flushInline();
       visitBlocks(doc, element, depth, out);
+      continue;
+    }
+
+    // A wrapper holding block content is structure, not formatting. Google Docs
+    // wraps its entire clipboard payload in one <b>, and buffering that as
+    // inline collapses every paragraph, heading and list item inside it into a
+    // single paragraph.
+    if (containsBlockLevel(element)) {
+      flushInline();
+      visitBlocks(doc, contentsOf(doc, element), depth, out);
       continue;
     }
 

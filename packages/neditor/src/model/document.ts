@@ -702,9 +702,15 @@ export function sliceDocument(blocks: readonly Block[], ids: ReadonlySet<string>
  */
 const INLINE_ESCAPE = /[\\`*_[\]~|<>]/g;
 
-/** A line-leading construct, which only matters for the first run of a block. */
-const LEADING_MARKER = /^(\s*)([#>+-])(?=\s)/;
-const LEADING_ORDINAL = /^(\s*)(\d+)([.)])(?=\s)/;
+/**
+ * A line-leading construct, which only matters for the first run of a block.
+ *
+ * The marker is escaped whatever follows it: a paragraph reading `---` is a
+ * divider, and one reading `#` an empty heading, so requiring a space after the
+ * marker let both through and destroyed the paragraph.
+ */
+const LEADING_MARKER = /^(\s*)([#>+-])/;
+const LEADING_ORDINAL = /^(\s*)(\d+)([.)])(?=\s|$)/;
 
 /**
  * Escapes run text for Markdown.
@@ -720,6 +726,50 @@ function escapeMarkdownText(text: string): string {
 /** Stops a paragraph that begins with `#`, `-` or `1.` becoming that block. */
 function escapeLeadingMarker(text: string): string {
   return text.replace(LEADING_ORDINAL, '$1$2\\$3').replace(LEADING_MARKER, '$1\\$2');
+}
+
+/**
+ * Escapes a bracketed label: an image's alt text, or a callout's icon.
+ *
+ * A `]` inside one closes it early and the rest leaks into the line as markup,
+ * so the brackets are escaped and `blocksFromMarkdown` unescapes them back.
+ */
+const LABEL_ESCAPE = /[\\[\]]/g;
+
+function escapeMarkdownLabel(text: string): string {
+  return text.replace(LABEL_ESCAPE, (char) => `\\${char}`);
+}
+
+/** Characters a destination cannot hold bare: the first `)` would close it. */
+const DESTINATION_UNSAFE = /[()<>\s]/;
+
+/**
+ * Writes a link or image destination.
+ *
+ * Anything holding a paren or a space goes in angle brackets rather than being
+ * backslash-escaped: the reader matches its rules against a projection in which
+ * an escaped character is opaque, so it could never read the URL back out.
+ */
+function destinationToMarkdown(url: string): string {
+  if (!DESTINATION_UNSAFE.test(url)) {
+    return url;
+  }
+
+  // `<` and `>` would close the bracketed form. A URL that reached us through
+  // `sanitizeUrl` has them percent-encoded already, so this is a no-op there.
+  return `<${url.replace(/[<>\s]/g, (char) => encodeURIComponent(char))}>`;
+}
+
+/**
+ * A fence longer than any run of backticks in the code it wraps.
+ *
+ * Three backticks in the payload would otherwise close the block early, and the
+ * reader would hand back three blocks where the user had one.
+ */
+function fenceFor(text: string): string {
+  const longest = (text.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length), 0);
+
+  return '`'.repeat(Math.max(3, longest + 1));
 }
 
 /** Delimiters applied from the innermost mark outwards. */
@@ -756,7 +806,7 @@ function runToMarkdown(run: TextRun): string {
   }
 
   if (run.link) {
-    core = `[${core}](${run.link})`;
+    core = `[${core}](${destinationToMarkdown(run.link)})`;
   }
 
   return `${leading}${core}${trailing}`;
@@ -790,6 +840,12 @@ export function toMarkdown(doc: NEditorDocument): string {
       const indent = '  '.repeat(block.depth);
       // A code block is literal: its text must not be re-escaped as Markdown.
       const text = block.type === 'code' ? blockText(block) : richToMarkdown(block.content);
+      // An empty block is a bare marker. The space after it is what makes the
+      // marker readable, not what makes it a marker, and trailing whitespace
+      // does not survive the trip back — ours trims it, and so does every other
+      // tool the text passes through.
+      const marked = (marker: string): string =>
+        text.length === 0 ? `${indent}${marker}` : `${indent}${marker} ${text}`;
 
       switch (block.type) {
         // Only a paragraph can be mistaken for another block by its first
@@ -797,29 +853,37 @@ export function toMarkdown(doc: NEditorDocument): string {
         case 'paragraph':
           return `${indent}${escapeLeadingMarker(text)}`;
         case 'heading1':
-          return `${indent}# ${text}`;
+          return marked('#');
         case 'heading2':
-          return `${indent}## ${text}`;
+          return marked('##');
         case 'heading3':
-          return `${indent}### ${text}`;
+          return marked('###');
         case 'bulleted_list':
-          return `${indent}- ${text}`;
+          return marked('-');
         case 'numbered_list':
-          return `${indent}${numbers.get(block.id) ?? 1}. ${text}`;
+          return marked(`${numbers.get(block.id) ?? 1}.`);
         case 'todo':
-          return `${indent}- [${block.checked ? 'x' : ' '}] ${text}`;
+          return marked(`- [${block.checked ? 'x' : ' '}]`);
         case 'quote':
-          return `${indent}> ${text}`;
-        // A quote led by an emoji reads as a callout, and parses back as one.
+          return marked('>');
+        // The icon is bracketed rather than merely leading, so a quote that
+        // starts with an emoji stays a quote and an icon that is not an emoji
+        // still names a callout. `[` is escaped in text, so the two can never
+        // collide.
         case 'callout':
-          return `${indent}> ${block.icon ?? DEFAULT_CALLOUT_ICON} ${text}`;
+          return marked(`> [!${escapeMarkdownLabel(block.icon ?? DEFAULT_CALLOUT_ICON)}]`);
         // Markdown has no toggle; the marker degrades to a readable bullet.
         case 'toggle':
-          return `${indent}- ${block.collapsed ? '\u25B8' : '\u25BE'} ${text}`;
-        case 'code':
-          return `${indent}\`\`\`\n${text}\n${indent}\`\`\``;
+          return marked(`- ${block.collapsed ? '\u25B8' : '\u25BE'}`);
+        case 'code': {
+          const fence = fenceFor(text);
+
+          return `${indent}${fence}\n${text}\n${indent}${fence}`;
+        }
         case 'image':
-          return `${indent}![${block.alt ?? ''}](${block.src ?? ''})`;
+          return `${indent}![${escapeMarkdownLabel(block.alt ?? '')}](${destinationToMarkdown(
+            block.src ?? '',
+          )})`;
         case 'table':
           return tableToMarkdown(block, indent);
         case 'divider':
