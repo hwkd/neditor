@@ -36,6 +36,38 @@ describe('sanitizeUrl', () => {
   test('a bare host is upgraded to https rather than treated as a path', () => {
     expect(sanitizeUrl('example.com/docs')).toBe('https://example.com/docs');
   });
+
+  describe('protocol-relative destinations', () => {
+    // `//host/path` carries no scheme, so the site-relative fast path used to
+    // hand it straight back. It is not site-relative: it leaves the site while
+    // reading as a local path, which is exactly the disguise a link arriving
+    // from a paste or another user's document would want.
+    test('are resolved rather than passed through as local paths', () => {
+      expect(sanitizeUrl('//evil.example/x')).toBe('https://evil.example/x');
+      expect(sanitizeUrl('//evil.example:8080/a?b=1#c')).toBe('https://evil.example:8080/a?b=1#c');
+    });
+
+    test('resolve to what a browser on an https page would have loaded', () => {
+      const relative = (href: string) => new URL(href, 'https://site.test/page').href;
+
+      for (const href of ['//other.test/x', '//other.test:8080/a?b=1#c']) {
+        expect(sanitizeUrl(href)).toBe(relative(href));
+      }
+    });
+
+    test('the allowlist still decides, so a bare `//` is rejected', () => {
+      expect(sanitizeUrl('//')).toBe(null);
+    });
+
+    test('genuinely site-relative paths are untouched', () => {
+      expect(sanitizeUrl('/docs')).toBe('/docs');
+      expect(sanitizeUrl('/docs//deep')).toBe('/docs//deep');
+    });
+
+    test('an image source gets the same treatment', () => {
+      expect(sanitizeImageUrl('//cdn.example/logo.png')).toBe('https://cdn.example/logo.png');
+    });
+  });
 });
 
 describe('sanitizeImageUrl', () => {

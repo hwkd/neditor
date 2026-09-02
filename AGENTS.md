@@ -160,3 +160,58 @@ Run `vp run ready` (check, test, build). `vp -C apps/web run check` additionally
   filler and reads it back as nothing — which is also why each block's runs must
   keep being parsed with that block's own element as the root, or a following
   paragraph would turn the filler into a second newline.
+
+## Invariants the remediation established
+
+These came out of fixing 64 audited defects. Most of them were violated in several
+places at once, so they are stated as rules rather than as notes about one call site.
+
+- **Selection anchors live in visible space; hidden descendants are expanded only at
+  the edit.** `#blocks` and `#visible()` are different orders, and `findBlockIndex`
+  returns `-1` for a block the other list does not hold — which silently reads as
+  `visible[0]`, the top of the document. `#selected` therefore holds only ids the
+  reader can see, and `#selectionForEdit()` grows the set at the moment of a delete,
+  move, copy or indent. A lookup that finds nothing must fail, never fall back to 0.
+
+- **A block id does not name an editable host.** A table has one host per cell, so
+  anything that resolves "where does this id point" needs the cell too — `focusRange`
+  takes one, `#pending` carries one, and `#resolve` returns `null` rather than
+  substituting `getView(id).content` (which for a table is always cell 0:0).
+
+- **The two selection modes are mutually exclusive.** Entering one leaves the other.
+  `focus()` clears a block selection, an empty id list means "no block selection"
+  rather than "block-selection mode with nothing in it", and a focus that cannot land
+  reports failure instead of leaving the editor in neither mode.
+
+- **`content` is not a block's whole payload.** `rows`, `src`, `alt`, `icon` and
+  `checked` travel with it. Any merge, paste or type conversion that copies only
+  `content` silently destroys the rest, and text moved into a block that cannot
+  display it is gone as soon as `normalizeDocument` runs.
+
+- **`#commit` is the only history recorder, and it must not record a no-op.** Every
+  pure op returns a fresh array even when nothing changed, so identity is not a
+  usable test — compare before recording. A caller that records for itself and then
+  commits banks the same snapshot twice.
+
+- **Anything the DOM does that the editor did not author has to be intercepted.**
+  `paste` was handled and `drop` was not, so a native drag wrote attacker markup
+  straight into a live contenteditable and `syncFromDom` then recorded it as correct.
+  Input rules must also gate on `event.inputType`: they fired on deletions and
+  silently converted blocks.
+
+- **Writer and reader are one contract.** `toMarkdown` output is parsed by
+  `blocksFromMarkdown`, and `blocksToHtml` by `blocksFromHtml`, so an escape the
+  writer emits and the reader does not understand is data loss. `src/round-trip.test.ts`
+  holds both properties over a corpus; a case that cannot round-trip belongs in its
+  known-failure registry with a reason, never silently dropped.
+
+- **ARIA that a role does not permit is not an accessibility feature.** `aria-selected`
+  on a role-less block `<div>` is dropped by browsers, so it announced nothing while
+  looking like coverage. Giving the block a role that carries it would displace the
+  heading and list semantics the content element exists to provide — the same trade
+  that made `role="textbox"` wrong. Announce through the live region instead.
+
+- **A test that passes with the code removed is worse than no test.** Every fix here
+  was mutation-checked: revert the change, watch the test fail, restore it. Two
+  previous tests asserted a literal against itself and could not distinguish a working
+  feature from a deleted one.

@@ -210,6 +210,21 @@ describe('normalizeDocument', () => {
 
     expect(doc.blocks[0]?.depth).toBe(0);
   });
+
+  test.each([
+    ['an object map', { a: { type: 'paragraph' } }],
+    ['a JSON string', '[{"type":"paragraph"}]'],
+    ['a number', 7],
+    ['null', null],
+  ])('a `blocks` field that is %s degrades instead of throwing', (_label, blocksField) => {
+    // The README says stored content is safe to hand straight to setDocument,
+    // and none of these has a `.filter` — so trusting the declared type threw a
+    // TypeError out of createEditor rather than opening an empty document.
+    const doc = normalizeDocument({ blocks: blocksField } as unknown as { blocks: Block[] });
+
+    expect(doc.blocks).toHaveLength(1);
+    expect(doc.blocks[0]?.type).toBe('paragraph');
+  });
 });
 
 describe('markdown serialization', () => {

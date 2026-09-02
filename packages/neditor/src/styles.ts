@@ -59,6 +59,13 @@ export const NEDITOR_STYLES = `
     --neditor-hover: rgb(255 255 255 / 0.06);
     --neditor-code-bg: rgb(255 255 255 / 0.1);
     --neditor-code-text: rgb(255 163 158);
+    /* Re-tuned as a pair, because the accent is a *foreground* here — the
+       active toolbar glyph — as well as the primary button's background. The
+       light-mode blue reads 3.3:1 on the raised dark surface, so it is
+       lightened to 6.4:1 and the ink on top of it inverted: white on a blue
+       this light would be 2.4:1 under the checkmark and the button label. */
+    --neditor-accent: rgb(110 170 250);
+    --neditor-on-accent: rgb(23 23 23);
     --neditor-selection: rgb(35 131 226 / 0.3);
     --neditor-callout-bg: rgb(255 255 255 / 0.055);
     --neditor-table-border: rgb(255 255 255 / 0.14);
@@ -79,6 +86,9 @@ export const NEDITOR_STYLES = `
   --neditor-hover: rgb(255 255 255 / 0.06);
   --neditor-code-bg: rgb(255 255 255 / 0.1);
   --neditor-code-text: rgb(255 163 158);
+  /* Kept in step with the prefers-color-scheme block above. */
+  --neditor-accent: rgb(110 170 250);
+  --neditor-on-accent: rgb(23 23 23);
   --neditor-selection: rgb(35 131 226 / 0.3);
   --neditor-callout-bg: rgb(255 255 255 / 0.055);
   --neditor-table-border: rgb(255 255 255 / 0.14);

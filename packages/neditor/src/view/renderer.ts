@@ -199,8 +199,13 @@ export class Renderer {
       delete view.root.dataset.selected;
     }
 
-    // Block selection had no accessible representation at all — only a colour.
-    view.root.setAttribute('aria-selected', String(selected));
+    // Deliberately no `aria-selected`: it is prohibited on `role=generic`, which
+    // is what a bare block <div> is, so browsers drop it — it left every block
+    // carrying aria-selected="false" and told assistive technology nothing. A
+    // role that would carry it (option, row, gridcell) would displace the
+    // heading and list semantics the content element exists to provide, which
+    // is the same trade that made `role="textbox"` wrong here. Selection is
+    // announced through the live region instead.
   }
 
   getView(id: string): BlockView | undefined {
@@ -486,7 +491,12 @@ export class Renderer {
       // a keyboard user who cannot expand one can never read them.
       chevron.tabIndex = 0;
       chevron.setAttribute('aria-label', this.#labels.toggleCollapse);
-      chevron.setAttribute('aria-controls', `${block.id}-content`);
+      // Deliberately no aria-controls. What `aria-expanded` describes here is
+      // the toggle's *children*, and collapsing removes those from the document
+      // altogether — there is no element left to point at. The id this used to
+      // name was the toggle's own text host, which is present and visible in
+      // both states, so following the reference landed on something that never
+      // changes and reported the opposite of the truth.
       chevron.addEventListener('mousedown', (event) => {
         event.preventDefault();
       });

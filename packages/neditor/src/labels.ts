@@ -81,9 +81,13 @@ export interface NEditorLabels {
   insertRowAbove: string;
   insertRowBelow: string;
   deleteRow: string;
+  /** Visible text on the delete-row button, beside its accessible name. */
+  deleteRowGlyph: string;
   insertColumnLeft: string;
   insertColumnRight: string;
   deleteColumn: string;
+  /** Visible text on the delete-column button, beside its accessible name. */
+  deleteColumnGlyph: string;
 
   /** Live-region announcements. `{count}` and `{type}` are substituted. */
   blocksSelected: string;
@@ -239,9 +243,11 @@ export const DEFAULT_LABELS: NEditorLabels = {
   insertRowAbove: 'Insert row above',
   insertRowBelow: 'Insert row below',
   deleteRow: 'Delete this row',
+  deleteRowGlyph: '⤫ row',
   insertColumnLeft: 'Insert column left',
   insertColumnRight: 'Insert column right',
   deleteColumn: 'Delete this column',
+  deleteColumnGlyph: '⤫ col',
 
   blocksSelected: '{count} blocks selected',
   blockSelected: '1 block selected',

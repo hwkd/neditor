@@ -241,6 +241,33 @@ describe('marks', () => {
     expect(richMarksAt(HELLO, 6)).toEqual([]);
     expect(richMarksAt(HELLO, 0)).toEqual([]);
   });
+
+  describe('code is not inherited past the end of its span', () => {
+    // `let x` with `x` in code, then a plain tail.
+    const spanned: RichText = [{ text: 'let ' }, { text: 'x', marks: ['code'] }, { text: ' = 1' }];
+
+    test('typing at the closing boundary leaves the span', () => {
+      // Otherwise a code span that ends a line can never be typed out of:
+      // every following character silently joins it.
+      expect(richMarksAt(spanned, 5)).toEqual([]);
+      expect(richMarksAt([{ text: 'x', marks: ['code'] }], 1)).toEqual([]);
+    });
+
+    test('a caret inside the span still reports code', () => {
+      const wide: RichText = [{ text: 'abc', marks: ['code'] }];
+
+      expect(richMarksAt(wide, 1)).toEqual(['code']);
+      expect(richMarksAt(wide, 2)).toEqual(['code']);
+    });
+
+    test('other marks are unaffected at the same boundary', () => {
+      const mixed: RichText = [{ text: 'ab', marks: ['bold', 'code'] }, { text: 'c' }];
+
+      // Bold has a visible delimiter the writer supplies by eye, so growing a
+      // bold word is what they meant; only `code` stops.
+      expect(richMarksAt(mixed, 2)).toEqual(['bold']);
+    });
+  });
 });
 
 describe('links', () => {

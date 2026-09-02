@@ -169,6 +169,32 @@ function sameCell(a: CellCoords | undefined, b: CellCoords | undefined): boolean
   return a?.row === b?.row && a?.column === b?.column;
 }
 
+/**
+ * Whether this platform's shortcut modifier is Cmd rather than Ctrl.
+ *
+ * macOS gives Ctrl to the system's emacs-style caret bindings — Ctrl+B back a
+ * character, Ctrl+E end of line, Ctrl+A start of line, Ctrl+K kill to the end —
+ * and every native text field honours them. Treating Ctrl as a second Cmd
+ * everywhere swallowed all four and typed bold, a link and a select-all
+ * instead, which is both a broken caret and a shortcut collision no one asked
+ * for. Elsewhere Ctrl is the shortcut modifier and Meta is a window-manager key
+ * that means nothing here, so both keep being accepted there.
+ *
+ * Read from the mount point's own window rather than a global: the editor is
+ * mounted into foreign documents on purpose. `userAgentData` first, since
+ * `platform` is deprecated and frozen; both are anchored so a UA string that
+ * merely mentions a platform later on cannot match.
+ */
+function isApplePlatform(view: (Window & typeof globalThis) | null): boolean {
+  const agent = view?.navigator as
+    | (Navigator & { userAgentData?: { platform?: string } })
+    | undefined;
+
+  const platform = agent?.userAgentData?.platform ?? agent?.platform ?? '';
+
+  return /^(mac|iphone|ipad|ipod)/i.test(platform);
+}
+
 /** One editable host: a block's own content, or a single table cell. */
 interface ResolvedTarget {
   readonly block: Block;
@@ -405,6 +431,12 @@ export class NEditor {
   readonly #liveRegion: HTMLElement;
   readonly #useGutter: boolean;
 
+  /** True where Cmd is the shortcut modifier and Ctrl belongs to the system. */
+  readonly #applePlatform: boolean;
+
+  /** True when the editor supplied the root's accessible name and owes it back. */
+  readonly #ownsAriaLabel: boolean;
+
   #blocks: Block[];
   #editable: boolean;
   #destroyed = false;
@@ -526,6 +558,7 @@ export class NEditor {
     this.#useToolbar = options.toolbar ?? true;
     this.#history = new History({ limit: options.historyLimit });
     this.#useGutter = options.dragHandles ?? true;
+    this.#applePlatform = isApplePlatform(this.#document.defaultView);
     this.#labels = resolveLabels(options.labels);
     this.#blocks = normalizeDocument(options.doc ?? createEmptyDocument()).blocks;
 
@@ -547,7 +580,15 @@ export class NEditor {
     this.#root.classList.add('neditor');
     this.#root.dataset.neditorTheme = theme;
 
-    if (!this.#root.hasAttribute('aria-label') && !this.#root.hasAttribute('aria-labelledby')) {
+    // Remembered, because `destroy()` has to give the element back the way it
+    // found it. An accessible name left behind is not inert residue: the next
+    // mount sees a labelled element and stands down, so its own `label` — a
+    // different document, a different language — is silently dropped for the
+    // life of the page.
+    this.#ownsAriaLabel =
+      !this.#root.hasAttribute('aria-label') && !this.#root.hasAttribute('aria-labelledby');
+
+    if (this.#ownsAriaLabel) {
       this.#root.setAttribute('aria-label', options.label ?? this.#labels.editor);
     }
     // Block selection has no caret, so the root itself must hold focus for
@@ -1019,7 +1060,21 @@ export class NEditor {
   setBlockType(id: string, type: BlockType): void {
     this.#commit(setBlockType(this.#blocks, id, type));
     this.focus(id, CARET_END);
-    this.#announce(formatLabel(this.#labels.changedTo, { type: type.replace('_', ' ') }));
+    this.#announce(formatLabel(this.#labels.changedTo, { type: this.#typeName(type) }));
+  }
+
+  /**
+   * The reader-facing name of a block type.
+   *
+   * `BlockType` is an internal identifier, so substituting it into a translated
+   * sentence announced half of it in English — "Changé en bulleted list" — no
+   * matter how completely the host overrode `labels`. The slash menu already
+   * carries a localisable name for every type, and it is the very name the user
+   * picked from; the id, tidied up, survives only as a fallback for a label set
+   * that dropped an entry.
+   */
+  #typeName(type: BlockType): string {
+    return this.#labels.slashCommands[type]?.label ?? type.replaceAll('_', ' ');
   }
 
   /** Expands or collapses a toggle, hiding or revealing everything under it. */
@@ -1104,6 +1159,21 @@ export class NEditor {
     this.#renderer.destroy();
     this.#emitter.clear();
     this.#root.classList.remove('neditor');
+
+    // Gesture state, not decoration. Both are set mid-drag and cleared on
+    // `pointerup`/`pointercancel`, so an editor destroyed while a finger is
+    // still down leaves them on the element — and they carry `user-select:
+    // none` for every block. Dead until something re-adds the `neditor` class,
+    // which a remount into the same element does immediately: the new editor
+    // comes up with its text unselectable and no gesture in flight to end.
+    delete this.#root.dataset.selecting;
+    delete this.#root.dataset.dragging;
+
+    // Only the name this editor put there. An application's own aria-label was
+    // never ours to remove.
+    if (this.#ownsAriaLabel) {
+      this.#root.removeAttribute('aria-label');
+    }
   }
 
   /* ------------------------------------------------------------ internal -- */
@@ -1176,6 +1246,17 @@ export class NEditor {
     }
 
     this.#selected = new Set(kept);
+
+    // The anchor is part of the selection, so it is pruned with it. A dead one
+    // is worse than none at all: `blockIdRange` answers [] for an id the
+    // document no longer holds, so the next Shift+click extended from nowhere
+    // and *cleared* the selection instead of growing it. Nothing downstream
+    // repairs it either — the `#clearBlockSelection` that follows a delete
+    // returns early on the empty set this has just left behind.
+    if (this.#selectionAnchor !== null && !alive.has(this.#selectionAnchor)) {
+      this.#selectionAnchor = kept[0] ?? null;
+    }
+
     this.#renderer.setSelected(this.#selected);
     this.#emitter.emit('blockselection', { ids: kept });
   }
@@ -1615,7 +1696,7 @@ export class NEditor {
   }
 
   #handleBlockSelectionKeys(event: KeyboardEvent): void {
-    const modifier = event.metaKey || event.ctrlKey;
+    const modifier = this.#shortcutModifier(event);
     const ordered = this.#orderedSelection();
 
     if (event.key === 'Escape') {
@@ -2269,8 +2350,15 @@ export class NEditor {
       : null;
 
     // Touch has no hover, so the controls have to be offered some other way.
+    // Offered on exactly the terms hover offers them, though: `#handlePointerOver`
+    // stands down for a read-only editor and for `dragHandles: false`, and a
+    // touch is not a second, laxer way in — a reader who taps a paragraph is
+    // not owed an add button and a drag handle for a document they cannot edit.
     if (event.pointerType === 'touch' && anchorBlockId) {
-      this.#positionGutter(anchorBlockId);
+      if (this.#useGutter && this.#editable) {
+        this.#positionGutter(anchorBlockId);
+      }
+
       this.#startLongPress(anchorBlockId, event);
     }
   };
@@ -3482,6 +3570,21 @@ export class NEditor {
 
   /* ------------------------------------------------------------ keyboard -- */
 
+  /**
+   * True when the key carries this platform's shortcut modifier.
+   *
+   * On macOS that is Cmd and only Cmd. Ctrl there is the system's own caret
+   * modifier — Ctrl+B back a character, Ctrl+E end of line, Ctrl+K kill to the
+   * end of the line — bindings every native text field honours, which an editor
+   * that reads Ctrl as a second Cmd swallows and answers with bold, a link
+   * editor and a select-all. Everywhere else Ctrl *is* the shortcut modifier
+   * and Meta is a window-manager key with no meaning in a text field, so both
+   * keep being accepted there and nothing about Windows or Linux changes.
+   */
+  #shortcutModifier(event: KeyboardEvent): boolean {
+    return event.metaKey || (event.ctrlKey && !this.#applePlatform);
+  }
+
   #handleKeyDown = (event: KeyboardEvent): void => {
     // A composing IME delivers Enter, Escape, Backspace and arrows as ordinary
     // keydowns (keyCode 229) while the candidate window is open. Acting on them
@@ -3507,7 +3610,7 @@ export class NEditor {
     }
 
     const { block, content } = resolved;
-    const modifier = event.metaKey || event.ctrlKey;
+    const modifier = this.#shortcutModifier(event);
 
     if (modifier && !event.altKey) {
       const key = event.key.toLowerCase();
@@ -3780,6 +3883,10 @@ export class NEditor {
     let blocks = updateBlock(this.#blocks, previous.id, {
       content: richConcat(previous.content, block.content),
     });
+    // No re-clamp here, unlike `#deleteAtEnd`: this path is only ever reached
+    // at depth 0 — anything deeper outdents above rather than merging — and
+    // removing a depth-0 block leaves its successor at depth 1 at most, which
+    // any predecessor can carry.
     blocks = removeBlock(blocks, block.id);
 
     this.#commit(blocks);
@@ -3796,7 +3903,7 @@ export class NEditor {
     }
 
     if (isVoidType(next.type)) {
-      this.#commit(removeBlock(this.#blocks, next.id));
+      this.#commit(normalizeDepths(removeBlock(this.#blocks, next.id)));
       this.focus(block.id, CARET_END);
       return;
     }
@@ -3812,7 +3919,10 @@ export class NEditor {
     let blocks = updateBlock(this.#blocks, block.id, {
       content: richConcat(block.content, next.content),
     });
-    blocks = removeBlock(blocks, next.id);
+    // Deleting the neighbour takes its depth step with it: anything nested
+    // under it is left more than one level below this block, which is exactly
+    // the state `normalizeDepths` exists to make impossible.
+    blocks = normalizeDepths(removeBlock(blocks, next.id));
 
     this.#commit(blocks);
     this.focus(block.id, joinAt);

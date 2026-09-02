@@ -292,17 +292,24 @@ describe('announcements', () => {
 });
 
 describe('selection is not signalled by colour alone', () => {
-  test('a selected block carries aria-selected', () => {
+  test('a block selection is announced, not written as a prohibited attribute', () => {
     const editor = mount([block({ content: [{ text: 'a' }] })]);
     const id = editor.getDocument().blocks[0]!.id;
     editor.selectBlocks([id]);
 
     const root = editor.element.querySelector(`[data-block-id="${id}"]`);
 
-    expect(root?.getAttribute('aria-selected')).toBe('true');
+    // This test previously asserted aria-selected="true". That was wrong: the
+    // attribute is prohibited on role=generic, which is what a bare block <div>
+    // is, so browsers drop it — it announced nothing and left every unselected
+    // block carrying aria-selected="false" forever. Giving the block a role
+    // that carries it would displace the heading and list semantics the content
+    // element exists to provide, the same trade that made role="textbox" wrong.
+    expect(root?.hasAttribute('aria-selected')).toBe(false);
 
-    editor.clearBlockSelection();
-    expect(root?.getAttribute('aria-selected')).toBe('false');
+    const live = editor.element.querySelector('[aria-live]');
+
+    expect(live?.textContent).toContain('1 block selected');
   });
 
   test('the stylesheet gives selection a non-colour cue and honours forced colors', () => {

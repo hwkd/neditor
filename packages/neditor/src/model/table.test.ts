@@ -3,6 +3,8 @@ import { describe, expect, test } from 'vitest';
 import { richFromPlainText, richToPlainText } from './rich-text.ts';
 import type { TableRows } from './table.ts';
 import {
+  MAX_TABLE_COLUMNS,
+  MAX_TABLE_ROWS,
   cloneTableRows,
   createTableRows,
   normalizeTableRows,
@@ -167,6 +169,71 @@ describe('columns', () => {
     const widths = new Set(rows.map((row) => row.length));
 
     expect(widths.size).toBe(1);
+  });
+});
+
+/**
+ * A grid is the only place a small document expands into a large one: squaring
+ * off ragged rows multiplies the two dimensions, and the renderer builds a cell
+ * element and its own contenteditable host for every product. Depth has
+ * MAX_DEPTH for the same reason.
+ */
+describe('a grid is bounded in both directions', () => {
+  test('a ragged document cannot be padded into a grid nobody wrote', () => {
+    // A few kB of JSON: one wide row and a column of stubs. Squaring that off
+    // without a cap turns 1,400 written cells into 240,000 rendered ones, and
+    // the ratio is the attacker's to choose.
+    const wide = Array.from({ length: 200 }, () => []);
+    const hostile = [wide, ...Array.from({ length: 1199 }, () => [[]])];
+    const { rows, columns } = tableSize(normalizeTableRows(hostile));
+
+    expect(rows).toBe(MAX_TABLE_ROWS);
+    expect(columns).toBe(MAX_TABLE_COLUMNS);
+  });
+
+  test('createTableRows will not build a grid the model would reject', () => {
+    // Public API: the counts are arguments, not facts.
+    expect(tableSize(createTableRows(MAX_TABLE_ROWS + 10, MAX_TABLE_COLUMNS + 10))).toEqual({
+      rows: MAX_TABLE_ROWS,
+      columns: MAX_TABLE_COLUMNS,
+    });
+  });
+
+  test('editing stops at the cap, so nothing is truncated on reload', () => {
+    // A cap enforced only on load is a data loss, not a limit.
+    const full = createTableRows(MAX_TABLE_ROWS, MAX_TABLE_COLUMNS);
+
+    expect(tableSize(tableInsertRow(full, full.length))).toEqual({
+      rows: MAX_TABLE_ROWS,
+      columns: MAX_TABLE_COLUMNS,
+    });
+    expect(tableSize(tableInsertColumn(full, 0))).toEqual({
+      rows: MAX_TABLE_ROWS,
+      columns: MAX_TABLE_COLUMNS,
+    });
+    expect(tableSize(normalizeTableRows(full))).toEqual({
+      rows: MAX_TABLE_ROWS,
+      columns: MAX_TABLE_COLUMNS,
+    });
+  });
+
+  test('a refused insert still returns a fresh grid', () => {
+    // Every operation in this module hands back new arrays; the caps must not
+    // be the one path that leaks the caller's rows back to it.
+    const full = createTableRows(MAX_TABLE_ROWS, 2);
+    const next = tableInsertRow(full, 0);
+
+    expect(next).not.toBe(full);
+    expect(next[0]).not.toBe(full[0]);
+  });
+
+  test('a row count no one would write is truncated, not thrown on', () => {
+    // Ran last on purpose: this is the input that used to reach
+    // `Math.max(...rows.map(…))` with an argument per row and take the call
+    // stack with it, which is a crash rather than a failed assertion.
+    const many = Array.from({ length: 200_000 }, () => [[]]);
+
+    expect(tableSize(normalizeTableRows(many)).rows).toBe(MAX_TABLE_ROWS);
   });
 });
 

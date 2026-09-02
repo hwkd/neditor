@@ -26,6 +26,18 @@ than a recommendation. Two things set it:
 is feature-detected — Firefox below 125 keeps the whole string instead of
 cutting an emoji in half.
 
+**TypeScript 4.7+** if you consume the types. The package ships `.d.mts` and
+`.d.cts` and points at them through `exports`; a compiler older than that
+understands neither the extensions nor the map, so it reports the package as
+untyped rather than as mistyped. This is the same kind of floor as the one
+above — there is no compatibility copy of the declarations.
+
+The declarations open with `/// <reference lib="dom" />`, because the public
+types name `HTMLElement`, `ShadowRoot`, `Document`, `Node` and
+`DocumentFragment`. A `tsconfig` without `"dom"` in `lib` — the server-side case
+the headless serializers exist for — therefore typechecks the package without
+having to add it.
+
 ## Usage
 
 ```js
@@ -67,7 +79,7 @@ page over a CDN. Call `destroy()` when the host component unmounts.
 | `onChange`        | `(doc) => void`               | —                    | Shorthand for `editor.on('change', …)`.                       |
 | `onError`         | `(error) => void`             | `console.error`      | Called when one of your listeners throws.                     |
 | `label`           | `string`                      | `'Rich text editor'` | Accessible name. Ignored if the element already has one.      |
-| `labels`          | `Partial<NEditorLabels>`      | English              | Every user-visible string, including accessible names.        |
+| `labels`          | `Partial<NEditorLabels>`      | English              | Accessible names, placeholders, menu entries, announcements.  |
 | `portalContainer` | `HTMLElement \| ShadowRoot`   | the mount's root     | Where toolbars and popovers are appended.                     |
 | `styleNonce`      | `string`                      | —                    | `nonce` for the injected `<style>`, for a strict `style-src`. |
 
@@ -276,12 +288,19 @@ Selected blocks carry `aria-selected` and a border, not colour alone, and the
 stylesheet has a `forced-colors` block for Windows High Contrast.
 
 **Contrast.** Every text token meets WCAG 1.4.3 in both themes: muted text
-5.6:1, placeholders 4.8:1, inline code 5.0:1, and the primary button 4.6:1.
-Theme with `--neditor-on-accent` alongside `--neditor-accent` so the checkmark
-and button label stay readable against a custom accent.
+5.6:1, placeholders 4.8:1, inline code 5.0:1, and the primary button 4.6:1 in
+light, 7.5:1 in dark.
 
-**Localisation.** Every string is overridable through `labels`, which matters
-because most of them are accessible names that CSS cannot reach:
+The accent is a foreground as well as a fill — it colours the active toolbar
+glyph — so dark mode re-tunes `--neditor-accent` and `--neditor-on-accent`
+together instead of inheriting the light pair, which reads 3.3:1 against the
+raised dark surface. Theme both tokens together for the same reason: the
+checkmark and the button label take their colour from the second, and a light
+custom accent leaves white ink on white.
+
+**Localisation.** Every accessible name, placeholder, slash-menu entry and live
+announcement is overridable through `labels`, which matters because most of them
+never surface as text CSS could reach:
 
 ```js
 createEditor({
@@ -291,11 +310,21 @@ createEditor({
 ```
 
 `DEFAULT_LABELS` and the `NEditorLabels` type are exported; anything you leave
-out keeps its default.
+out keeps its default. `placeholders` and `slashCommands` merge per entry, so
+translating one of them does not blank the rest.
 
-One thing is still missing, and you should decide whether it matters for your
-audience: list blocks are not wrapped in a real `<ul>`/`<ol>`, so the bullet or
-number is announced as text instead of as list structure.
+Two sets of _visible_ button glyphs are not reachable that way. The format
+toolbar's `B`, `I`, `U`, `S` and `</>` are typographic mnemonics rather than
+words, and the table toolbar's `⤫ row` and `⤫ col` are English text that should
+be in `labels` and is not. Both toolbars take their accessible names from
+`labels`, so a screen reader announces the translation; only the glyph a sighted
+user reads stays English.
+
+Two other things are still missing, and you should decide whether they matter
+for your audience: list blocks are not wrapped in a real `<ul>`/`<ol>`, so the
+bullet or number is announced as text instead of as list structure, and the
+icon picker names each preset button with the emoji itself, which a screen
+reader renders in its own locale rather than yours.
 
 ## Undo and redo
 
@@ -527,17 +556,34 @@ readable that still parses back:
 
 | Block   | Markdown                               | HTML                                              |
 | ------- | -------------------------------------- | ------------------------------------------------- |
-| Callout | `> 💡 text` — a quote led by an emoji  | `<blockquote data-neditor-callout="💡">`          |
+| Callout | `> [!💡] text` — the icon is bracketed | `<blockquote data-neditor-callout="💡">`          |
 | Toggle  | `- ▸ text` collapsed, `- ▾ text` open  | `<details>` / `<details open>` with a `<summary>` |
 | Image   | `![alt](src)` — the caption is dropped | `<figure><img><figcaption>`                       |
 | Table   | a GFM table                            | `<table>` with `<thead>` / `<tbody>`              |
 
-Elsewhere they read as a quote and a list item; a `<details>` pasted from
-anywhere else becomes a toggle, with its body nested one level under it.
+Elsewhere a callout still reads as a quote and a toggle as a list item; a
+`<details>` pasted from anywhere else becomes a toggle, with its body nested one
+level under it. The callout's icon is bracketed rather than merely leading so
+that the two directions agree: an emoji-led quote you wrote by hand stays a
+quote, and an icon that is not an emoji still names a callout.
 
 Tables and images are faithful in both formats — a GFM table pasted as plain text
 becomes a real table, cell formatting included, and a ragged one is squared off
 rather than rejected.
+
+The Markdown writer is defensive wherever the format is ambiguous, so what it
+writes is what `blocksFromMarkdown` reads back:
+
+- A code fence is one backtick longer than the longest run inside the block, so
+  a snippet that itself contains ` ``` ` comes back as one code block rather
+  than three.
+- A link or image destination holding a paren, a space or an angle bracket is
+  written in the `<…>` form rather than backslash-escaped. The reader matches
+  its rules against a projection in which an escaped character is opaque, so it
+  could never have found such a URL again.
+- An alt text or callout icon containing `[` or `]` is escaped, and unescaped on
+  the way back, so a `]` cannot close the label early and leak the rest of the
+  line into the document as markup.
 
 ## Headless use
 

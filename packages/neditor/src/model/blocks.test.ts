@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest';
 import type { Block } from './document.ts';
 import {
   DEFAULT_CALLOUT_ICON,
+  MAX_DEPTH,
   acceptsChildren,
   blockIdRange,
   blockText,
@@ -77,6 +78,54 @@ describe('normalizeDepths', () => {
 
     expect(depths(result)).toEqual([0, 1, 1, 0]);
     expect(result[0]).toBe(blocks[0]);
+  });
+
+  test('no block passes MAX_DEPTH, however legal the step to it looks', () => {
+    // Each of these is one level below its predecessor, so the "one level at a
+    // time" rule alone accepts every one of them.
+    const { blocks } = build(
+      ...Array.from({ length: MAX_DEPTH + 5 }, (_, i): [string, number] => [`b${i}`, i]),
+    );
+
+    expect(Math.max(...depths(normalizeDepths(blocks)))).toBe(MAX_DEPTH);
+  });
+});
+
+/**
+ * MAX_DEPTH used to be a load-time clamp only, which made it a data loss rather
+ * than a limit: the editor indented past it happily, and `normalizeDocument`
+ * folded every level above 32 into 32 on the next load. Nesting the user could
+ * see vanished on reload, and undo could not bring it back.
+ */
+describe('MAX_DEPTH survives a save/load round trip', () => {
+  const deep = () =>
+    build(...Array.from({ length: MAX_DEPTH + 3 }, (_, i): [string, number] => [`b${i}`, i]));
+
+  test('indentBlocks cannot push a block past the ceiling', () => {
+    const { blocks, ids } = deep();
+    const last = blocks.at(-1)!;
+    const pushed = indentBlocks(normalizeDepths(blocks), ids(blockText(last)), 1);
+
+    expect(pushed.at(-1)?.depth).toBe(MAX_DEPTH);
+  });
+
+  test('indentBlock cannot either, and reports the Tab as the no-op it is', () => {
+    const { blocks, id } = deep();
+    const normalized = normalizeDepths(blocks);
+    const last = normalized.at(-1)!;
+    const pushed = indentBlock(normalized, id(blockText(last)), 1);
+
+    expect(pushed.at(-1)?.depth).toBe(MAX_DEPTH);
+    // Nothing moved, so nothing was rebuilt — otherwise Tab at the ceiling
+    // records an undo entry for a keystroke with no effect.
+    expect(pushed.at(-1)).toBe(last);
+  });
+
+  test('what the editor produces is what normalizeDocument accepts back', () => {
+    const edited = normalizeDepths(deep().blocks);
+    const reloaded = normalizeDocument({ blocks: edited });
+
+    expect(depths(reloaded.blocks)).toEqual(depths(edited));
   });
 });
 

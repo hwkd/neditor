@@ -100,10 +100,16 @@ const CHILD_ACCEPTING_TYPES = new Set<BlockType>(['callout', 'toggle']);
 export const DEFAULT_CALLOUT_ICON = '\u{1F4A1}';
 
 /**
- * Deepest nesting a stored document may declare.
+ * Deepest nesting a document may reach.
  *
  * Depth becomes an indent string in Markdown and a CSS length in the DOM, so an
  * absurd value from storage is a denial of service rather than a deep list.
+ *
+ * It bounds edits as well as loads. Enforcing it only on the way in made it a
+ * silent data loss instead of a limit: the editor was happy to indent past 32,
+ * and `normalizeDocument` then flattened every one of those levels back to 32
+ * on the next load, so nesting the user could see disappeared on reload.
+ * {@link normalizeDepths} applies it, which every structural edit runs through.
  */
 export const MAX_DEPTH = 32;
 
@@ -403,7 +409,13 @@ export function normalizeDocument(doc: Partial<NEditorDocument> | undefined): NE
   // Nothing downstream can recover from it, so it is repaired at the boundary.
   const seen = new Set<string>();
 
-  const blocks = ((doc?.blocks ?? []) as LegacyBlock[])
+  // `blocks` is the one field a caller cannot get wrong quietly: an object map
+  // or a JSON string has no `.filter`, so trusting the declared type threw a
+  // TypeError out of `createEditor` instead of degrading. Every other field
+  // here is coerced rather than trusted; so is this one.
+  const stored: LegacyBlock[] = Array.isArray(doc?.blocks) ? (doc.blocks as LegacyBlock[]) : [];
+
+  const blocks = stored
     .filter((block): block is LegacyBlock => Boolean(block))
     .map((block) => {
       // An unknown type would reach lookup tables and element factories, so it
@@ -585,7 +597,11 @@ export function indentBlock(blocks: readonly Block[], id: string, delta: number)
   }
 
   const previous = index > 0 ? blocks[index - 1] : undefined;
-  const maxDepth = previous ? previous.depth + 1 : 0;
+  // `normalizeDepths` would clamp to MAX_DEPTH below anyway, but not before
+  // this function had already decided the depth changed — and a Tab that only
+  // rebuilds the block at the depth it was reads as an edit to `sameBlocks`,
+  // which is an undo entry for a keystroke that did nothing.
+  const maxDepth = Math.min(MAX_DEPTH, previous ? previous.depth + 1 : 0);
   const depth = Math.max(0, Math.min(block.depth + delta, maxDepth));
 
   if (depth === block.depth) {
@@ -648,17 +664,21 @@ export function computeListNumbers(blocks: readonly Block[]): Map<string, number
 
 /**
  * Clamps every block so it is never more than one level deeper than the block
- * above it.
+ * above it, nor deeper than {@link MAX_DEPTH}.
  *
  * Depth is stored per block rather than as a tree, which keeps reordering
  * cheap but means a move can leave an orphan indented under nothing. Re-running
  * this after any structural change restores the invariant.
+ *
+ * The ceiling belongs here rather than only in `normalizeDocument`, because
+ * this is the one function every structural edit ends in: a limit applied on
+ * load alone is not a limit, it is a document that changes shape when reloaded.
  */
 export function normalizeDepths(blocks: readonly Block[]): Block[] {
   let previousDepth = -1;
 
   return blocks.map((block) => {
-    const depth = Math.max(0, Math.min(block.depth, previousDepth + 1));
+    const depth = Math.max(0, Math.min(block.depth, previousDepth + 1, MAX_DEPTH));
     previousDepth = depth;
 
     return depth === block.depth ? block : { ...block, depth };

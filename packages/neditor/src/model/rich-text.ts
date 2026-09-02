@@ -332,13 +332,29 @@ export function richActiveLink(
  * typing at the end of a bold word stay bold. A `code` mark is deliberately not
  * inherited past its end, and neither is a link — otherwise every character
  * typed after a link would silently join it.
+ *
+ * `code` is the one mark that needs the character to the *right* as well.
+ * Bold has a delimiter the reader supplies by eye, so growing a bold word is
+ * what the writer meant; a code span is a container, and there is no way to
+ * type your way out of one that always extends. Inside the span both
+ * neighbours are code and the mark is kept, so a caret placed mid-span still
+ * reports itself as code.
  */
 export function richMarksAt(content: readonly TextRun[], offset: number): Mark[] {
   if (offset <= 0) {
     return [];
   }
 
-  return richActiveMarks(content, offset - 1, offset);
+  const inherited = richActiveMarks(content, offset - 1, offset);
+
+  if (!inherited.includes('code')) {
+    return inherited;
+  }
+
+  // At the end of the content the slice is empty, so the span ends here too.
+  return richActiveMarks(content, offset, offset + 1).includes('code')
+    ? inherited
+    : inherited.filter((mark) => mark !== 'code');
 }
 
 export function richLinkAt(content: readonly TextRun[], offset: number): string | null {

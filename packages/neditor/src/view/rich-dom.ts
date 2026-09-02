@@ -96,6 +96,24 @@ const TAG_MARKS: Readonly<Record<string, Mark>> = {
 };
 
 /**
+ * DOM constants spelled out, rather than read off the global scope.
+ *
+ * Every entry point here is handed the Document to work in, so the serializers
+ * run wherever a DOM implementation can be passed to them — which is exactly
+ * what the README promises for the server. Reaching for the global `Node` or
+ * `NodeFilter` quietly broke that: under a shim handed in as an argument those
+ * globals do not exist, and `blocksFromHtml` threw `ReferenceError: NodeFilter
+ * is not defined` before reading a single node. The values are fixed by the DOM
+ * standard, so writing them out is not a guess about any one implementation.
+ */
+const ELEMENT_NODE = 1;
+const TEXT_NODE = 3;
+const SHOW_ELEMENT = 0x1;
+const SHOW_TEXT = 0x4;
+const FILTER_ACCEPT = 1;
+const FILTER_REJECT = 2;
+
+/**
  * A node's tag name, always uppercase.
  *
  * `tagName` only reports uppercase inside the HTML namespace. An `<svg>` and
@@ -242,16 +260,12 @@ export function renderRichText(doc: Document, content: readonly TextRun[]): Docu
  * newline. Block elements reuse it to decide whether they end a line.
  */
 function hasContentAfter(node: Node, root: Node): boolean {
-  const walker = root.ownerDocument?.createTreeWalker(
-    root,
-    NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
-    {
-      // FILTER_REJECT skips the element *and* its subtree, so a following
-      // <script> never counts as content.
-      acceptNode: (candidate) =>
-        SKIP_TAGS.has(tagNameOf(candidate)) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
-    },
-  );
+  const walker = root.ownerDocument?.createTreeWalker(root, SHOW_TEXT | SHOW_ELEMENT, {
+    // FILTER_REJECT skips the element *and* its subtree, so a following
+    // <script> never counts as content.
+    acceptNode: (candidate) =>
+      SKIP_TAGS.has(tagNameOf(candidate)) ? FILTER_REJECT : FILTER_ACCEPT,
+  });
 
   if (!walker) {
     return false;
@@ -278,7 +292,7 @@ function hasContentAfter(node: Node, root: Node): boolean {
     }
 
     // Whitespace between block tags is formatting, not content.
-    if (current.nodeType === Node.TEXT_NODE && (current.nodeValue ?? '').trim().length > 0) {
+    if (current.nodeType === TEXT_NODE && (current.nodeValue ?? '').trim().length > 0) {
       return true;
     }
   }
@@ -290,14 +304,21 @@ function hasContentAfter(node: Node, root: Node): boolean {
  * True when a whitespace-only text node merely separates block elements.
  *
  * Whitespace between two inline elements is a real space and must survive; the
- * same characters between two paragraphs are indentation from the source.
+ * same characters between two paragraphs are indentation from the source. The
+ * edge of the parent is a boundary too — the newline before the first `<p>` is
+ * still indentation — but only where a block element is actually on the other
+ * side. Counting a missing sibling as a block on its own threw away the content
+ * of anything holding nothing but whitespace: `<p> </p>` and `<td> </td>` came
+ * back empty, so a space-only block or table cell was lost on every copy-paste.
  */
 function isBetweenBlocks(node: Node): boolean {
   const isBlock = (sibling: Node | null): boolean =>
-    sibling === null ||
-    (sibling.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.has(tagNameOf(sibling)));
+    sibling !== null && sibling.nodeType === ELEMENT_NODE && BLOCK_TAGS.has(tagNameOf(sibling));
+  const edge = (sibling: Node | null): boolean => sibling === null || isBlock(sibling);
+  const previous = node.previousSibling;
+  const next = node.nextSibling;
 
-  return isBlock(node.previousSibling) && isBlock(node.nextSibling);
+  return (isBlock(previous) || isBlock(next)) && edge(previous) && edge(next);
 }
 
 /** Appends a newline unless the output is empty or already ends with one. */
@@ -320,7 +341,7 @@ function walk(
   out: TextRun[],
 ): void {
   for (const child of [...node.childNodes]) {
-    if (child.nodeType === Node.TEXT_NODE) {
+    if (child.nodeType === TEXT_NODE) {
       const text = child.nodeValue ?? '';
 
       // Indentation between block elements is source formatting, not content.
@@ -344,7 +365,7 @@ function walk(
       continue;
     }
 
-    if (child.nodeType !== Node.ELEMENT_NODE) {
+    if (child.nodeType !== ELEMENT_NODE) {
       continue;
     }
 
@@ -413,6 +434,22 @@ const BLOCK_TAGS_OUT: Readonly<Record<BlockType, string>> = {
 
 /** Marks a blockquote as a callout and carries its icon. */
 const CALLOUT_ATTR = 'data-neditor-callout';
+
+/**
+ * Marks a list this serializer wrote, whose items declare their own type.
+ *
+ * Reading a checkbox out of an item's text is a guess, and the right guess for
+ * foreign markup: a bullet written `[x] done` elsewhere really is a to-do. It
+ * is the wrong guess for our own output, where a bulleted item that merely
+ * begins with "[x]" is a bullet whose text begins with "[x]" — turning it into
+ * a to-do also eats those characters, so copying a document and pasting it back
+ * silently rewrote the line. Inside a list we wrote, the marker below is the
+ * only thing that makes a to-do.
+ */
+const LIST_ATTR = 'data-neditor-list';
+
+/** A to-do's state, recorded exactly so the textual box is never parsed back. */
+const TODO_ATTR = 'data-neditor-checked';
 
 /** `<thead>` for the header row, `<tbody>` for the rest. */
 function tableSections(doc: Document, rows: TableRows): HTMLElement[] {
@@ -546,6 +583,7 @@ export function blocksToHtml(doc: Document, blocks: readonly Block[]): string {
 
     if (!current || current.depth < block.depth) {
       const list = doc.createElement(wrapper);
+      list.setAttribute(LIST_ATTR, '');
 
       if (block.type === 'numbered_list') {
         list.setAttribute('start', String(numbers.get(block.id) ?? 1));
@@ -573,7 +611,10 @@ export function blocksToHtml(doc: Document, blocks: readonly Block[]): string {
     }
 
     if (block.type === 'todo') {
-      // Plain text, because a real <input> would not survive most paste targets.
+      // Plain text, because a real <input> would not survive most paste targets
+      // — and the attribute beside it, because reading that text back is a
+      // guess we should never have to make about our own output.
+      item.setAttribute(TODO_ATTR, String(block.checked === true));
       item.append(doc.createTextNode(block.checked ? '\u2611 ' : '\u2610 '));
     }
 
@@ -699,7 +740,7 @@ function pushFormattingInward(doc: Document, wrapper: Element): DocumentFragment
     };
 
     for (const child of [...parent.childNodes]) {
-      const element = child.nodeType === Node.ELEMENT_NODE ? (child as Element) : null;
+      const element = child.nodeType === ELEMENT_NODE ? (child as Element) : null;
 
       if (element && (STRUCTURE_TAGS.has(tagNameOf(element)) || containsBlockLevel(element))) {
         wrapRun();
@@ -931,19 +972,36 @@ function childLists(element: Element): Element[] {
   });
 }
 
-function visitListItem(item: Element, fallback: BlockType, depth: number, out: Block[]): void {
+/**
+ * @param declared Whether the enclosing list is one we wrote, in which case
+ * every to-do in it carries {@link TODO_ATTR} and the textual checkbox is
+ * decoration rather than a signal to be read back.
+ */
+function visitListItem(
+  item: Element,
+  fallback: BlockType,
+  depth: number,
+  out: Block[],
+  declared = false,
+): void {
   const itemDepth = depthOf(item, depth);
   const nested = childLists(item);
   const clone = withoutNestedLists(item);
   const checkbox = clone.querySelector('input[type="checkbox"]');
+  const state = item.getAttribute(TODO_ATTR);
   let runs = parseRichText(clone);
   let type = fallback;
   let checked = false;
 
-  if (checkbox) {
+  if (state !== null) {
+    // Our own marker: exact, and the text still carries the box we wrote.
+    type = 'todo';
+    checked = state === 'true';
+    runs = extractTodoPrefix(runs)?.runs ?? runs;
+  } else if (checkbox) {
     type = 'todo';
     checked = (checkbox as HTMLInputElement).checked || checkbox.hasAttribute('checked');
-  } else {
+  } else if (!declared) {
     const todo = extractTodoPrefix(runs);
 
     if (todo) {
@@ -973,10 +1031,11 @@ function visitListItem(item: Element, fallback: BlockType, depth: number, out: B
 
 function visitList(list: Element, depth: number, out: Block[]): void {
   const fallback: BlockType = tagNameOf(list) === 'OL' ? 'numbered_list' : 'bulleted_list';
+  const declared = list.hasAttribute(LIST_ATTR);
 
   for (const child of list.children) {
     if (tagNameOf(child) === 'LI') {
-      visitListItem(child, fallback, depth, out);
+      visitListItem(child, fallback, depth, out, declared);
     }
   }
 }
@@ -1010,7 +1069,7 @@ function visitBlocks(doc: Document, node: Node, depth: number, out: Block[]): vo
   };
 
   for (const child of [...node.childNodes]) {
-    if (child.nodeType === Node.TEXT_NODE) {
+    if (child.nodeType === TEXT_NODE) {
       if ((child.nodeValue ?? '').trim().length > 0) {
         buffer.push(child);
       }
@@ -1018,7 +1077,7 @@ function visitBlocks(doc: Document, node: Node, depth: number, out: Block[]): vo
       continue;
     }
 
-    if (child.nodeType !== Node.ELEMENT_NODE) {
+    if (child.nodeType !== ELEMENT_NODE) {
       continue;
     }
 

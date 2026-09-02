@@ -158,3 +158,21 @@ describe('the stylesheet reads in both directions', () => {
     expect(NEDITOR_STYLES).toMatch(/:is\(th, td\)[^}]*text-align: start;/);
   });
 });
+
+describe('every visible string is reachable through labels', () => {
+  test('the table toolbar delete glyphs are overridable', () => {
+    // These carry a word, not just a direction, so they were the last visible
+    // text a translator could not reach.
+    const labels = resolveLabels({ deleteRowGlyph: '⤫ Zeile', deleteColumnGlyph: '⤫ Spalte' });
+
+    expect(labels.deleteRowGlyph).toBe('⤫ Zeile');
+    expect(labels.deleteColumnGlyph).toBe('⤫ Spalte');
+  });
+
+  test('the defaults are unchanged for a consumer who passes nothing', () => {
+    const labels = resolveLabels({});
+
+    expect(labels.deleteRowGlyph).toBe('⤫ row');
+    expect(labels.deleteColumnGlyph).toBe('⤫ col');
+  });
+});

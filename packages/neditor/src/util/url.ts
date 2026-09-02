@@ -16,13 +16,22 @@ export function sanitizeUrl(input: string): string | null {
   }
 
   // In-page and site-relative links carry no scheme and cannot execute.
-  if (trimmed.startsWith('#') || trimmed.startsWith('/')) {
+  //
+  // `//host/path` is *not* one of them. It carries no scheme either, but the
+  // leading `//` opens an authority: it leaves the site while reading as a
+  // local path, so it falls through to be resolved and checked like any other
+  // absolute destination.
+  if (trimmed.startsWith('#') || (trimmed.startsWith('/') && !trimmed.startsWith('//'))) {
     return trimmed;
   }
 
   // `example.com` is what people actually type; assume https rather than
-  // letting it resolve as a relative path.
-  const candidate = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(trimmed) ? trimmed : `https://${trimmed}`;
+  // letting it resolve as a relative path. A protocol-relative `//example.com`
+  // is resolved the same way — https is the scheme a browser on an https page
+  // would have supplied, and pinning it means the href stored in the document
+  // names the site it actually reaches.
+  const hasScheme = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(trimmed);
+  const candidate = hasScheme ? trimmed : `https:${trimmed.startsWith('//') ? '' : '//'}${trimmed}`;
 
   let parsed: URL;
 

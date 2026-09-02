@@ -29,14 +29,21 @@ interface ToolbarButton {
   readonly glyph: string;
 }
 
-const BUTTONS: readonly ToolbarButton[] = [
-  { command: 'insertRowAbove', glyph: '↑+' },
-  { command: 'insertRowBelow', glyph: '↓+' },
-  { command: 'deleteRow', glyph: '⤫ row' },
-  { command: 'insertColumnLeft', glyph: '←+' },
-  { command: 'insertColumnRight', glyph: '→+' },
-  { command: 'deleteColumn', glyph: '⤫ col' },
-];
+/**
+ * The arrow glyphs are direction, not language, so they stay literal. The two
+ * delete buttons carry a word, so they come from `labels` like every other
+ * visible string.
+ */
+function buttonsFor(labels: NEditorLabels): readonly ToolbarButton[] {
+  return [
+    { command: 'insertRowAbove', glyph: '↑+' },
+    { command: 'insertRowBelow', glyph: '↓+' },
+    { command: 'deleteRow', glyph: labels.deleteRowGlyph },
+    { command: 'insertColumnLeft', glyph: '←+' },
+    { command: 'insertColumnRight', glyph: '→+' },
+    { command: 'deleteColumn', glyph: labels.deleteColumnGlyph },
+  ];
+}
 
 export class TableToolbar {
   readonly #element: HTMLElement;
@@ -52,7 +59,7 @@ export class TableToolbar {
     this.#element.setAttribute('role', 'toolbar');
     this.#element.setAttribute('aria-label', labels.tableToolbar);
 
-    BUTTONS.forEach((button, index) => {
+    buttonsFor(labels).forEach((button, index) => {
       if (index === 3) {
         const separator = doc.createElement('div');
         separator.className = 'neditor-toolbar__separator';

@@ -225,6 +225,36 @@ describe('selection marking', () => {
   });
 });
 
+describe('the toggle chevron', () => {
+  const chevron = (id: string) =>
+    renderer.getView(id)!.root.querySelector<HTMLElement>('.neditor-block__chevron')!;
+
+  test('reports its state with aria-expanded', () => {
+    renderer.render([block({ id: 'a', type: 'toggle', collapsed: true })]);
+    expect(chevron('a').getAttribute('aria-expanded')).toBe('false');
+
+    renderer.render([block({ id: 'a', type: 'toggle', collapsed: false })]);
+    expect(chevron('a').getAttribute('aria-expanded')).toBe('true');
+  });
+
+  test('does not point aria-controls at something that never hides', () => {
+    // What expanding reveals is the toggle's children, and collapsing removes
+    // those from the document entirely — so there is nothing to reference. The
+    // id this used to name was the toggle's own text host, which is present and
+    // visible in both states: following the reference reported the opposite of
+    // what aria-expanded said.
+    renderer.render([
+      block({ id: 'a', type: 'toggle', collapsed: true, content: [{ text: 'h' }] }),
+    ]);
+
+    const controls = chevron('a').getAttribute('aria-controls');
+    const host = renderer.getView('a')!.content!;
+
+    expect(controls).not.toBe(host.id);
+    expect(controls === null || root.querySelector(`#${controls}`) !== host).toBe(true);
+  });
+});
+
 describe('blockIdFromNode', () => {
   test('resolves a node inside a block to that block', () => {
     renderer.render([block({ id: 'a', content: [{ text: 'hello' }] })]);
@@ -261,5 +291,28 @@ describe('destroy', () => {
 
     expect(renderer.getView('a')).toBeUndefined();
     expect(root.querySelectorAll('.neditor-block')).toHaveLength(0);
+  });
+});
+
+describe('block selection is not announced through a prohibited attribute', () => {
+  test('no aria-selected is written onto a role-less block', () => {
+    renderer.render([block({ id: 'a' }), block({ id: 'b' })]);
+
+    renderer.setSelected(new Set(['a']));
+
+    // aria-selected is prohibited on role=generic, so browsers drop it; writing
+    // it left every block carrying aria-selected="false" and told AT nothing.
+    // The live region carries the announcement instead.
+    for (const id of ['a', 'b']) {
+      expect(renderer.getView(id)!.root.hasAttribute('aria-selected')).toBe(false);
+    }
+  });
+
+  test('the data attribute the styles key on is still written', () => {
+    renderer.render([block({ id: 'a' })]);
+
+    renderer.setSelected(new Set(['a']));
+
+    expect(renderer.getView('a')!.root.dataset.selected).toBe('true');
   });
 });

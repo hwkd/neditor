@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, expect, test } from 'vitest';
 
+import type { Block } from '../model/document.ts';
 import { blockText } from '../model/document.ts';
 import type { RichText } from '../model/rich-text.ts';
 import { richToPlainText } from '../model/rich-text.ts';
@@ -182,6 +183,25 @@ describe('parsing foreign HTML', () => {
     expect(richToPlainText(fromHtml('<p>a</p>tail'))).toBe('a\ntail');
   });
 
+  describe('whitespace between blocks', () => {
+    test('indentation around block elements is dropped', () => {
+      expect(richToPlainText(fromHtml('<p>a</p>\n  <p>b</p>'))).toBe('a\nb');
+      expect(richToPlainText(fromHtml('<div>\n  <p>a</p>\n  <p>b</p>\n</div>'))).toBe('a\nb');
+    });
+
+    test('a space between inline elements is content', () => {
+      expect(richToPlainText(fromHtml('<b>a</b> <b>b</b>'))).toBe('a b');
+    });
+
+    test('whitespace that is the whole content is content, not indentation', () => {
+      // No sibling to be separated from: this space is what the block holds.
+      // Counting the edge of the parent as a block boundary on its own threw it
+      // away, so a space-only paragraph came back empty on every copy-paste.
+      expect(fromHtml('<p> </p>')).toEqual([{ text: ' ' }]);
+      expect(fromHtml('<td>\u00a0</td>')).toEqual([{ text: '\u00a0' }]);
+    });
+  });
+
   describe('sanitization', () => {
     test('script contents are dropped, not read as text', () => {
       expect(fromHtml('<p>safe</p><script>alert(1)</script>')).toEqual([{ text: 'safe' }]);
@@ -214,6 +234,18 @@ describe('parsing foreign HTML', () => {
       // as document text otherwise.
       expect(richToPlainText(fromHtml('<p>a</p><svg><title>tip</title><desc>d</desc></svg>'))).toBe(
         'a',
+      );
+    });
+
+    test('MathML is content, but its script and style source is not', () => {
+      // The other foreign namespace, and the same trap: <math><style> is a
+      // MathML element whose name keeps its source case. The maths itself is
+      // text the reader is meant to see, so only the source is dropped.
+      expect(richToPlainText(fromHtml('<math><style>.y{color:red}</style><mi>z</mi></math>'))).toBe(
+        'z',
+      );
+      expect(richToPlainText(fromHtml('<math><script>alert(1)</script><mi>z</mi></math>'))).toBe(
+        'z',
       );
     });
   });
@@ -304,6 +336,27 @@ describe('blocksFromHtml', () => {
     expect(blocks.map(blockText)).toEqual(['done', 'open']);
     expect(blocks[0]?.checked).toBe(true);
     expect(blocks[1]?.checked).toBe(false);
+  });
+
+  test('a list we wrote ourselves says what its items are instead', () => {
+    // Guessing at the text is right for foreign markup (above) and wrong for
+    // our own, where a bullet beginning "[x]" is a bullet, not a ticked to-do.
+    const blocks = parse(
+      '<ul data-neditor-list=""><li>[x] not a to-do</li>' +
+        '<li data-neditor-checked="true">\u2611 really is one</li></ul>',
+    );
+
+    expect(blocks.map((b) => b.type)).toEqual(['bulleted_list', 'todo']);
+    expect(blocks.map(blockText)).toEqual(['[x] not a to-do', 'really is one']);
+    expect(blocks[1]?.checked).toBe(true);
+  });
+
+  test('an explicit marker outweighs the text, wherever the item came from', () => {
+    const blocks = parse('<ul><li data-neditor-checked="false">\u2610 [x] later</li></ul>');
+
+    expect(blocks[0]).toMatchObject({ type: 'todo', checked: false });
+    // One box stripped, not two: the rest is the author's text.
+    expect(blockText(blocks[0]!)).toBe('[x] later');
   });
 
   test('code blocks keep their text verbatim', () => {
@@ -517,7 +570,10 @@ describe('blocksFromHtml', () => {
     // Genuinely nested, so other applications read the structure. The depth
     // attribute rides along because structure alone cannot survive a non-list
     // block interrupting a list.
-    expect(html).toContain('<ul><li>a<ul><li');
+    // Matched loosely on the tags rather than the exact markup: the items also
+    // carry the attributes that say what they are, and this test is about the
+    // shape of the nesting.
+    expect(html).toMatch(/<ul[^>]*><li[^>]*>a<ul[^>]*><li/);
     expect(html).toContain('>b</li></ul></li></ul>');
     expect(html).not.toContain('margin-left');
   });
@@ -728,5 +784,96 @@ describe('images and tables in HTML', () => {
     expect(html).toContain('<thead>');
     expect(html).not.toContain('<tbody>');
     expect(blocksFromHtml(document, html)[0]?.rows).toHaveLength(1);
+  });
+});
+
+describe('the clipboard round trip is idempotent', () => {
+  const parse = (html: string) => blocksFromHtml(document, html);
+  const round = (blocks: Block[]) => blocksFromHtml(document, blocksToHtml(document, blocks));
+
+  test('a bullet whose text begins with a checkbox stays a bullet', () => {
+    // Copying a document and pasting it back reclassified the item as a ticked
+    // to-do and ate the characters that triggered it.
+    const source = parse('<ul><li>placeholder</li></ul>').map((block) => ({
+      ...block,
+      content: [{ text: '[x] not a to-do' }],
+    }));
+
+    expect(round(source).map((block) => block.type)).toEqual(['bulleted_list']);
+    expect(round(source).map(blockText)).toEqual(['[x] not a to-do']);
+  });
+
+  test('every textual box form is safe inside a bullet', () => {
+    const source = ['[ ] open', '\u2610 box', '\u2611 ticked', '\u2705 check'].map((text) => ({
+      ...parse('<ul><li>placeholder</li></ul>')[0]!,
+      content: [{ text }],
+    }));
+
+    expect(round(source).map((block) => block.type)).toEqual([
+      'bulleted_list',
+      'bulleted_list',
+      'bulleted_list',
+      'bulleted_list',
+    ]);
+    expect(round(source).map(blockText)).toEqual([
+      '[ ] open',
+      '\u2610 box',
+      '\u2611 ticked',
+      '\u2705 check',
+    ]);
+  });
+
+  test('a to-do whose text begins with a box keeps both', () => {
+    const source = parse('<ul><li><input type="checkbox" checked>[ ] later</li></ul>');
+
+    expect(round(source)[0]).toMatchObject({ type: 'todo', checked: true });
+    expect(blockText(round(source)[0]!)).toBe('[ ] later');
+  });
+
+  test('a block holding nothing but whitespace keeps it', () => {
+    const source = parse('<p>x</p>').map((block) => ({ ...block, content: [{ text: ' ' }] }));
+
+    expect(round(source).map(blockText)).toEqual([' ']);
+  });
+
+  test('a table cell holding nothing but whitespace keeps it', () => {
+    const source = parse(
+      '<table><tr><th>h</th><th>i</th></tr><tr><td>a</td><td>b</td></tr></table>',
+    );
+    const cells = [
+      [[{ text: 'h' }], [{ text: 'i' }]],
+      [[{ text: ' ' }], [{ text: 'b' }]],
+    ];
+    const withSpace = source.map((block) => ({ ...block, rows: cells }));
+
+    expect(round(withSpace)[0]?.rows?.map((row) => row.map(richToPlainText))).toEqual([
+      ['h', 'i'],
+      [' ', 'b'],
+    ]);
+  });
+});
+
+describe('the DOM to work in is the one passed in', () => {
+  test('parsing never reaches for the global Node or NodeFilter', () => {
+    // README promises the serializers take a Document so they run on a server
+    // with nothing but a shim. Reading these off the global scope broke that
+    // outright: `blocksFromHtml` threw before it read a single node.
+    const globals = globalThis as Record<string, unknown>;
+    const node = globals.Node;
+    const filter = globals.NodeFilter;
+
+    delete globals.Node;
+    delete globals.NodeFilter;
+
+    try {
+      const blocks = blocksFromHtml(document, '<p>a<br>b</p>\n<ul><li>c</li></ul>');
+
+      expect(blocks.map((block) => block.type)).toEqual(['paragraph', 'bulleted_list']);
+      expect(blocks.map(blockText)).toEqual(['a\nb', 'c']);
+      expect(richToPlainText(parseRichTextFromHtml(document, '<b>a</b> <i>b</i>'))).toBe('a b');
+    } finally {
+      globals.Node = node;
+      globals.NodeFilter = filter;
+    }
   });
 });
