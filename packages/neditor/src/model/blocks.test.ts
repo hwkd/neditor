@@ -13,6 +13,7 @@ import {
   indentBlock,
   indentBlocks,
   hiddenBlockIds,
+  moveBlock,
   moveBlocks,
   normalizeDepths,
   normalizeDocument,
@@ -474,5 +475,67 @@ describe('indentBlock keeps the tree legal', () => {
     const { blocks, id } = build(['parent', 0], ['child', 1]);
 
     expect(depths(indentBlock(blocks, id('parent'), -1))).toEqual([0, 1]);
+  });
+});
+
+describe('moveBlock re-clamps depth like every other structural op', () => {
+  test('moving a nested block above its parent flattens it', () => {
+    const { blocks, id } = build(['a', 0], ['b', 1], ['p', 0]);
+
+    // Un-clamped this is [1, 0, 0]: the first block in the document indented
+    // under nothing, which README:201 promises can never happen.
+    expect(depths(moveBlock(blocks, id('b'), -1))).toEqual([0, 0, 0]);
+  });
+
+  test('an ordinary move still moves', () => {
+    const { blocks, id } = build(['a', 0], ['b', 0], ['c', 0]);
+    const moved = moveBlock(blocks, id('a'), 1);
+
+    expect(moved.map(blockText)).toEqual(['b', 'a', 'c']);
+  });
+
+  test('the result always satisfies the depth invariant', () => {
+    const { blocks, id } = build(['a', 0], ['b', 1], ['c', 2], ['d', 0]);
+    const moved = moveBlock(blocks, id('d'), -1);
+
+    moved.forEach((block: Block, index: number) => {
+      const previous = moved[index - 1];
+
+      expect(block.depth).toBeLessThanOrEqual(previous ? previous.depth + 1 : 0);
+    });
+  });
+});
+
+describe('normalizeDocument enforces unique block ids', () => {
+  const dup = (): Partial<Block>[] => [
+    { id: 'dup', type: 'paragraph', depth: 0, content: [{ text: 'FIRST' }] },
+    { id: 'dup', type: 'paragraph', depth: 0, content: [{ text: 'SECOND' }] },
+    { id: 'z', type: 'paragraph', depth: 0, content: [{ text: 'TAIL' }] },
+  ];
+
+  test('a duplicated id is replaced, not kept', () => {
+    const ids = normalizeDocument({ blocks: dup() as Block[] }).blocks.map((b) => b.id);
+
+    // Ids key the renderer's view map and address every model op: a duplicate
+    // renders one block only and makes each edit write to both.
+    expect(new Set(ids).size).toBe(3);
+    expect(ids[0]).toBe('dup');
+  });
+
+  test('every block survives the repair with its own content', () => {
+    const blocks = normalizeDocument({ blocks: dup() as Block[] }).blocks;
+
+    expect(blocks.map(blockText)).toEqual(['FIRST', 'SECOND', 'TAIL']);
+  });
+
+  test('unique ids are left alone', () => {
+    const ids = normalizeDocument({
+      blocks: [
+        { id: 'a', type: 'paragraph', depth: 0, content: [] },
+        { id: 'b', type: 'paragraph', depth: 0, content: [] },
+      ] as Block[],
+    }).blocks.map((b) => b.id);
+
+    expect(ids).toEqual(['a', 'b']);
   });
 });

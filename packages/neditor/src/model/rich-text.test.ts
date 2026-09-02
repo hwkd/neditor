@@ -311,3 +311,25 @@ describe('sanitizeUrl', () => {
     expect(sanitizeUrl('#section')).toBe('#section');
   });
 });
+
+describe('richDelete guards a reversed range', () => {
+  const abc = [{ text: 'abcdef' }];
+
+  test('an ordered range deletes', () => {
+    expect(richToPlainText(richDelete(abc, 1, 4))).toBe('aef');
+  });
+
+  test('a reversed range deletes the same span rather than duplicating it', () => {
+    // richSlice clamps instead of rejecting, so the two slices used to overlap
+    // and this ADDED the text between the offsets.
+    expect(richToPlainText(richDelete(abc, 4, 1))).toBe('aef');
+  });
+
+  test('an empty range is a no-op', () => {
+    expect(richToPlainText(richDelete(abc, 3, 3))).toBe('abcdef');
+  });
+
+  test('offsets past the content are clamped', () => {
+    expect(richToPlainText(richDelete(abc, 99, 2))).toBe('ab');
+  });
+});

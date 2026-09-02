@@ -322,7 +322,21 @@ function normalizeContent(input: unknown, legacyText: unknown): RichText {
  * fields, migrates the pre-rich-text `text` string, and guarantees at least one
  * editable block.
  */
+/** A stored id, or a fresh one when it is missing, empty, or already taken. */
+function uniqueId(id: unknown, seen: Set<string>): string {
+  const candidate = typeof id === 'string' && id.length > 0 && !seen.has(id) ? id : createBlockId();
+
+  seen.add(candidate);
+
+  return candidate;
+}
+
 export function normalizeDocument(doc: Partial<NEditorDocument> | undefined): NEditorDocument {
+  // Ids address every model operation and key the renderer's view map, so a
+  // duplicate makes one block unrenderable while `updateBlock` writes to both.
+  // Nothing downstream can recover from it, so it is repaired at the boundary.
+  const seen = new Set<string>();
+
   const blocks = ((doc?.blocks ?? []) as LegacyBlock[])
     .filter((block): block is LegacyBlock => Boolean(block))
     .map((block) => {
@@ -330,7 +344,7 @@ export function normalizeDocument(doc: Partial<NEditorDocument> | undefined): NE
       // degrades to the one type that can hold any content.
       const type = isBlockType(block.type) ? block.type : 'paragraph';
       const normalized: Block = {
-        id: typeof block.id === 'string' && block.id.length > 0 ? block.id : createBlockId(),
+        id: uniqueId(block.id, seen),
         type,
         content: isVoidType(type) ? [] : normalizeContent(block.content, block.text),
         depth: Number.isFinite(block.depth)
@@ -478,7 +492,10 @@ export function moveBlock(blocks: readonly Block[], id: string, delta: number): 
     next.splice(target, 0, moved);
   }
 
-  return next;
+  // Re-clamped like every other structural op. Without this a block moved above
+  // its parent keeps a depth nothing supports — the first block in the document
+  // sitting at depth 1, indented under nothing.
+  return normalizeDepths(next);
 }
 
 /** Clamps indentation so a block can never be more than one level below its predecessor. */

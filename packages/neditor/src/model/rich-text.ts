@@ -211,7 +211,14 @@ export function richInsert(
 
 export function richDelete(content: readonly TextRun[], start: number, end: number): RichText {
   const total = richLength(content);
-  return richConcat(richSlice(content, 0, start), richSlice(content, end, total));
+  // Ordered first: richSlice clamps rather than rejects, so a reversed range
+  // makes the two slices overlap and this concatenation *duplicates* the text
+  // in between instead of deleting anything. Reachable from the editor when the
+  // caret moves left while the slash menu is still open.
+  const from = Math.max(0, Math.min(start, end));
+  const to = Math.min(total, Math.max(start, end));
+
+  return richConcat(richSlice(content, 0, from), richSlice(content, to, total));
 }
 
 /* -------------------------------------------------------------------------- */
