@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 
 import { INLINE_SPAN_LIMIT, matchInlineRule } from './inline-rules.ts';
+import { blocksFromMarkdown } from './markdown.ts';
 
 /** Reproduces what the editor does with a match: strip delimiters, keep inner. */
 function apply(input: string): { text: string; mark?: string; link?: string } | null {
@@ -148,5 +149,32 @@ describe('inline markdown rules', () => {
     test('an empty label does not fire', () => {
       expect(matchInlineRule('[](https://a.test/)')).toBe(null);
     });
+  });
+});
+
+describe('a line of unpaired brackets is not a link scan', () => {
+  test('stays fast when no `](` is present', () => {
+    // Every `)` used to restart a scan back through the whole 2000-character
+    // window from each `[`, so 21KB of half-open intervals cost ~1s per paste.
+    const source = '*S* = [0, 1) [1, 2) [2, 3) [3, 4) [4, 5) '.repeat(512);
+    const started = performance.now();
+
+    blocksFromMarkdown(source);
+
+    expect(performance.now() - started).toBeLessThan(400);
+  });
+
+  test('real links in the same shape still parse', () => {
+    const runs = blocksFromMarkdown('a [0, 1) b [docs](https://a.test/x) c')[0]!.content;
+    const link = runs.find((run) => run.link);
+
+    expect(link?.link).toBe('https://a.test/x');
+    expect(link?.text).toBe('docs');
+  });
+
+  test('an angle-bracketed destination still parses', () => {
+    const runs = blocksFromMarkdown('[M](<https://a.test/M_(planet)>)')[0]!.content;
+
+    expect(runs.find((run) => run.link)?.link).toBe('https://a.test/M_(planet)');
   });
 });

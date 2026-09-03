@@ -96,7 +96,27 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
       continue;
     }
 
-    const match = rule.pattern.exec(window);
+    // Both link patterns need a `](` somewhere behind the caret, and can only
+    // start at the `[` that opens it. Finding that with two index lookups keeps
+    // the regex off the rest of the window — left to walk back from every `[`
+    // it turned a line of unpaired brackets, `[0, 1) [1, 2) ...`, into a
+    // second of work per paste, because every `)` restarted the scan.
+    let searched = window;
+    let searchedFrom = 0;
+
+    if (rule.isLink) {
+      const pair = window.lastIndexOf('](');
+      const opener = pair === -1 ? -1 : window.lastIndexOf('[', pair);
+
+      if (opener === -1) {
+        continue;
+      }
+
+      searchedFrom = opener;
+      searched = window.slice(opener);
+    }
+
+    const match = rule.pattern.exec(searched);
     const whole = match?.[0];
     const inner = match?.[1];
 
@@ -104,9 +124,11 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
       continue;
     }
 
+    const index = searchedFrom + match.index;
+
     // A match starting on the cut is the one place the lookbehind has no
     // context, so it is not trusted; it would span the window entirely anyway.
-    if (offset > 0 && match.index === 0) {
+    if (offset > 0 && index === 0) {
       continue;
     }
 
@@ -128,8 +150,8 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
     const closeLength = whole.length - openLength - inner.length;
 
     return {
-      start: offset + match.index,
-      end: offset + match.index + whole.length,
+      start: offset + index,
+      end: offset + index + whole.length,
       openLength,
       closeLength,
       mark: rule.mark,

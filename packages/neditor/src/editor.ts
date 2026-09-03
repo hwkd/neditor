@@ -2044,8 +2044,14 @@ export class NEditor {
 
         // Shift+Tab out of the first cell releases focus rather than trapping
         // it; Tab past the last cell grows the table, as a spreadsheet does.
+        //
+        // Released by handling the key and declining to act on it, NOT by
+        // returning false: false falls through to the block-level Tab handler,
+        // which indents the block the caret is in — so releasing this way
+        // silently indented the whole table and threw the caret to cell 0:0,
+        // which for a 1000-row grid is 999 rows from where the user was.
         if (event.shiftKey) {
-          return false;
+          return true;
         }
 
         const grown = tableInsertRow(rows, rows.length);
@@ -2054,9 +2060,9 @@ export class NEditor {
         // anyway made the last cell a keyboard trap that lied about it: an undo
         // entry for nothing, "row added" announced, and then a focus call for a
         // row that was never created. There is nowhere left to move inside the
-        // table, so Tab goes back to meaning what it means everywhere else.
+        // table, so the key goes to the browser, which moves focus out.
         if (sameRows(rows, grown)) {
-          return false;
+          return true;
         }
 
         event.preventDefault();
@@ -3483,8 +3489,19 @@ export class NEditor {
       return;
     }
 
+    const html = data.getData('text/html');
+    const plain = data.getData('text/plain');
+
+    // Nothing to insert is not a reason to move the caret. A file drag carries
+    // only `Files`, so both flavours come back empty and the insert is a no-op
+    // — but placing the caret first still collapsed whatever the user had
+    // selected, destroying a selection to accomplish nothing.
+    if (html.length === 0 && plain.length === 0) {
+      return;
+    }
+
     this.#placeCaretForDrop(resolved, point);
-    this.#insertForeignContent(resolved, data.getData('text/html'), data.getData('text/plain'));
+    this.#insertForeignContent(resolved, html, plain);
   };
 
   /**

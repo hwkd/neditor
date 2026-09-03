@@ -429,3 +429,56 @@ describe('Markdown shortcuts fire on insertion only', () => {
     expect(slashMenuOpen()).toBe(false);
   });
 });
+
+describe('a drop that carries nothing', () => {
+  function select(host: HTMLElement, start: number, end: number): void {
+    host.focus();
+    const range = document.createRange();
+    const text = host.firstChild ?? host;
+    range.setStart(text, start);
+    range.setEnd(text, end);
+    const selection = document.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }
+
+  function drop(host: HTMLElement, entries: Record<string, string>): void {
+    const data = new DataTransfer();
+    for (const [type, value] of Object.entries(entries)) {
+      data.setData(type, value);
+    }
+    const event = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'dataTransfer', { value: data, configurable: true });
+    Object.defineProperty(event, 'clientX', { value: 5, configurable: true });
+    Object.defineProperty(event, 'clientY', { value: 5, configurable: true });
+    host.dispatchEvent(event);
+  }
+
+  test('leaves the selection alone when there is no payload', () => {
+    const editor = mount([block({ content: [{ text: 'abcdef' }] })]);
+    const host = editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
+    select(host, 0, 6);
+
+    // A file drag carries only `Files`: nothing is inserted, so nothing should
+    // be lost either. Placing the caret first collapsed the selection.
+    drop(host, {});
+
+    expect(document.getSelection()?.isCollapsed).toBe(false);
+    expect(editor.getDocument().blocks[0]?.content[0]?.text).toBe('abcdef');
+  });
+
+  test('still inserts, and still moves the caret, when there is one', () => {
+    const editor = mount([block({ content: [{ text: 'abcdef' }] })]);
+    const host = editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
+    select(host, 0, 6);
+
+    drop(host, { 'text/plain': 'X' });
+
+    expect(
+      editor
+        .getDocument()
+        .blocks.map((b) => blockText(b))
+        .join(''),
+    ).toContain('X');
+  });
+});

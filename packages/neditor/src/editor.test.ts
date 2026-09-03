@@ -822,11 +822,12 @@ describe('a table at its row cap refuses instead of pretending', () => {
   // The cap `tableInsertRow` enforces, so the grid below is one row from full.
   const MAX_TABLE_ROWS = 1000;
 
-  const full = (): Block =>
+  const full = (over: Partial<Block> = {}): Block =>
     block({
       id: 'grid',
       type: 'table',
       rows: Array.from({ length: MAX_TABLE_ROWS }, () => [[{ text: 'a' }], [{ text: 'b' }]]),
+      ...over,
     });
 
   const cellAt = (editor: NEditor, coords: string): HTMLElement =>
@@ -841,7 +842,12 @@ describe('a table at its row cap refuses instead of pretending', () => {
     )!;
 
   test('Tab in the last cell releases focus rather than trapping it', () => {
-    const editor = mount([full()]);
+    // The table follows a paragraph deliberately. With the table as the sole
+    // block this test passed against a broken fix, because indentBlocks had
+    // nothing to indent against and was a no-op — the escape it asserts only
+    // exists when the block-level Tab handler would otherwise have done
+    // something.
+    const editor = mount([block({ content: [{ text: 'before' }] }), full()]);
     const last = cellAt(editor, `${MAX_TABLE_ROWS - 1}:1`);
     last.focus();
 
@@ -849,9 +855,33 @@ describe('a table at its row cap refuses instead of pretending', () => {
     // an undo entry, announced a row, and then reached for a row the cap had
     // just refused to create.
     expect(press(last, 'Tab')).toBe(false);
-    expect(editor.getDocument().blocks[0]?.rows).toHaveLength(MAX_TABLE_ROWS);
+    expect(editor.getDocument().blocks[1]?.rows).toHaveLength(MAX_TABLE_ROWS);
     expect(editor.canUndo).toBe(false);
     expect(announcement(editor)).toBe('');
+  });
+
+  test('Tab at the cap does not indent the table it is standing in', () => {
+    const editor = mount([block({ content: [{ text: 'before' }] }), full()]);
+    const last = cellAt(editor, `${MAX_TABLE_ROWS - 1}:1`);
+    last.focus();
+
+    press(last, 'Tab');
+
+    // Falling through to the block-level handler indented the whole table and
+    // moved the caret 999 rows to cell 0:0.
+    expect(editor.getDocument().blocks[1]?.depth).toBe(0);
+    expect(editor.canUndo).toBe(false);
+  });
+
+  test('Shift+Tab out of the first cell does not outdent the table either', () => {
+    const editor = mount([block({ content: [{ text: 'before' }] }), full({ depth: 1 })]);
+    const first = cellAt(editor, '0:0');
+    first.focus();
+
+    press(first, 'Tab', { shiftKey: true });
+
+    expect(editor.getDocument().blocks[1]?.depth).toBe(1);
+    expect(editor.canUndo).toBe(false);
   });
 
   test('Tab one row short of the cap still grows the table', () => {
