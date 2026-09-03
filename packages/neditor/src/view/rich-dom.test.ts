@@ -1178,4 +1178,23 @@ describe('source layout around a pushed-inward wrapper', () => {
   test('a real space between two inline siblings still survives', () => {
     expect(texts('<b><em>a</em> <strong>b</strong><p>x</p></b>')[0]).toEqual(['a', ' b']);
   });
+
+  test.each([
+    [
+      "whitespace that is a block's whole content",
+      '<b><div>A</div><div><br> </div><div>B</div></b>',
+      '<div><b>A</b></div><div><b><br> </b></div><div><b>B</b></div>',
+    ],
+    [
+      'a bare space before a heading',
+      '<b><section>one <em>two</em> <h2>H</h2></section></b>',
+      '<section><b>one </b><b><em>two</em></b><b> </b><h2><b>H</b></h2></section>',
+    ],
+  ])('distributing a wrapper equals writing it by hand: %s', (_name, wrapped, byHand) => {
+    // pushFormattingInward's contract is that `<b><p>x</p></b>` becomes
+    // `<p><b>x</b></p>`, so the two spellings must parse alike. Dropping
+    // trailing whitespace too eagerly broke that: the first case came back a
+    // block short, and the second lost a space the author typed.
+    expect(texts(wrapped)).toEqual(texts(byHand));
+  });
 });

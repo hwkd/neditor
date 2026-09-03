@@ -1098,6 +1098,11 @@ function isSourceWhitespace(node: Node): boolean {
   return node.nodeType !== ELEMENT_NODE && (node.nodeValue ?? '').trim().length === 0;
 }
 
+/** Source layout a formatter left behind, as opposed to a space someone typed. */
+function isIndentation(node: Node): boolean {
+  return isSourceWhitespace(node) && (node.nodeValue ?? '').includes('\n');
+}
+
 function distributeFormatting(
   doc: Document,
   parent: Node,
@@ -1110,13 +1115,19 @@ function distributeFormatting(
   // One copy around the whole run, not one per node: a space between two
   // elements would read as separating blocks once it had a copy of its own,
   // and be dropped as indentation.
-  const wrapRun = (): void => {
-    // Trailing indentation is no more content than leading indentation. It
-    // joined the run while the run was still open, but the run has now ended at
-    // a block boundary, so it goes back to being source formatting — left in,
-    // pretty-printed HTML arrived with a `"\n  "` run on the end of the
-    // paragraph before every list.
-    while (run.length > 0 && isSourceWhitespace(run[run.length - 1]!)) {
+  const wrapRun = (atBlock: boolean): void => {
+    // Trailing indentation is no more content than leading indentation. Two
+    // things narrow it, because distributing a wrapper has to produce what
+    // writing it inside each block by hand produces — this function's stated
+    // contract — and a broader rule broke that:
+    //
+    //   * only where a block boundary ended the run. At the parent's final
+    //     flush the whitespace IS the block's whole content, and popping it
+    //     left `<b><div>A</div><div><br> </div><div>B</div></b>` a block short.
+    //   * only whitespace carrying a line break. That is what pretty-printing
+    //     leaves behind; a bare space between two elements is the author's, and
+    //     hand-writing keeps it.
+    while (atBlock && run.length > 0 && isIndentation(run[run.length - 1]!)) {
       run.pop();
     }
 
@@ -1143,7 +1154,7 @@ function distributeFormatting(
     const tag = element ? tagNameOf(element) : '';
 
     if (element && (STRUCTURE_TAGS.has(tag) || containsBlockLevel(element))) {
-      wrapRun();
+      wrapRun(true);
 
       // A wrapper of its own hands its formatting to the chain here and is
       // marked as spent — unless the walk is sealed, where it is read where it
@@ -1175,7 +1186,7 @@ function distributeFormatting(
     run.push(child);
   }
 
-  wrapRun();
+  wrapRun(false);
 }
 
 /** What to walk when descending into an element that is not a block itself. */
