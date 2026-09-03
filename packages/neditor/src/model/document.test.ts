@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
+import { blocksFromMarkdown } from '../input/markdown.ts';
 import { matchInputRule } from '../input/input-rules.ts';
 import type { Block } from './document.ts';
 import {
@@ -385,5 +386,48 @@ describe('rich markdown serialization', () => {
     const converted = setBlockType([block], block.id, 'code');
 
     expect(converted[0]?.content).toEqual([{ text: 'abc' }]);
+  });
+});
+
+describe('a bullet whose text opens with a toggle marker', () => {
+  const bullet = (text: string): Block => ({
+    id: 'b',
+    type: 'bulleted_list',
+    depth: 0,
+    content: [{ text }],
+  });
+
+  test.each(['▾', '▾ collapsed', ' ▾ collapsed', '\t▾ x', '  ▸ y'])(
+    'stays a bullet and keeps its triangle: %j',
+    (text) => {
+      // The reader's bullet prefix consumes the marker AND the whitespace after
+      // it, so a triangle behind a space still arrives where a toggle's marker
+      // is read. Escaping only at offset 0 left these turning into toggles with
+      // the triangle eaten.
+      const back = normalizeDocument({
+        blocks: blocksFromMarkdown(toMarkdown({ blocks: [bullet(text)] })),
+      }).blocks[0]!;
+
+      expect(back.type).toBe('bulleted_list');
+      expect(blockText(back)).toContain(text.trim().charAt(0));
+    },
+  );
+
+  test('an empty toggle is still written as one', () => {
+    const back = normalizeDocument({
+      blocks: blocksFromMarkdown(
+        toMarkdown({ blocks: [{ id: 't', type: 'toggle', depth: 0, content: [] }] }),
+      ),
+    }).blocks[0]!;
+
+    expect(back.type).toBe('toggle');
+  });
+
+  test('ordinary prose keeps its triangle unescaped, for every other reader', () => {
+    expect(
+      toMarkdown({
+        blocks: [{ id: 'p', type: 'paragraph', depth: 0, content: [{ text: 'press ▾ now' }] }],
+      }),
+    ).toBe('press ▾ now');
   });
 });

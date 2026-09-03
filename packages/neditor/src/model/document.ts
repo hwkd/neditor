@@ -987,7 +987,12 @@ export function toMarkdown(doc: NEditorDocument): string {
         // so escaping the triangle in ordinary prose would put a literal
         // backslash into everyone else's rendering of "press ▾ to expand".
         case 'bulleted_list':
-          return marked('-', text.replace(/^([\u25B8\u25BE])/, '\\$1'));
+          // `^(\s*)` like the other leading-marker escapes in this file, not a
+          // bare `^`: the reader's bullet prefix eats the marker and every
+          // space after it, so a triangle behind whitespace still lands where a
+          // toggle's marker is read. Anchored tighter, `-  ▾ x` came back as a
+          // toggle with the triangle eaten.
+          return marked('-', text.replace(/^(\s*)([\u25B8\u25BE])/, '$1\\$2'));
         case 'numbered_list':
           return marked(`${numbers.get(block.id) ?? 1}.`);
         case 'todo':
