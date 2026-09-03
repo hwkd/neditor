@@ -882,6 +882,8 @@ interface InlineFormatting {
   marks: Map<Mark, boolean>;
   /** The outermost anchor's href, or null where the chain holds no anchor. */
   link: string | null;
+  /** Marks a container only implied, which a tag inside it may still overrule. */
+  readonly soft: ReadonlySet<Mark>;
 }
 
 /**
@@ -895,27 +897,46 @@ interface InlineFormatting {
  * defensible, it is the behaviour every paste has today, and this is a rewrite
  * of how the distribution runs, not of what it produces.
  */
-function formattingWithin(format: InlineFormatting, wrapper: Element): InlineFormatting {
+function formattingWithin(
+  format: InlineFormatting,
+  wrapper: Element,
+  weak = false,
+): InlineFormatting {
   const marks = new Map(format.marks);
+  const soft = new Set(format.soft);
   const { add, remove } = marksForElement(wrapper);
 
-  for (const mark of remove) {
-    if (!marks.has(mark)) {
-      marks.set(mark, false);
+  // Nearest wrapper wins, except over a mark only a container implied: a
+  // `<footer style="text-decoration: underline">` says nothing about
+  // strikethrough, but the shorthand reads as turning it off, and locking that
+  // in dropped the `<s>` inside it.
+  const decide = (mark: Mark, on: boolean): void => {
+    if (marks.has(mark) && !soft.has(mark)) {
+      return;
     }
+
+    marks.set(mark, on);
+
+    if (weak) {
+      soft.add(mark);
+    } else {
+      soft.delete(mark);
+    }
+  };
+
+  for (const mark of remove) {
+    decide(mark, false);
   }
 
   for (const mark of add) {
-    if (!marks.has(mark)) {
-      marks.set(mark, true);
-    }
+    decide(mark, true);
   }
 
   // An anchor without an href stands for one whose link is dropped, exactly as
   // a copy of it would have: `sanitizeUrl` refuses the empty string.
   const href = tagNameOf(wrapper) === 'A' ? (wrapper.getAttribute('href') ?? '') : null;
 
-  return { link: format.link ?? href, marks };
+  return { link: format.link ?? href, marks, soft };
 }
 
 /**
@@ -1031,7 +1052,15 @@ function formattingShell(
  */
 function pushFormattingInward(doc: Document, wrapper: Element): DocumentFragment {
   const fragment = doc.createDocumentFragment();
-  const format = formattingWithin({ link: null, marks: new Map() }, wrapper);
+
+  // A structure element is a container that happens to carry a style, not a
+  // formatting wrapper: `<footer style="text-decoration: underline">` describes
+  // the footer, and an explicit `<s>` inside it still means struck. Its marks
+  // are therefore contributed weakly — they apply, but a tag inside may
+  // overrule them. Taken as firmly as a wrapper's own, the footer's shorthand
+  // (underline on, strikethrough off) silently swallowed that `<s>`.
+  const empty: InlineFormatting = { link: null, marks: new Map(), soft: new Set() };
+  const format = formattingWithin(empty, wrapper, STRUCTURE_TAGS.has(tagNameOf(wrapper)));
 
   fragment.append(...[...(wrapper.cloneNode(true) as Element).childNodes]);
   distributeFormatting(doc, fragment, format, false);

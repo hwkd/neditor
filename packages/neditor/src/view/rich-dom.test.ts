@@ -1071,3 +1071,46 @@ describe('the DOM to work in is the one passed in', () => {
     }
   });
 });
+
+describe('a container that carries a style is not a formatting wrapper', () => {
+  const marks = (html: string): string =>
+    [
+      ...new Set(
+        blocksFromHtml(document, html).flatMap((b) =>
+          (b.content ?? []).flatMap((r) => r.marks ?? []),
+        ),
+      ),
+    ]
+      .sort()
+      .join(',');
+
+  test.each([
+    [
+      'footer',
+      '<footer style="text-decoration: underline"><img src="/l.png"><s><p>t</p></s></footer>',
+    ],
+    ['nav', '<nav style="text-decoration: line-through"><img src="/l.png"><u><p>t</p></u></nav>'],
+    ['summary', '<summary style="text-decoration: line-through"><u><p>t</p></u></summary>'],
+  ])('%s keeps the mark the tag inside it states', (_name, html) => {
+    // `text-decoration` is a shorthand, so a container asking for one
+    // decoration reads as turning the others off. Taken as firmly as a
+    // wrapper's own formatting, that silently swallowed the tag below it.
+    expect(marks(html)).toBe('strikethrough,underline');
+  });
+
+  test('a tag inside can still turn a container mark off', () => {
+    const html =
+      '<header style="font-weight: bold"><img src="/l.png">' +
+      '<span style="font-weight: normal; font-style: italic"><p>T</p></span></header>';
+
+    expect(marks(html)).toBe('italic');
+  });
+
+  test('an ordinary inline wrapper still decides for everything below it', () => {
+    // The nearest wrapper wins as before; only a container's implied marks are
+    // overridable, so this must not change.
+    expect(marks('<s style="text-decoration: line-through"><u><p>t</p></u></s>')).toBe(
+      'strikethrough',
+    );
+  });
+});

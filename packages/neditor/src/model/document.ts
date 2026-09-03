@@ -823,7 +823,7 @@ export function sliceDocument(blocks: readonly Block[], ids: ReadonlySet<string>
  * written `- ▾`: the text was read as the marker and destroyed. Escaping them
  * is what keeps the marker a marker.
  */
-const INLINE_ESCAPE = /[\\`*_[\]~|<>\u25B8\u25BE]/g;
+const INLINE_ESCAPE = /[\\`*_[\]~|<>]/g;
 
 /**
  * A line-leading construct, which only matters for the first run of a block.
@@ -967,8 +967,8 @@ export function toMarkdown(doc: NEditorDocument): string {
       // marker readable, not what makes it a marker, and trailing whitespace
       // does not survive the trip back — ours trims it, and so does every other
       // tool the text passes through.
-      const marked = (marker: string): string =>
-        text.length === 0 ? `${indent}${marker}` : `${indent}${marker} ${text}`;
+      const marked = (marker: string, body: string = text): string =>
+        body.length === 0 ? `${indent}${marker}` : `${indent}${marker} ${body}`;
 
       switch (block.type) {
         // Only a paragraph can be mistaken for another block by its first
@@ -981,8 +981,13 @@ export function toMarkdown(doc: NEditorDocument): string {
           return marked('##');
         case 'heading3':
           return marked('###');
+        // A bullet is the one block whose text can still be misread, because a
+        // toggle is written as a bullet led by a triangle. Escaped here and
+        // nowhere else: `\▾` is not an escape any CommonMark reader honours,
+        // so escaping the triangle in ordinary prose would put a literal
+        // backslash into everyone else's rendering of "press ▾ to expand".
         case 'bulleted_list':
-          return marked('-');
+          return marked('-', text.replace(/^([\u25B8\u25BE])/, '\\$1'));
         case 'numbered_list':
           return marked(`${numbers.get(block.id) ?? 1}.`);
         case 'todo':
