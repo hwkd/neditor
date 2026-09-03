@@ -951,18 +951,28 @@ function formattingWithin(
  * so a chain that turns either off has by then decided both, and writing the
  * pair out together says exactly what it decided.
  */
-function formattingOff(marks: Map<Mark, boolean>): string {
+function formattingOff(marks: Map<Mark, boolean>, soft: ReadonlySet<Mark>): string {
   const off: string[] = [];
 
-  if (marks.get('bold') === false) {
+  // A soft mark is one a container only implied — `text-decoration: underline`
+  // reads as strikethrough OFF, which is an artefact of the shorthand, not a
+  // decision. Writing it into the shell as an explicit declaration puts it
+  // deeper in the tree than a tag still standing outside, where it wins and
+  // cancels that tag: the same `<s>`-swallowing this weak/firm split exists to
+  // prevent, reappearing at the emission end after being fixed at the
+  // accumulation end.
+  const decided = (mark: Mark): boolean | undefined =>
+    soft.has(mark) ? undefined : marks.get(mark);
+
+  if (decided('bold') === false) {
     off.push('font-weight:normal');
   }
 
-  if (marks.get('italic') === false) {
+  if (decided('italic') === false) {
     off.push('font-style:normal');
   }
 
-  if (marks.get('underline') === false || marks.get('strikethrough') === false) {
+  if (decided('underline') === false || decided('strikethrough') === false) {
     const lines = [
       marks.get('underline') === true ? 'underline' : '',
       marks.get('strikethrough') === true ? 'line-through' : '',
@@ -989,7 +999,7 @@ function formattingShell(
   format: InlineFormatting,
 ): { outer: Element; inner: Element } | null {
   const parts: Element[] = [];
-  const off = formattingOff(format.marks);
+  const off = formattingOff(format.marks, format.soft);
 
   if (off.length > 0) {
     const span = doc.createElement('span');
@@ -1083,6 +1093,11 @@ function pushFormattingInward(doc: Document, wrapper: Element): DocumentFragment
  * re-parents the whole subtree hanging off it, once per level of the chain,
  * which is a different route back to quadratic.
  */
+/** A text node holding nothing but source layout. */
+function isSourceWhitespace(node: Node): boolean {
+  return node.nodeType !== ELEMENT_NODE && (node.nodeValue ?? '').trim().length === 0;
+}
+
 function distributeFormatting(
   doc: Document,
   parent: Node,
@@ -1096,6 +1111,15 @@ function distributeFormatting(
   // elements would read as separating blocks once it had a copy of its own,
   // and be dropped as indentation.
   const wrapRun = (): void => {
+    // Trailing indentation is no more content than leading indentation. It
+    // joined the run while the run was still open, but the run has now ended at
+    // a block boundary, so it goes back to being source formatting — left in,
+    // pretty-printed HTML arrived with a `"\n  "` run on the end of the
+    // paragraph before every list.
+    while (run.length > 0 && isSourceWhitespace(run[run.length - 1]!)) {
+      run.pop();
+    }
+
     const first = run[0];
     const nodes = run;
 
@@ -1144,7 +1168,7 @@ function distributeFormatting(
 
     // Indentation between two blocks joins a run already under way, but never
     // starts one — on its own it is source formatting, not content.
-    if (!element && run.length === 0 && (child.nodeValue ?? '').trim().length === 0) {
+    if (run.length === 0 && isSourceWhitespace(child)) {
       continue;
     }
 

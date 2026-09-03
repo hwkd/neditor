@@ -203,7 +203,7 @@ const OPENERS = new Set(['*', '_', '~', '`', '<', '[']);
  * The toggle triangles are in here because a bullet whose text is one of them
  * is written escaped; unescaped it would be read back as an empty toggle.
  */
-const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!\u25B8\u25BE]/;
+const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!]/;
 
 /**
  * Stands in for an escaped character while rules are matched.
@@ -720,6 +720,13 @@ export function blocksFromMarkdown(text: string): Block[] {
         type = 'toggle';
         collapsed = toggle[1] === '\u25B8';
         rest = rest.slice(toggle[0].length);
+      } else {
+        // The one place `\▾` means an escape rather than a literal backslash,
+        // because it is the one place the writer emits one — to keep a bullet
+        // whose text opens with a triangle from reading as the toggle marker
+        // just tested for. Honouring it everywhere ate real backslashes out of
+        // ordinary text, and `\▾` is not an escape any other reader honours.
+        rest = rest.replace(/^\\([\u25B8\u25BE])/, '$1');
       }
     }
 

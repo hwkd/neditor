@@ -1114,3 +1114,68 @@ describe('a container that carries a style is not a formatting wrapper', () => {
     );
   });
 });
+
+describe('a container mark is not re-stated as CSS on the way out', () => {
+  const marks = (html: string): string =>
+    [
+      ...new Set(
+        blocksFromHtml(document, html).flatMap((b) =>
+          (b.content ?? []).flatMap((r) => r.marks ?? []),
+        ),
+      ),
+    ]
+      .sort()
+      .join(',');
+
+  test.each([
+    [
+      'main',
+      '<main style="text-decoration:underline"><details><s><h2>a</h2></s></details><img src="https://e.com/l.png"></main>',
+    ],
+    [
+      'nav',
+      '<nav style="text-decoration:line-through"><details><u><p>a</p>b</u></details><img src="https://e.com/l.png"></nav>',
+    ],
+  ])('%s does not cancel a tag standing inside it', (_name, html) => {
+    // The weak/firm split kept a container's implied mark from winning during
+    // accumulation, but the emitted shell wrote it back out as an explicit
+    // declaration — nested deeper than the tag, where it won anyway.
+    expect(marks(html)).toBe('strikethrough,underline');
+  });
+
+  test('a mark the container really states is still emitted', () => {
+    expect(
+      marks(
+        '<main style="font-weight:bold"><details><h2>a</h2></details><img src="/l.png"></main>',
+      ),
+    ).toBe('bold');
+  });
+});
+
+describe('source layout around a pushed-inward wrapper', () => {
+  const texts = (html: string): string[][] =>
+    blocksFromHtml(document, html).map((b) => (b.content ?? []).map((r) => r.text));
+
+  test('trailing indentation does not become content', () => {
+    const html =
+      '<footer style="text-decoration:underline">\n  <em>emph</em>\n  <ul><li>i</li></ul>\n' +
+      '  <img src="https://e.com/l.png">\n</footer>';
+
+    // The run had already opened when the newline joined it, so it survived
+    // into the shell as a `"\n  "` run of document text.
+    expect(texts(html)[0]).toEqual(['emph']);
+  });
+
+  test('it matches what the same shape gives without a wrapper', () => {
+    const wrapped = texts(
+      '<footer style="text-decoration:underline">\n  <em>emph</em>\n  <ul><li>i</li></ul>\n</footer>',
+    );
+    const plain = texts('<div>\n  <em>emph</em>\n  <ul><li>i</li></ul>\n</div>');
+
+    expect(wrapped[0]).toEqual(plain[0]);
+  });
+
+  test('a real space between two inline siblings still survives', () => {
+    expect(texts('<b><em>a</em> <strong>b</strong><p>x</p></b>')[0]).toEqual(['a', ' b']);
+  });
+});

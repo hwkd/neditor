@@ -687,3 +687,32 @@ describe('a span that reaches back is bounded work, not unbounded', () => {
     expect(performance.now() - started).toBeLessThan(500);
   });
 });
+
+describe('a backslash before a triangle', () => {
+  test('is a literal backslash in ordinary imported Markdown', () => {
+    // `\▾` is not an escape any CommonMark reader honours, so eating the
+    // backslash destroyed a real one that no round trip could bring back.
+    const runs = blocksFromMarkdown('press \\▾ to expand')[0]!.content;
+
+    expect(runs.map((run) => run.text).join('')).toBe('press \\▾ to expand');
+  });
+
+  test('is an escape at the head of a bullet, where the writer emits one', () => {
+    const block = blocksFromMarkdown('- \\▾ collapsed')[0]!;
+
+    expect(block.type).toBe('bulleted_list');
+    expect(block.content.map((run) => run.text).join('')).toBe('▾ collapsed');
+  });
+
+  test('an unescaped triangle there still means a toggle', () => {
+    expect(blocksFromMarkdown('- ▾ collapsed')[0]!.type).toBe('toggle');
+  });
+
+  test('ASCII escapes are unaffected', () => {
+    expect(
+      blocksFromMarkdown('\\* not italic \\*')[0]!
+        .content.map((r) => r.text)
+        .join(''),
+    ).toBe('* not italic *');
+  });
+});
