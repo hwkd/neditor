@@ -3489,19 +3489,16 @@ export class NEditor {
       return;
     }
 
-    const html = data.getData('text/html');
-    const plain = data.getData('text/plain');
-
-    // Nothing to insert is not a reason to move the caret. A file drag carries
-    // only `Files`, so both flavours come back empty and the insert is a no-op
-    // — but placing the caret first still collapsed whatever the user had
-    // selected, destroying a selection to accomplish nothing.
-    if (html.length === 0 && plain.length === 0) {
-      return;
-    }
-
-    this.#placeCaretForDrop(resolved, point);
-    this.#insertForeignContent(resolved, html, plain);
+    // Nothing to insert is not a reason to move the caret, so the caret is
+    // placed from inside, once the payload is known to hold something. A file
+    // drag carries only `Files` and a dragged blank line parses to nothing;
+    // both used to collapse whatever the user had selected and insert nothing.
+    this.#insertForeignContent(
+      resolved,
+      data.getData('text/html'),
+      data.getData('text/plain'),
+      () => this.#placeCaretForDrop(resolved, point),
+    );
   };
 
   /**
@@ -3569,33 +3566,45 @@ export class NEditor {
    * the payload is parsed into blocks, and where those blocks go is decided by
    * what the target can actually hold.
    */
-  #insertForeignContent(resolved: ResolvedTarget, html: string, plain: string): void {
+  #insertForeignContent(
+    resolved: ResolvedTarget,
+    html: string,
+    plain: string,
+    prepare?: () => void,
+  ): void {
     const pasted = this.#parseClipboard(html, plain);
 
     if (pasted.length === 0) {
       return;
     }
 
+    // What would be written is decided before anything is written, so a caller
+    // that has to move the caret first — a drop, which lands where the pointer
+    // let go rather than where the selection was — can be told there is nothing
+    // to move it for. Testing the payload for emptiness instead only caught the
+    // literally empty one: a dragged blank line arrives as `<div><br></div>`,
+    // which is not empty, parses to nothing, and still threw the selection away.
+    const inline = resolved.cell
+      ? richFromBlocks(pasted)
+      : resolved.block.type === 'code'
+        ? // A code block is literal: pasted structure becomes text, never blocks.
+          richFromPlainText(plain.length > 0 ? plain : pasted.map(blockText).join('\n'))
+        : // A lone paragraph is a phrase, not a document: keep it in this block
+          // so pasting mid-sentence still works.
+          pasted.length === 1 && pasted[0]?.type === 'paragraph'
+          ? pasted[0].content
+          : null;
+
+    if (inline !== null && isRichEmpty(inline)) {
+      return;
+    }
+
+    prepare?.();
+
     // A cell holds text, so structure flattens rather than splitting the table.
     // Only the structure: marks and links render in a cell like anywhere else.
-    if (resolved.cell) {
-      this.#pasteInline(resolved, richFromBlocks(pasted));
-      return;
-    }
-
-    // A code block is literal: pasted structure becomes text, never blocks.
-    if (resolved.block.type === 'code') {
-      const literal = plain.length > 0 ? plain : pasted.map(blockText).join('\n');
-      this.#pasteInline(resolved, richFromPlainText(literal));
-      return;
-    }
-
-    const only = pasted.length === 1 ? pasted[0] : undefined;
-
-    // A lone paragraph is a phrase, not a document: keep it in this block so
-    // pasting mid-sentence still works.
-    if (only && only.type === 'paragraph') {
-      this.#pasteInline(resolved, only.content);
+    if (inline !== null) {
+      this.#pasteInline(resolved, inline);
       return;
     }
 

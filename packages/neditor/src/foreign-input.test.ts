@@ -467,6 +467,34 @@ describe('a drop that carries nothing', () => {
     expect(editor.getDocument().blocks[0]?.content[0]?.text).toBe('abcdef');
   });
 
+  test.each([
+    ['a dragged blank line', { 'text/html': '<div><br></div>', 'text/plain': '\n' }],
+    [
+      'the same wrapped as Chrome sends it',
+      { 'text/html': "<meta charset='utf-8'><div><br></div>", 'text/plain': '\n' },
+    ],
+    ['an empty paragraph', { 'text/html': '<p></p>' }],
+    ['whitespace only', { 'text/plain': '   ' }],
+    ['a comment', { 'text/html': '<!-- nothing -->' }],
+    [
+      'markup that is all dropped by the sanitizer',
+      { 'text/html': '<script>x</script><style>p{}</style>' },
+    ],
+  ])('leaves the selection alone for %s', (_label, payload) => {
+    const editor = mount([block({ content: [{ text: 'abcdef' }] })]);
+    const host = editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
+    select(host, 0, 6);
+
+    // Non-empty, but it parses to nothing. Guarding on the payload's LENGTH
+    // caught only the empty-string case and still threw the selection away for
+    // every one of these.
+    drop(host, payload);
+
+    expect(document.getSelection()?.isCollapsed).toBe(false);
+    expect(editor.getDocument().blocks[0]?.content[0]?.text).toBe('abcdef');
+    expect(editor.canUndo).toBe(false);
+  });
+
   test('still inserts, and still moves the caret, when there is one', () => {
     const editor = mount([block({ content: [{ text: 'abcdef' }] })]);
     const host = editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
