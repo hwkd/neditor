@@ -392,6 +392,19 @@ describe('blocksFromHtml', () => {
       expect(texts(html)).toEqual(['Title', 'Body', 'one', 'two']);
     });
 
+    test('splits the payload Google Docs actually sends, unbolded', () => {
+      // The exact shape of a Google Docs clipboard, kept as its own test: the
+      // wrapper is descended into rather than pushed inward, because
+      // font-weight:normal leaves it with no mark to carry.
+      const html =
+        '<b style="font-weight:normal" id="docs-internal-guid-x"><p>One</p><p>Two</p></b>';
+
+      expect(parse(html).map((block) => block.content)).toEqual([
+        [{ text: 'One' }],
+        [{ text: 'Two' }],
+      ]);
+    });
+
     test('carries only the bold the source really had', () => {
       // The whole point of that wrapper's font-weight:normal: without it every
       // Google Docs paste arrives bold from end to end.
@@ -457,6 +470,187 @@ describe('blocksFromHtml', () => {
 
     test('is still inline when it holds no blocks', () => {
       expect(texts('<b>just <em>text</em></b>')).toEqual(['just text']);
+    });
+
+    test('hands its formatting to a quote without swallowing the list in it', () => {
+      const html = '<b><blockquote><p>q</p><ul><li>i</li><li>j</li></ul></blockquote></b>';
+
+      expect(types(html)).toEqual(['quote', 'bulleted_list', 'bulleted_list']);
+      expect(parse(html).map((block) => block.content)).toEqual([
+        [{ text: 'q', marks: ['bold'] }],
+        [{ text: 'i', marks: ['bold'] }],
+        [{ text: 'j', marks: ['bold'] }],
+      ]);
+      expect(depths(html)).toEqual([0, 1, 1]);
+    });
+  });
+
+  describe('a chain of inline wrappers', () => {
+    /**
+     * Deep enough that re-reading the chain per level would show, and still
+     * only a few kilobytes — which is the point: the depth costs the paste
+     * nothing and used to cost the tab everything.
+     */
+    const DEEP = 512;
+
+    const chain = (open: string, close: string, inner: string, depth = DEEP): string =>
+      open.repeat(depth) + inner + close.repeat(depth);
+
+    /** A block at every level, so the wrappers are lifted out of real content. */
+    const staircase = (depth = DEEP): string => '<b><p>p</p>'.repeat(depth) + '</b>'.repeat(depth);
+
+    const parseTime = (html: string): number => {
+      const started = performance.now();
+
+      parse(html);
+
+      return performance.now() - started;
+    };
+
+    /** Subtree queries run while parsing: every one of them walks everything. */
+    const subtreeQueries = (html: string): number => {
+      const prototype = Element.prototype as {
+        querySelector: (selector: string) => Element | null;
+      };
+      const original = prototype.querySelector;
+      let queries = 0;
+
+      prototype.querySelector = function counted(this: Element, selector: string): Element | null {
+        queries += 1;
+
+        return original.call(this, selector);
+      };
+
+      try {
+        parse(html);
+      } finally {
+        prototype.querySelector = original;
+      }
+
+      return queries;
+    };
+
+    test('is read once, not once per level', () => {
+      // Pushing the formatting inward handed back a fragment still topped by
+      // the next wrapper, so the visitor came straight back and re-cloned and
+      // re-scanned everything below it, one level further down. In Chrome, 4.5
+      // KB of nested <b> — what a drag out of a hostile page can carry — froze
+      // the tab for eleven seconds inside the paste event, and 9 KB for six
+      // minutes. The bound here is loose on purpose: the work is linear now,
+      // so this is milliseconds, and anything quadratic blows straight past it.
+      expect(parseTime(chain('<b>', '</b>', '<p>x</p>'))).toBeLessThan(1000);
+      expect(parseTime(chain('<span>', '</span>', '<p>x</p>'))).toBeLessThan(1000);
+      expect(parseTime(chain('<a href="https://a.test/">', '</a>', '<p>x</p>'))).toBeLessThan(1000);
+      expect(parseTime(staircase())).toBeLessThan(1000);
+    });
+
+    test('costs no more to look through the deeper it is', () => {
+      // The timing above is the alarm; this is the mechanism. Asking "is there
+      // a block in here", "is there an image in here" or "where is the image"
+      // with a query walks the whole remaining subtree, and asking once per
+      // level is quadratic before the cloning makes it cubic — 128 nested <b>
+      // ran 8,640 of these queries, and 8 of them ran 60.
+      const wrappers: ReadonlyArray<readonly [string, string]> = [
+        ['<b>', '</b>'],
+        ['<span>', '</span>'],
+        ['<b><figure>', '</figure></b>'],
+      ];
+
+      for (const [open, close] of wrappers) {
+        const shallow = subtreeQueries(chain(open, close, '<p>x</p>', 8));
+
+        expect(subtreeQueries(chain(open, close, '<p>x</p>', DEEP))).toBe(shallow);
+      }
+    });
+
+    test('leaves one copy of its formatting on the block it holds', () => {
+      const blocks = parse(chain('<b>', '</b>', '<p>x</p>'));
+
+      expect(blocks).toHaveLength(1);
+      expect(blocks[0]?.content).toEqual([{ text: 'x', marks: ['bold'] }]);
+    });
+
+    test('keeps every block it holds, at every level of it', () => {
+      const blocks = parse(staircase());
+
+      expect(blocks).toHaveLength(DEEP);
+      expect(blocks.map((block) => block.content)).toEqual(
+        Array.from({ length: DEEP }, () => [{ text: 'p', marks: ['bold'] }]),
+      );
+    });
+
+    test('every wrapper in it leaves its own mark', () => {
+      expect(parse('<b><i><u><p>x</p></u></i></b>')[0]?.content).toEqual([
+        { text: 'x', marks: ['bold', 'italic', 'underline'] },
+      ]);
+      expect(parse('<span><b><span><i><p>x</p></i></span></b></span>')[0]?.content).toEqual([
+        { text: 'x', marks: ['bold', 'italic'] },
+      ]);
+    });
+
+    test('an href anywhere in it reaches the block, either way up', () => {
+      const linked = [{ text: 'x', marks: ['bold'], link: 'https://a.test/' }];
+
+      expect(parse('<a href="https://a.test/"><b><p>x</p></b></a>')[0]?.content).toEqual(linked);
+      expect(parse('<b><a href="https://a.test/"><p>x</p></a></b>')[0]?.content).toEqual(linked);
+    });
+
+    test('a mark an outer wrapper turned on outlives an inner one turning it off', () => {
+      // Not the rule the same markup follows when it holds no block — there the
+      // inner element wins — but the rule every paste has had since the wrapper
+      // was first descended into, and this pass is about what that costs, not
+      // about what it decides.
+      expect(parse('<b><em style="font-weight:normal"><p>x</p></em></b>')[0]?.content).toEqual([
+        { text: 'x', marks: ['bold', 'italic'] },
+      ]);
+      expect(parse('<em style="font-weight:normal"><b><p>x</p></b></em>')[0]?.content).toEqual([
+        { text: 'x', marks: ['italic'] },
+      ]);
+    });
+
+    test('leaves a wrapper inside a block to speak for itself', () => {
+      // A block is read whole, so a wrapper standing inside one is read where
+      // it stands — and a copy of it around the text as well would say the same
+      // thing twice, which is only harmless until one of the two turns a mark
+      // off. Here the <em> cancels the <b> around it, and the <u> outside the
+      // quote — the one the block really is cut off from — still arrives.
+      expect(
+        parse(
+          '<u><blockquote><b><em style="font-weight:normal"><p>x</p></em></b></blockquote></u>',
+        )[0]?.content,
+      ).toEqual([{ text: 'x', marks: ['italic', 'underline'] }]);
+
+      expect(parse('<b><blockquote><em><p>x</p></em>tail</blockquote></b>')[0]?.content).toEqual([
+        { text: 'x', marks: ['bold', 'italic'] },
+        { text: '\n', marks: ['italic'] },
+        { text: 'tail', marks: ['bold'] },
+      ]);
+    });
+
+    test('carries the marks it turns off as well as the ones it turns on', () => {
+      // The copy has to be able to say "not bold" the way the wrapper it stands
+      // in for said it — with a style — because the <b> it has to overrule is
+      // still standing inside the block, between the copy and the text.
+      expect(
+        parse('<u style="font-weight:normal"><blockquote><b><p>x</p></b></blockquote></u>')[0]
+          ?.content,
+      ).toEqual([{ text: 'x', marks: ['underline'] }]);
+
+      // And it must say only that: a <u> inside the quote is still underline,
+      // and the strikethrough from outside it still arrives.
+      expect(parse('<s><blockquote><u><p>x</p></u></blockquote></s>')[0]?.content).toEqual([
+        { text: 'x', marks: ['underline', 'strikethrough'] },
+      ]);
+    });
+
+    test('keeps the text either side of a wrapper in it out of each other', () => {
+      const blocks = parse('<b><i><p>one</p>tail</i>after</b>');
+
+      expect(blocks.map((block) => block.content)).toEqual([
+        [{ text: 'one', marks: ['bold', 'italic'] }],
+        [{ text: 'tail', marks: ['bold', 'italic'] }],
+        [{ text: 'after', marks: ['bold'] }],
+      ]);
     });
   });
 

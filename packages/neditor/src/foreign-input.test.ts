@@ -174,6 +174,152 @@ describe('a drop from outside the editor', () => {
   });
 });
 
+describe('a drop lands where the pointer let go', () => {
+  const HOSTILE =
+    '<iframe src="https://evil.test/x"></iframe>' +
+    '<script>alert(1)</script>' +
+    '<a href="javascript:alert(1)">go</a>' +
+    '<p>tail</p>';
+
+  const DROP_X = 10;
+  const DROP_Y = 20;
+
+  type CaretApi = 'caretPositionFromPoint' | 'caretRangeFromPoint';
+
+  interface CaretPoint {
+    node: Node;
+    offset: number;
+  }
+
+  const textOf = (host: HTMLElement): Node => host.firstChild ?? host;
+
+  function selectIn(host: HTMLElement, start: number, end: number): void {
+    const range = document.createRange();
+    range.setStart(textOf(host), start);
+    range.setEnd(textOf(host), end);
+    const selection = getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    host.focus();
+  }
+
+  /**
+   * A drop that lands at a real place on screen.
+   *
+   * happy-dom gives a `DragEvent` no client coordinates and the document
+   * neither spelling of "which caret is at (x, y)", so both halves of what a
+   * browser delivers are stood in for: the drop happens at (DROP_X, DROP_Y),
+   * and the engine answers that one point with `caret`. Only that point, so a
+   * handler reading the wrong coordinates gets nothing; and restored after the
+   * dispatch, so nothing else inherits a caret API that is not really there.
+   */
+  function dropAt(
+    target: EventTarget,
+    caret: CaretPoint | null,
+    html: string,
+    api: CaretApi = 'caretPositionFromPoint',
+  ): DragEvent {
+    const data = new DataTransfer();
+    data.setData('text/html', html);
+
+    const event = new DragEvent('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'dataTransfer', { value: data });
+    Object.defineProperty(event, 'clientX', { value: DROP_X });
+    Object.defineProperty(event, 'clientY', { value: DROP_Y });
+
+    const answer = (x: number, y: number): unknown => {
+      if (!caret || x !== DROP_X || y !== DROP_Y) {
+        return null;
+      }
+
+      if (api === 'caretPositionFromPoint') {
+        return { offsetNode: caret.node, offset: caret.offset };
+      }
+
+      const range = document.createRange();
+      range.setStart(caret.node, caret.offset);
+      range.collapse(true);
+
+      return range;
+    };
+
+    Object.defineProperty(document, api, { configurable: true, value: answer });
+
+    try {
+      target.dispatchEvent(event);
+    } finally {
+      Reflect.deleteProperty(document, api);
+    }
+
+    return event;
+  }
+
+  test.each<CaretApi>(['caretPositionFromPoint', 'caretRangeFromPoint'])(
+    'through %s, at the pointer rather than at the caret left behind',
+    (api: CaretApi) => {
+      const editor = mount([
+        block({ content: [{ text: 'first' }] }),
+        block({ content: [{ text: 'second' }] }),
+      ]);
+      const [from, into] = hosts(editor);
+      caretTo(from!, 'end');
+
+      dropAt(into!, { node: textOf(into!), offset: 3 }, '<p>XX</p>', api);
+
+      const blocks = editor.getDocument().blocks;
+
+      // Cancelling the native insertion costs the caret the browser would have
+      // placed. Taking none from the coordinates instead left the drop reading
+      // a selection from before the drag: the payload appeared in a block the
+      // user never pointed at, or at offset 0 of the one they did.
+      expect(blockText(blocks[0]!)).toBe('first');
+      expect(blockText(blocks[1]!)).toBe('secXXond');
+    },
+  );
+
+  test('does not swallow the text selected in the block it lands in', () => {
+    const editor = mount([block({ content: [{ text: 'second' }] })]);
+    const host = hosts(editor)[0]!;
+    selectIn(host, 0, 6);
+
+    dropAt(host, { node: textOf(host), offset: 3 }, '<p>XX</p>');
+
+    // A drop inserts; it never replaces. Reading the range out of the stale
+    // selection handed the whole block to `richDelete` first, so dropping onto
+    // a paragraph you had selected destroyed it.
+    expect(blockText(editor.getDocument().blocks[0]!)).toBe('secXXond');
+  });
+
+  test('collapses the selection even where no caret can be had from the point', () => {
+    const editor = mount([block({ content: [{ text: 'second' }] })]);
+    const host = hosts(editor)[0]!;
+    selectIn(host, 0, 6);
+
+    // The plain helper: no coordinates on the event, no caret API on the
+    // document. An engine that can answer neither still must not let a drop
+    // turn into a replacement.
+    drop(host, '<p>XX</p>');
+
+    expect(blockText(editor.getDocument().blocks[0]!)).toBe('XXsecond');
+  });
+
+  test('still enters only through the parser once it has a point', () => {
+    const editor = mount([block({ content: [{ text: 'second' }] })]);
+    const host = hosts(editor)[0]!;
+
+    const event = dropAt(host, { node: textOf(host), offset: 3 }, HOSTILE);
+
+    // Placing the caret is a new step in front of the parse, not a way round
+    // it: the payload still becomes blocks, and the markup still never lands.
+    expect(event.defaultPrevented).toBe(true);
+    expect(editor.element.querySelector('iframe')).toBe(null);
+    expect(editor.element.querySelector('script')).toBe(null);
+    expect(editor.element.innerHTML).not.toContain('javascript:');
+    expect(JSON.stringify(editor.getDocument())).not.toContain('javascript:');
+    expect(JSON.stringify(editor.getDocument())).not.toContain('evil.test');
+  });
+});
+
 describe('beforeinput carrying content the editor never parsed', () => {
   function beforeInput(host: HTMLElement, inputType: string): boolean {
     const event = new InputEvent('beforeinput', { inputType, bubbles: true, cancelable: true });

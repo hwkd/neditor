@@ -9,7 +9,11 @@
  * ```
  */
 
-export type { NEditorLabels } from './labels.ts';
+// SlashCommandLabel is reachable through NEditorLabels.slashCommands, so it is
+// re-exported for the same reason NEditorTheme is: a name a consumer's own
+// signatures can hold is part of the surface, and without it declaration emit
+// hands them a type they cannot write down.
+export type { NEditorLabels, SlashCommandLabel } from './labels.ts';
 export { DEFAULT_LABELS, resolveLabels } from './labels.ts';
 export { NEditor } from './editor.ts';
 // Reachable through NEditorOptions and SelectionState, so they have to be
@@ -17,6 +21,16 @@ export { NEditor } from './editor.ts';
 export type { PortalTheme as NEditorTheme } from './ui/portal.ts';
 export type { OffsetRange } from './view/selection.ts';
 export type { NEditorEvents, NEditorOptions, SelectionState } from './editor.ts';
+
+/**
+ * Where a table cell sits, row-major, as `focusRange` takes it.
+ *
+ * Read off the method rather than restated, so the public name cannot drift
+ * from the parameter it stands for. `editor.ts` declares the interface without
+ * exporting it, which is why this is not a plain re-export; exporting it there
+ * and re-exporting it here would say the same thing more directly.
+ */
+export type CellCoords = NonNullable<Parameters<NEditor['focusRange']>[3]>;
 
 export type { Block, BlockType, NEditorDocument } from './model/document.ts';
 export type { HistoryEntry, HistoryState, SelectionSnapshot } from './model/history.ts';

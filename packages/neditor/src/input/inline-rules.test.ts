@@ -24,8 +24,29 @@ describe('inline markdown rules', () => {
     ['_italic_', 'italic', 'italic'],
     ['~~gone~~', 'gone', 'strikethrough'],
     ['`code`', 'code', 'code'],
+    ['<u>under</u>', 'under', 'underline'],
   ])('%s becomes %s as %s', (input: string, expected: string, mark: string) => {
     expect(apply(input)).toEqual({ text: expected, mark, link: undefined });
+  });
+
+  test('every rule is still reached through the character it closes on', () => {
+    // A rule is only tried when the caret sits on the character its closing
+    // delimiter ends with, which is what keeps the link patterns off a line
+    // with no `)` in it. Get that character wrong for a rule and the rule
+    // simply stops firing, silently — so each one is named here.
+    const closers = new Map([
+      ['*', '**b**'],
+      ['_', '__b__'],
+      ['~', '~~b~~'],
+      ['`', '`b`'],
+      ['>', '<u>b</u>'],
+      [')', '[b](https://a.test/)'],
+    ]);
+
+    for (const [closer, source] of closers) {
+      expect([closer, source.at(-1)]).toEqual([closer, closer]);
+      expect([source, matchInlineRule(source) !== null]).toEqual([source, true]);
+    }
   });
 
   test('bold wins over italic on a doubled delimiter', () => {

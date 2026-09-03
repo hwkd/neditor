@@ -12,6 +12,16 @@ import { sanitizeUrl } from '../util/url.ts';
  */
 
 interface InlineRule {
+  /**
+   * The last character of the rule's closing delimiter.
+   *
+   * Every pattern is anchored at the caret with `$`, which in JavaScript is
+   * the end of the string and nothing else, so the character there has to be
+   * this one. Checking it first is what stops the link patterns from being run
+   * over text with no `)` in it at all — on a long line of unpaired brackets
+   * they spend the length of the window on every keystroke.
+   */
+  readonly closer: string;
   /** Anchored at the caret. Capture group 1 is the inner text. */
   readonly pattern: RegExp;
   readonly mark?: Mark;
@@ -21,24 +31,24 @@ interface InlineRule {
 
 const INLINE_RULES: readonly InlineRule[] = [
   // Bold before italic: `**x**` must not be read as an italic `*x*`.
-  { pattern: /\*\*([^*\n]+)\*\*$/, mark: 'bold' },
-  { pattern: /__([^_\n]+)__$/, mark: 'bold' },
+  { closer: '*', pattern: /\*\*([^*\n]+)\*\*$/, mark: 'bold' },
+  { closer: '_', pattern: /__([^_\n]+)__$/, mark: 'bold' },
   // Only the opening `*` of a longer run is refused, so `***x***` closes as
   // bold and then as italic. A word character before it is not a reason to
   // refuse: CommonMark restricts intra-word emphasis to `_`, and `toMarkdown`
   // writes `*x*` whatever precedes it, so refusing left `Chapter*One*` sitting
   // in the text as literal asterisks.
-  { pattern: /(?<!\*)\*([^*\n]+)\*$/, mark: 'italic' },
-  { pattern: /(?<![_\w])_([^_\n]+)_$/, mark: 'italic' },
-  { pattern: /~~([^~\n]+)~~$/, mark: 'strikethrough' },
-  { pattern: /`([^`\n]+)`$/, mark: 'code' },
+  { closer: '*', pattern: /(?<!\*)\*([^*\n]+)\*$/, mark: 'italic' },
+  { closer: '_', pattern: /(?<![_\w])_([^_\n]+)_$/, mark: 'italic' },
+  { closer: '~', pattern: /~~([^~\n]+)~~$/, mark: 'strikethrough' },
+  { closer: '`', pattern: /`([^`\n]+)`$/, mark: 'code' },
   // Markdown has no underline, so `toMarkdown` writes the HTML tag; this is
   // what reads it back rather than leaving seven junk characters in the text.
-  { pattern: /<u>([^<\n]+)<\/u>$/, mark: 'underline' },
+  { closer: '>', pattern: /<u>([^<\n]+)<\/u>$/, mark: 'underline' },
   // The angle-bracket form first: it is how a destination holding a `)` — the
   // character that would otherwise close the link — is written.
-  { pattern: /\[([^\]\n]+)\]\(<([^<>\n]*)>\)$/, isLink: true },
-  { pattern: /\[([^\]\n]+)\]\(([^)\s]+)\)$/, isLink: true },
+  { closer: ')', pattern: /\[([^\]\n]+)\]\(<([^<>\n]*)>\)$/, isLink: true },
+  { closer: ')', pattern: /\[([^\]\n]+)\]\(([^)\s]+)\)$/, isLink: true },
 ];
 
 /**
@@ -76,8 +86,16 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
   // a candidate opening delimiter rather than the cut.
   const offset = Math.max(0, textBeforeCaret.length - INLINE_SPAN_LIMIT - 1);
   const window = offset === 0 ? textBeforeCaret : textBeforeCaret.slice(offset);
+  const closer = textBeforeCaret.at(-1);
 
   for (const rule of INLINE_RULES) {
+    // A rule that does not end in this character cannot match here, and running
+    // it anyway is not free: the link patterns walk the window from every `[`
+    // in it, which is most of the cost of parsing a line of stray brackets.
+    if (rule.closer !== closer) {
+      continue;
+    }
+
     const match = rule.pattern.exec(window);
     const whole = match?.[0];
     const inner = match?.[1];

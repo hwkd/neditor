@@ -156,16 +156,37 @@ function closingFenceLength(line: string): number {
 const CLOSERS = new Set(['*', '_', '~', '`', '>', ')']);
 
 /**
- * How many runs a rule may reach back over, alongside the character window.
+ * How many runs a rule may reach back over once nothing is left open.
  *
  * Applying a match rebuilds the runs it can still reach, so without this a line
- * that is nothing but emphasis costs the square of the number of spans on it. A
- * span crossing this many changes of formatting is not one anybody wrote.
+ * that is nothing but emphasis costs the square of the number of spans on it.
+ *
+ * It is a floor on what is kept rather than a ceiling: an opening delimiter
+ * that has not closed yet holds the text back past this for as long as a rule
+ * could still reach it. Cutting at a fixed number of runs lost every span that
+ * wrapped more of them — the closing delimiter no longer had an opening one to
+ * pair with, so the mark vanished and the `~~` or `<u>` was left sitting in the
+ * visible text. That is the same defect as the length cap this replaced.
  */
 const RUN_WINDOW = 32;
 
-/** Characters `escapeMarkdownText` protects, and which `\\` therefore makes literal. */
-const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!]/;
+/**
+ * Characters that can open an inline rule.
+ *
+ * A rule's opening delimiter is one of these, so a delimiter still present in
+ * the matchable text is a span that may yet close. Delimiters are spliced out
+ * the moment their rule fires, so what remains is exactly the still-open ones:
+ * in ordinary prose, none at all.
+ */
+const OPENERS = new Set(['*', '_', '~', '`', '<', '[']);
+
+/**
+ * Characters `escapeMarkdownText` protects, and which `\\` therefore makes literal.
+ *
+ * The toggle triangles are in here because a bullet whose text is one of them
+ * is written escaped; unescaped it would be read back as an empty toggle.
+ */
+const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!\u25B8\u25BE]/;
 
 /**
  * Stands in for an escaped character while rules are matched.
@@ -243,10 +264,16 @@ function stripEscapes(text: string): string {
  * `**a**` and typing it cannot diverge.
  *
  * Plain text is buffered and folded into the runs only where a rule fires, the
- * rules are only tried on a character that could close one, and text the rules
- * can no longer reach is set aside — so the pass is linear in the length of the
- * line rather than quadratic. There used to be a length cap here instead, past
- * which a pasted paragraph kept its raw `**` markup.
+ * rules are only tried on a character that could close one, and a match rebuilds
+ * only the handful of runs around it — so the pass is linear in the length of
+ * the line rather than quadratic. There used to be a length cap here instead,
+ * past which a pasted paragraph kept its raw `**` markup.
+ *
+ * Runs already behind the caret are parked in `done` and pulled back out when a
+ * span turns out to reach over them, rather than being written off at a fixed
+ * count: a `~~`, an `<u>` or a link label wrapping any amount of formatting
+ * still closes. Writing them off is what dropped the mark and left the raw
+ * delimiters in the text.
  */
 export function parseInlineMarkdown(text: string): RichText {
   if (text.length === 0) {
@@ -254,12 +281,43 @@ export function parseInlineMarkdown(text: string): RichText {
   }
 
   // What a rule can still reach, plus the character of context the lookbehinds
-  // need. Everything before it is finished and moves to `done`.
+  // need. Text before it is cut from `matchable` for good.
   const window = INLINE_SPAN_LIMIT + 1;
+
+  /** Every run produced so far, in order, ahead of `content`. */
   const done: RichText = [];
+  /**
+   * The runs a match works on: the tail of the line, kept short so that
+   * rebuilding it costs the span rather than the paragraph.
+   */
   let content: RichText = [];
+  /** Text not yet folded into runs. Always the very end of the line. */
   let pending = '';
+  /** The line so far, with each escaped character replaced by {@link ESCAPED}. */
   let matchable = '';
+  /** Offset into `matchable` at which `content` starts. */
+  let base = 0;
+  /**
+   * How many of `done`'s trailing runs are still spelled out in `matchable`,
+   * and so can be pulled back into `content`. Their text is exactly the first
+   * `base` characters of it.
+   */
+  let recallable = 0;
+  /**
+   * Where the delimiters that could still open a span sit, ascending.
+   *
+   * A rule consumes its delimiters, so what is left here is the unmatched ones
+   * — none at all in ordinary prose — and the earliest of them is as far back
+   * as a later match can start, and so the furthest `retire` may cut.
+   *
+   * Offsets are counted from the front of `matchable` plus `origin`, the
+   * characters `retire` has since cut off it, so cutting costs nothing here.
+   * `openFrom` is where the live ones start: anything before it is out of
+   * reach, and only waiting to be compacted away.
+   */
+  let opens: number[] = [];
+  let openFrom = 0;
+  let origin = 0;
   let retired = false;
 
   const flush = (): void => {
@@ -270,30 +328,133 @@ export function parseInlineMarkdown(text: string): RichText {
   };
 
   /**
-   * Retires the runs no later match can reach.
+   * Applies to `opens` the splice just applied to `matchable`.
    *
-   * `content` and `matchable` are the same text, offset for offset — `pending`
-   * is the tail of both — so cutting the same count off the front of each keeps
-   * every offset a rule reports valid. What stays is a character longer than
-   * the window, so a rule always has the context its lookbehind needs and never
-   * matches against the cut.
+   * Delimiters inside the removed range are gone — the rule that fired consumed
+   * them — and everything after slides down by the width of the cut, so the
+   * recorded offsets go on naming the same characters. Only the delimiters at
+   * or past the match are looked at, which for an ordinary short span is a
+   * handful; walking the whole list instead made a line of nothing but stray
+   * delimiters cost the square of their number.
    */
-  const retire = (): void => {
-    let cut = 0;
-    let runs = 0;
+  const spliceOpens = (start: number, end: number): void => {
+    const from = start + origin;
+    const to = end + origin;
+    let first = opens.length;
 
-    while (
-      runs < content.length &&
-      (matchable.length - cut - content[runs]!.text.length > window ||
-        content.length - runs > RUN_WINDOW)
-    ) {
-      cut += content[runs]!.text.length;
-      runs += 1;
+    while (first > openFrom && opens[first - 1]! >= from) {
+      first -= 1;
     }
 
-    if (runs > 0) {
-      done.push(...content.splice(0, runs));
+    let write = first;
+
+    for (let read = first; read < opens.length; read += 1) {
+      const open = opens[read]!;
+
+      if (open >= to) {
+        opens[write] = open - (to - from);
+        write += 1;
+      }
+    }
+
+    opens.length = write;
+  };
+
+  /**
+   * Parks the runs a match is unlikely to touch, keeping `content` short.
+   *
+   * This is a layout, not a decision: {@link recall} brings any of them back,
+   * so parking one can never cost a span the way discarding one did.
+   */
+  const park = (): void => {
+    if (content.length <= RUN_WINDOW) {
+      return;
+    }
+
+    for (const run of content.splice(0, content.length - RUN_WINDOW)) {
+      done.push(run);
+      recallable += 1;
+      base += run.text.length;
+    }
+  };
+
+  /** Brings parked runs back into `content` until it covers `offset`. */
+  const recall = (offset: number): void => {
+    if (base <= offset) {
+      return;
+    }
+
+    // Popped newest-first, so the slice is reversed back into reading order
+    // before it goes on the front.
+    const back: RichText = [];
+
+    while (base > offset && recallable > 0) {
+      const run = done.pop()!;
+
+      back.push(run);
+      recallable -= 1;
+      base -= run.text.length;
+    }
+
+    if (back.length > 0) {
+      content = [...back.reverse(), ...content];
+    }
+  };
+
+  /**
+   * Cuts from the front of `matchable` the text no rule can reach any more.
+   *
+   * Only whole parked runs are cut, and `base` follows the cut, so `content`
+   * goes on starting at offset `base`. Every rule is anchored at the caret and
+   * rescanned per character, so a short `matchable` is what keeps each test
+   * cheap; letting it run to the full span limit cost half again as much on a
+   * line that is nothing but emphasis.
+   *
+   * An opening delimiter that has not closed is never cut past, whatever else
+   * says otherwise — a rule has to see it to pair with it, and cutting one is
+   * what silently dropped the mark of a span wrapping more runs than the
+   * working window holds. The character in front of it is kept too, so the
+   * lookbehinds read text rather than the cut. Once a delimiter is further back
+   * than {@link INLINE_SPAN_LIMIT} no rule can reach it, and it stops holding
+   * the text back.
+   */
+  const retire = (): void => {
+    const reachable = origin + matchable.length - INLINE_SPAN_LIMIT;
+
+    while (openFrom < opens.length && opens[openFrom]! < reachable) {
+      openFrom += 1;
+    }
+
+    // Drop the out-of-reach prefix once it outweighs the rest, so the list
+    // stays the size of what is really open.
+    if (openFrom > 32 && openFrom * 2 > opens.length) {
+      opens = opens.slice(openFrom);
+      openFrom = 0;
+    }
+
+    if (recallable === 0) {
+      return;
+    }
+
+    const open = opens[openFrom];
+    const barrier = open === undefined ? matchable.length : open - origin - 1;
+    let cut = 0;
+
+    while (recallable > 0) {
+      const length = done[done.length - recallable]!.text.length;
+
+      if (cut + length > barrier) {
+        break;
+      }
+
+      cut += length;
+      recallable -= 1;
+    }
+
+    if (cut > 0) {
       matchable = matchable.slice(cut);
+      base -= cut;
+      origin += cut;
       retired = true;
     }
   };
@@ -315,7 +476,11 @@ export function parseInlineMarkdown(text: string): RichText {
     pending += literal;
     matchable += projected;
 
-    if (matchable.length > window || content.length > RUN_WINDOW) {
+    if (OPENERS.has(projected)) {
+      opens.push(origin + matchable.length - 1);
+    }
+
+    if (matchable.length > window) {
       retire();
     }
 
@@ -344,14 +509,20 @@ export function parseInlineMarkdown(text: string): RichText {
 
     flush();
 
+    // The span may reach back over runs that were parked; they have to be in
+    // `content` before its offsets mean anything there.
+    recall(match.start);
+
     // Strip the closing delimiter first, so the opening offsets stay valid —
     // and apply the identical splice to the projection to keep them aligned.
-    content = richDelete(content, innerEnd, match.end);
-    content = richDelete(content, match.start, innerStart);
+    content = richDelete(content, innerEnd - base, match.end - base);
+    content = richDelete(content, match.start - base, innerStart - base);
     matchable = matchable.slice(0, innerEnd) + matchable.slice(match.end);
     matchable = matchable.slice(0, match.start) + matchable.slice(innerStart);
+    spliceOpens(innerEnd, match.end);
+    spliceOpens(match.start, innerStart);
 
-    const start = match.start;
+    const start = match.start - base;
     const end = start + (innerEnd - innerStart);
 
     if (match.link) {
@@ -359,6 +530,9 @@ export function parseInlineMarkdown(text: string): RichText {
     } else if (match.mark) {
       content = richSetMark(content, start, end, match.mark, true);
     }
+
+    park();
+    retire();
   }
 
   flush();

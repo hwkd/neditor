@@ -817,8 +817,13 @@ export function sliceDocument(blocks: readonly Block[], ids: ReadonlySet<string>
  * `toMarkdown` output is parsed again by `blocksFromMarkdown`, so anything that
  * is not escaped here is silently reinterpreted: `2 * 3 * 4` came back as
  * italic with two characters missing.
+ *
+ * The two triangles are the toggle markers. A bullet is written `- text`, so a
+ * bullet whose text is a bare `▾` was indistinguishable from the empty toggle
+ * written `- ▾`: the text was read as the marker and destroyed. Escaping them
+ * is what keeps the marker a marker.
  */
-const INLINE_ESCAPE = /[\\`*_[\]~|<>]/g;
+const INLINE_ESCAPE = /[\\`*_[\]~|<>\u25B8\u25BE]/g;
 
 /**
  * A line-leading construct, which only matters for the first run of a block.

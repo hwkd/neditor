@@ -677,8 +677,6 @@ const BLOCK_LEVEL_TAGS = new Set([
   'HR',
 ]);
 
-const BLOCK_LEVEL_SELECTOR = [...BLOCK_LEVEL_TAGS].join(',');
-
 /**
  * Elements a wrapper's formatting has to be carried *through*, not around.
  *
@@ -702,72 +700,145 @@ const STRUCTURE_TAGS = new Set([
   'SUMMARY',
 ]);
 
-function containsBlockLevel(element: Element): boolean {
-  return element.querySelector(BLOCK_LEVEL_SELECTOR) !== null;
-}
+/**
+ * Elements below which a wrapper's formatting is somebody else's to apply.
+ *
+ * Most of these become one block whose whole subtree `parseRichText` reads at
+ * once — the roots the block readers hand it: `pushBlock` for a heading, a
+ * paragraph, a list item or a quote, the cell reader for a table, the caption
+ * of an image, the summary of a toggle. A wrapper inside one of those is read
+ * where it stands, so copying its formatting around the runs beneath it would
+ * apply it twice; only a wrapper *outside* the block needs a copy, which is
+ * what `pushFormattingInward` exists to provide.
+ *
+ * `<details>` is here for a different reason with the same answer: its body is
+ * re-visited as a copy of itself with the summary taken out, so a wrapper
+ * inside is reached again there and pushed inward then — and the summary, read
+ * from the original, never sees it at all.
+ *
+ * The elements the visitor descends *through* — `<div>`, `<section>`, a
+ * `<figure>` with no usable image — are deliberately absent: their children are
+ * read one block at a time, and a wrapper among them is this pass's to take.
+ */
+const SEALED_TAGS = new Set([
+  ...Object.keys(HEADING_TYPES),
+  'P',
+  'LI',
+  'BLOCKQUOTE',
+  'PRE',
+  'TD',
+  'TH',
+  'CAPTION',
+  'FIGCAPTION',
+  'SUMMARY',
+  'DETAILS',
+]);
 
 /**
- * The children of an inline wrapper, with its formatting moved inside the
- * blocks it holds: `<b><p>x</p></b>` becomes `<p><b>x</b></p>`.
+ * The first descendant of a kind, in document order, remembered per element.
  *
- * Descending into the wrapper is the only way to see those blocks, and
- * `visitBlocks` reads formatting from each block's own subtree — so without
- * this, descending would silently drop the marks (or href) the wrapper carried.
- * The copy goes around each innermost run of inline content, which leaves the
- * document's own formatting nested inside it and therefore winning.
+ * Both questions asked here — does this hold a block, where is its image — are
+ * asked again at every level of a wrapper chain, because `visitBlocks` descends
+ * into a wrapper and immediately asks them of the next one down. Answering by
+ * scanning the subtree each time is quadratic in the depth of the chain, and
+ * the depth is the pasted document's to choose: `<b>` nested 640 deep is four
+ * kilobytes of clipboard. Every answer is derived from the answers about the
+ * children, so a whole chain costs one walk instead of one per level.
+ *
+ * Keying the memo on the element is safe because every element it ever sees was
+ * parsed into a detached template by `blocksFromHtml` moments earlier, or
+ * cloned below — none of them is reachable by a caller who could edit it behind
+ * this file's back. The moves made while distributing formatting keep the
+ * answers true as well: a run only ever moves into a fresh shell beside it,
+ * which adds no element of either kind and reorders nothing.
  */
-function pushFormattingInward(doc: Document, wrapper: Element): DocumentFragment {
-  const fragment = doc.createDocumentFragment();
-  const distribute = (parent: Node): void => {
-    /** The inline nodes waiting for a copy of the wrapper around them. */
-    let run: Node[] = [];
+function firstDescendant(
+  element: Element,
+  matches: (candidate: Element) => boolean,
+  seen: WeakMap<Element, Element | null>,
+): Element | null {
+  const remembered = seen.get(element);
 
-    // One copy around the whole run, not one per node: a space between two
-    // elements would read as separating blocks once it had a copy of its own,
-    // and be dropped as indentation.
-    const wrapRun = (): void => {
-      const first = run[0];
+  if (remembered !== undefined) {
+    return remembered;
+  }
 
-      if (!first) {
-        return;
-      }
+  interface Frame {
+    element: Element;
+    index: number;
+    found: Element | null;
+  }
 
-      const shell = wrapper.cloneNode(false) as Element;
+  // An explicit stack rather than recursion: one frame per level of a hostile
+  // chain is not a call stack to spend, and this walk is the deepest one here.
+  const stack: Frame[] = [{ element, index: 0, found: null }];
 
-      parent.insertBefore(shell, first);
-      shell.append(...run);
-      run = [];
-    };
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1];
 
-    for (const child of [...parent.childNodes]) {
-      const element = child.nodeType === ELEMENT_NODE ? (child as Element) : null;
-
-      if (element && (STRUCTURE_TAGS.has(tagNameOf(element)) || containsBlockLevel(element))) {
-        wrapRun();
-        distribute(element);
-        continue;
-      }
-
-      // Indentation between two blocks joins a run already under way, but never
-      // starts one — on its own it is source formatting, not content.
-      if (!element && run.length === 0 && (child.nodeValue ?? '').trim().length === 0) {
-        continue;
-      }
-
-      run.push(child);
+    if (!frame) {
+      break;
     }
 
-    wrapRun();
-  };
+    // A hit ends the frame early; the children it skipped stay unanswered
+    // until something asks about them directly.
+    const child = frame.found ? undefined : frame.element.children[frame.index];
 
-  fragment.append(...[...(wrapper.cloneNode(true) as Element).childNodes]);
-  distribute(fragment);
+    if (!child) {
+      seen.set(frame.element, frame.found);
+      stack.pop();
 
-  return fragment;
+      const parent = stack[stack.length - 1];
+
+      if (parent && frame.found) {
+        parent.found = frame.found;
+      }
+
+      continue;
+    }
+
+    frame.index += 1;
+
+    // Checked before descending, so the answer is the first in document order.
+    const known = matches(child) ? child : seen.get(child);
+
+    if (known === undefined) {
+      stack.push({ element: child, index: 0, found: null });
+      continue;
+    }
+
+    if (known) {
+      frame.found = known;
+    }
+  }
+
+  return seen.get(element) ?? null;
+}
+
+const BLOCK_LEVEL_DESCENDANTS = new WeakMap<Element, Element | null>();
+const IMAGE_DESCENDANTS = new WeakMap<Element, Element | null>();
+
+function containsBlockLevel(element: Element): boolean {
+  return (
+    firstDescendant(
+      element,
+      (candidate) => BLOCK_LEVEL_TAGS.has(tagNameOf(candidate)),
+      BLOCK_LEVEL_DESCENDANTS,
+    ) !== null
+  );
+}
+
+/** The image a `<figure>` or a wrapper shows, in the order a query would find it. */
+function firstImage(element: Element): Element | null {
+  return firstDescendant(element, (candidate) => tagNameOf(candidate) === 'IMG', IMAGE_DESCENDANTS);
+}
+
+function containsImage(element: Element): boolean {
+  return firstImage(element) !== null;
 }
 
 /**
- * What to walk when descending into an element that is not a block itself.
+ * An element that only styles the content inside it, rather than laying it out.
  *
  * Its formatting travels down to the content inside, but only where a block is
  * there to receive it: an `<a>` around a lone `<img>` has nothing to push into
@@ -775,11 +846,290 @@ function pushFormattingInward(doc: Document, wrapper: Element): DocumentFragment
  * formatting stays behind either way — a copy of one placed around inline
  * content would read back as a line break.
  */
-function contentsOf(doc: Document, element: Element): Node {
+function isInlineWrapper(element: Element): boolean {
   const tag = tagNameOf(element);
-  const inline = !BLOCK_TAGS.has(tag) && (tag === 'A' || marksForElement(element).add.length > 0);
 
-  return inline && containsBlockLevel(element) ? pushFormattingInward(doc, element) : element;
+  return !BLOCK_TAGS.has(tag) && (tag === 'A' || marksForElement(element).add.length > 0);
+}
+
+/**
+ * Wrappers whose formatting is already in among the blocks they hold.
+ *
+ * The distribution takes up the whole chain at once, so the wrappers below the
+ * top of it are spent by the time `visitBlocks` walks through them. Without
+ * this they still read as formatting waiting to be pushed inward, and pushing
+ * it again re-clones and rescans everything below them once per level — which
+ * is the whole cost this pass exists to avoid, and would double the marks on
+ * nothing.
+ */
+const DISTRIBUTED = new WeakSet<Element>();
+
+/**
+ * Whether descending into this element takes the walk out of the chain's reach.
+ *
+ * A `<figure>` around an image becomes the image, and only its caption is read
+ * — from the caption element, so nothing above that is part of the parse. With
+ * no image to show, the same figure is descended into block by block instead,
+ * and a wrapper inside it is reached and pushed inward there.
+ */
+function sealsFormatting(element: Element, tag: string): boolean {
+  return SEALED_TAGS.has(tag) || (tag === 'FIGURE' && containsImage(element));
+}
+
+/** What a chain of inline wrappers leaves on the content inside it. */
+interface InlineFormatting {
+  /** Each mark the chain mentioned, on or off as its outermost mention left it. */
+  marks: Map<Mark, boolean>;
+  /** The outermost anchor's href, or null where the chain holds no anchor. */
+  link: string | null;
+}
+
+/**
+ * That formatting, extended by one wrapper nested inside the chain.
+ *
+ * The wrapper nearest the content is not the one that wins. Each wrapper's copy
+ * used to go around the runs the wrapper outside it had already wrapped, which
+ * left the outermost formatting innermost and therefore last to be read — so an
+ * inner element that turns a mark off never overrode the ancestor that turned it
+ * on, and the outermost anchor kept the link. Whichever way round is more
+ * defensible, it is the behaviour every paste has today, and this is a rewrite
+ * of how the distribution runs, not of what it produces.
+ */
+function formattingWithin(format: InlineFormatting, wrapper: Element): InlineFormatting {
+  const marks = new Map(format.marks);
+  const { add, remove } = marksForElement(wrapper);
+
+  for (const mark of remove) {
+    if (!marks.has(mark)) {
+      marks.set(mark, false);
+    }
+  }
+
+  for (const mark of add) {
+    if (!marks.has(mark)) {
+      marks.set(mark, true);
+    }
+  }
+
+  // An anchor without an href stands for one whose link is dropped, exactly as
+  // a copy of it would have: `sanitizeUrl` refuses the empty string.
+  const href = tagNameOf(wrapper) === 'A' ? (wrapper.getAttribute('href') ?? '') : null;
+
+  return { link: format.link ?? href, marks };
+}
+
+/**
+ * The inline style that turns off every mark the chain turned off.
+ *
+ * A wrapper says "not bold" the way Google Docs does, with a style rather than
+ * a tag, so the copy that stands in for it has to say it the same way — and it
+ * has to say it at all, because the wrappers between this run and the block it
+ * sits in are still there and may well be turning that mark back on.
+ *
+ * `marksForElement` reads underline and strikethrough out of one declaration,
+ * so a chain that turns either off has by then decided both, and writing the
+ * pair out together says exactly what it decided.
+ */
+function formattingOff(marks: Map<Mark, boolean>): string {
+  const off: string[] = [];
+
+  if (marks.get('bold') === false) {
+    off.push('font-weight:normal');
+  }
+
+  if (marks.get('italic') === false) {
+    off.push('font-style:normal');
+  }
+
+  if (marks.get('underline') === false || marks.get('strikethrough') === false) {
+    const lines = [
+      marks.get('underline') === true ? 'underline' : '',
+      marks.get('strikethrough') === true ? 'line-through' : '',
+    ].filter((line) => line.length > 0);
+
+    off.push(`text-decoration:${lines.length > 0 ? lines.join(' ') : 'none'}`);
+  }
+
+  return off.join(';');
+}
+
+/**
+ * The elements that put a chain's formatting around one run, or null for none.
+ *
+ * One element per mark still on, rather than one copy per wrapper: `<b>` inside
+ * `<b>` inside `<b>` says nothing the outermost one did not, so copying every
+ * wrapper around every run makes the output quadratic in a nesting depth the
+ * paste chose for free. `parseRichText` sorts and dedupes the marks it reads,
+ * which is what makes these canonical elements indistinguishable from the
+ * copies they stand in for.
+ */
+function formattingShell(
+  doc: Document,
+  format: InlineFormatting,
+): { outer: Element; inner: Element } | null {
+  const parts: Element[] = [];
+  const off = formattingOff(format.marks);
+
+  if (off.length > 0) {
+    const span = doc.createElement('span');
+
+    // Outermost of the copy, so the marks still on are applied after it.
+    span.setAttribute('style', off);
+    parts.push(span);
+  }
+
+  if (format.link !== null) {
+    const anchor = doc.createElement('a');
+
+    // Deliberately unsanitized: `parseRichText` is the one place an href
+    // becomes a link, and it drops an unsafe one there exactly as it would
+    // have from the wrapper this stands in for.
+    anchor.setAttribute('href', format.link);
+    parts.push(anchor);
+  }
+
+  for (const [mark, tag] of MARK_ELEMENTS) {
+    if (format.marks.get(mark) === true) {
+      parts.push(doc.createElement(tag));
+    }
+  }
+
+  const outer = parts[0];
+
+  if (!outer) {
+    return null;
+  }
+
+  let inner = outer;
+
+  for (const part of parts.slice(1)) {
+    inner.append(part);
+    inner = part;
+  }
+
+  return { inner, outer };
+}
+
+/**
+ * Moves the formatting of an inline wrapper — and of every wrapper nested
+ * inside it — in among the blocks they hold: `<b><p>x</p></b>` becomes
+ * `<p><b>x</b></p>`.
+ *
+ * Descending into the wrapper is the only way to see those blocks, and
+ * `visitBlocks` reads formatting from each block's own subtree — so without
+ * this, descending would silently drop the marks (or href) the wrapper carried.
+ * The copy goes around each innermost run of inline content, which leaves the
+ * document's own formatting nested inside it and therefore winning.
+ *
+ * The whole chain is distributed in one pass: every wrapper nested inside this
+ * one has its formatting taken up here and is marked spent, so `visitBlocks`
+ * walks through it without finding formatting to push inward all over again.
+ * Handing back a fragment still topped by the next wrapper sent `visitBlocks`
+ * straight back in here to clone and rescan the rest of the subtree one level
+ * down: three nested walks over the same nodes, which a `<b>` chain 640 deep
+ * turned into eleven seconds of frozen tab, synchronously on the paste event.
+ */
+function pushFormattingInward(doc: Document, wrapper: Element): DocumentFragment {
+  const fragment = doc.createDocumentFragment();
+  const format = formattingWithin({ link: null, marks: new Map() }, wrapper);
+
+  fragment.append(...[...(wrapper.cloneNode(true) as Element).childNodes]);
+  distributeFormatting(doc, fragment, format, false);
+
+  return fragment;
+}
+
+/**
+ * Puts a copy of the chain's formatting around each run of inline content
+ * below `parent`, in place.
+ *
+ * `sealed` says the walk is already inside an element that will be read as one
+ * block, whose whole subtree `parseRichText` sees at once. From there down, a
+ * wrapper still standing is read where it stands, so its formatting must not be
+ * copied around the runs beneath it as well — the copies exist for the runs a
+ * block boundary would otherwise cut a wrapper off from.
+ *
+ * Nothing moves that does not have to: a shell goes in beside the run it takes,
+ * and every other node keeps the parent it had. Rebuilding a child list instead
+ * re-parents the whole subtree hanging off it, once per level of the chain,
+ * which is a different route back to quadratic.
+ */
+function distributeFormatting(
+  doc: Document,
+  parent: Node,
+  format: InlineFormatting,
+  sealed: boolean,
+): void {
+  /** The inline nodes waiting for a copy of the formatting around them. */
+  let run: Node[] = [];
+
+  // One copy around the whole run, not one per node: a space between two
+  // elements would read as separating blocks once it had a copy of its own,
+  // and be dropped as indentation.
+  const wrapRun = (): void => {
+    const first = run[0];
+    const nodes = run;
+
+    run = [];
+
+    const shell = first ? formattingShell(doc, format) : null;
+
+    if (!first || !shell) {
+      return;
+    }
+
+    parent.insertBefore(shell.outer, first);
+
+    for (const node of nodes) {
+      shell.inner.append(node);
+    }
+  };
+
+  for (const child of [...parent.childNodes]) {
+    const element = child.nodeType === ELEMENT_NODE ? (child as Element) : null;
+    const tag = element ? tagNameOf(element) : '';
+
+    if (element && (STRUCTURE_TAGS.has(tag) || containsBlockLevel(element))) {
+      wrapRun();
+
+      // A wrapper of its own hands its formatting to the chain here and is
+      // marked as spent — unless the walk is sealed, where it is read where it
+      // stands and has nothing to hand over. Either way it stays exactly where
+      // and what it was: `visitBlocks` starts a new paragraph at an element
+      // holding blocks, so the content on either side of one must not run
+      // together, and a block parsed whole still reads its tag and style.
+      if (!STRUCTURE_TAGS.has(tag) && isInlineWrapper(element)) {
+        if (sealed) {
+          distributeFormatting(doc, element, format, true);
+        } else {
+          distributeFormatting(doc, element, formattingWithin(format, element), false);
+          DISTRIBUTED.add(element);
+        }
+
+        continue;
+      }
+
+      distributeFormatting(doc, element, format, sealed || sealsFormatting(element, tag));
+      continue;
+    }
+
+    // Indentation between two blocks joins a run already under way, but never
+    // starts one — on its own it is source formatting, not content.
+    if (!element && run.length === 0 && (child.nodeValue ?? '').trim().length === 0) {
+      continue;
+    }
+
+    run.push(child);
+  }
+
+  wrapRun();
+}
+
+/** What to walk when descending into an element that is not a block itself. */
+function contentsOf(doc: Document, element: Element): Node {
+  return !DISTRIBUTED.has(element) && isInlineWrapper(element) && containsBlockLevel(element)
+    ? pushFormattingInward(doc, element)
+    : element;
 }
 
 /** A checkbox written as text, including what `blocksToHtml` emits. */
@@ -941,7 +1291,10 @@ function outermostLists(element: Element): Element[] {
 
 /** A `<figure>` carries the caption; a bare `<img>` is just the image. */
 function pushImage(out: Block[], element: Element, depth: number): boolean {
-  const image = tagNameOf(element) === 'IMG' ? element : element.querySelector('img');
+  // The remembered answer, not a fresh query: a `<figure>` with nothing usable
+  // in it is asked this again for every wrapper the visitor descends through on
+  // its way down, and a query walks the whole subtree each time.
+  const image = tagNameOf(element) === 'IMG' ? element : firstImage(element);
   const src = sanitizeImageUrl(image?.getAttribute('src') ?? '');
 
   // An unusable source would only render as a broken block. The caller
@@ -1150,7 +1503,7 @@ function visitBlocks(doc: Document, node: Node, depth: number, out: Block[]): vo
 
     // <a href><img> and <p><img> are the commonest image markup on the web.
     // Without this the image is buffered as inline content and emits nothing.
-    if (element.querySelector('img')) {
+    if (containsImage(element)) {
       flushInline();
       visitBlocks(doc, contentsOf(doc, element), depth, out);
       continue;

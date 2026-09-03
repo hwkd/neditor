@@ -67,6 +67,46 @@ describe('parseInlineMarkdown', () => {
       { text: 'b', marks: ['bold'] },
     ]);
   });
+
+  /** 60 bold spans is 119 runs: far more than the scan works on at a time. */
+  const spans = Array.from({ length: 60 }, (_, index) => `**b${index}**`).join(' ');
+  const spanText = Array.from({ length: 60 }, (_, index) => `b${index}`).join(' ');
+
+  test.each([
+    ['strikethrough', `~~${spans}~~`],
+    ['underline', `<u>${spans}</u>`],
+  ] as const)('a %s span closes over more runs than the scan holds', (mark, source) => {
+    // Setting runs aside by count put the opening delimiter out of reach, so
+    // the span never closed: the mark was dropped and the delimiters were left
+    // sitting in the visible text.
+    const runs = parseInlineMarkdown(source);
+
+    expect(richToPlainText(runs)).toBe(spanText);
+    expect(runs.every((run) => run.marks?.includes(mark))).toBe(true);
+    expect(runs.filter((run) => run.marks?.includes('bold'))).toHaveLength(60);
+  });
+
+  test('a link label closes over more runs than the scan holds', () => {
+    const runs = parseInlineMarkdown(`[${spans}](https://a.test/)`);
+
+    expect(richToPlainText(runs)).toBe(spanText);
+    expect(runs.every((run) => run.link === 'https://a.test/')).toBe(true);
+    expect(runs.filter((run) => run.marks?.includes('bold'))).toHaveLength(60);
+  });
+
+  test('a delimiter that never closes does not make the rest quadratic', () => {
+    // An unmatched `[` is what a link label reaches back over, so the scan has
+    // to keep it in hand — but keeping the runs behind it in hand as well made
+    // every span after it cost the whole stretch, and this took half a minute.
+    const source = `[ ${'*a* '.repeat(250)}[ `.repeat(24);
+    const started = performance.now();
+    const runs = parseInlineMarkdown(source);
+
+    // An order of magnitude off the ~200ms this takes, and far under the many
+    // seconds the same input cost when the working set grew with the window.
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(runs.filter((run) => run.marks?.includes('italic'))).toHaveLength(6000);
+  });
 });
 
 describe('blocksFromMarkdown', () => {
@@ -216,6 +256,13 @@ describe('callouts and toggles', () => {
 
   test('a plain bullet stays a bullet', () => {
     expect(blocksFromMarkdown('- ordinary')[0]?.type).toBe('bulleted_list');
+  });
+
+  test('an escaped marker is text, not a toggle', () => {
+    // `- ▾` is the empty toggle, so a bullet whose text reads `▾` has to be
+    // written some other way; `toMarkdown` escapes it.
+    expect(blocksFromMarkdown('- \\\u25BE')[0]).toMatchObject({ type: 'bulleted_list' });
+    expect(blockText(blocksFromMarkdown('- \\\u25BE')[0]!)).toBe('\u25BE');
   });
 
   test('inline marks still apply inside both', () => {
@@ -506,6 +553,22 @@ describe('markdown round trip', () => {
     // The marker is written with nothing after it, and a marker that needs a
     // trailing space to be read back is a marker any trim silently destroys.
     expect(only([{ ...createBlock(type), ...extra }])).toMatchObject({ type, ...extra });
+  });
+
+  test.each(['\u25B8', '\u25BE'])('a bullet whose whole text is %s stays a bullet', (marker) => {
+    // The empty toggle is written `- ▾`, so an unescaped marker in the text
+    // of a bullet came back as a toggle with nothing in it at all.
+    const block = only([createBlock('bulleted_list', marker)]);
+
+    expect(block.type).toBe('bulleted_list');
+    expect(blockText(block)).toBe(marker);
+  });
+
+  test.each(['\u25B8', '\u25BE'])('a toggle whose text opens with %s keeps both', (marker) => {
+    const block = only([{ ...createBlock('toggle', `${marker} later`), collapsed: false }]);
+
+    expect(block).toMatchObject({ type: 'toggle', collapsed: false });
+    expect(blockText(block)).toBe(`${marker} later`);
   });
 
   test('italic after a word character survives', () => {

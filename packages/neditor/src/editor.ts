@@ -147,6 +147,27 @@ interface CellCoords {
   readonly column: number;
 }
 
+/** A DOM position, as the caret-from-a-point APIs hand one back. */
+interface CaretPoint {
+  readonly node: Node;
+  readonly offset: number;
+}
+
+/**
+ * The two names a document or shadow root gives "which caret is at (x, y)".
+ *
+ * Both are optional: the supported browsers implement one or the other, and a
+ * test double or a non-browser DOM may implement neither.
+ */
+interface CaretSource {
+  caretPositionFromPoint?: (
+    x: number,
+    y: number,
+    options?: { shadowRoots?: readonly ShadowRoot[] },
+  ) => { offsetNode: Node | null; offset: number } | null;
+  caretRangeFromPoint?: (x: number, y: number) => Range | null;
+}
+
 /**
  * Where the floating UI belongs when the caller does not name a container.
  *
@@ -162,6 +183,33 @@ function defaultPortalContainer(element: HTMLElement): HTMLElement | ShadowRoot 
   // Duck-typed, not `instanceof ShadowRoot`: the editor is mounted into foreign
   // documents on purpose and a realm check would reject a perfectly real one.
   return 'host' in root ? (root as ShadowRoot) : element.ownerDocument.body;
+}
+
+/**
+ * Every node a pointer actually went through, innermost first.
+ *
+ * `event.target` is not that node for a listener on the document: an event
+ * that crossed a shadow boundary is *retargeted*, and target is reported as
+ * the shadow host. Since {@link defaultPortalContainer} puts the popovers in
+ * that same shadow root, a `contains` check against the host answers "outside"
+ * for a pointer that landed squarely inside one — so clicking into the link
+ * editor's own input dismissed it and threw the edit away. The composed path
+ * is the un-retargeted truth, and it is checked whole rather than at its first
+ * entry so a popover holding a shadow root of its own is still recognised.
+ *
+ * Non-`Node` entries — the `Window` at the end of every path — are dropped,
+ * and a path that comes back empty falls back to the target, so a synthetic
+ * event without `composedPath` still dismisses the way it always did.
+ */
+function composedTargets(event: Event): readonly Node[] {
+  const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+  const nodes = path.filter((entry): entry is Node => isNode(entry));
+
+  if (nodes.length > 0) {
+    return nodes;
+  }
+
+  return isNode(event.target) ? [event.target] : [];
 }
 
 /** True when two hosts are the same cell — or both are a block's own content. */
@@ -258,6 +306,30 @@ function applyTableCommand(
     default:
       return tableDeleteColumn(rows, column);
   }
+}
+
+/**
+ * True when a command handed back the grid it was given.
+ *
+ * `tableInsertRow` and `tableInsertColumn` refuse at their caps by returning a
+ * copy of the rows and nothing else, so at the cap every cell is still the very
+ * object it was. That is the only shape this has to catch, and identity per
+ * cell — the comparison `sameBlocks` makes for blocks — catches it without
+ * calling a delete that rebuilt an emptied row a no-op too.
+ */
+function sameRows(a: TableRows, b: TableRows): boolean {
+  return (
+    a.length === b.length &&
+    a.every((row, index) => {
+      const other = b[index];
+
+      return (
+        other !== undefined &&
+        row.length === other.length &&
+        row.every((cell, column) => cell === other[column])
+      );
+    })
+  );
 }
 
 /** Reads the `row:column` a cell host carries, if it is one. */
@@ -1919,8 +1991,16 @@ export class NEditor {
     }
 
     const next = applyTableCommand(rows, command, active.row, active.column);
-    this.#commit(updateBlock(this.#blocks, block.id, { rows: next }));
-    this.#announce(this.#labels[TABLE_COMMAND_ANNOUNCEMENTS[command]]);
+
+    // An insert refused at its cap comes back with the grid untouched. Commit
+    // that and the button banks an undo entry for a document that never
+    // changed, while the live region tells a screen-reader user a row is there
+    // that is not. The caret still goes home, so the toolbar keeps its promise
+    // to hand editing back to the cell it was invoked from.
+    if (!sameRows(rows, next)) {
+      this.#commit(updateBlock(this.#blocks, block.id, { rows: next }));
+      this.#announce(this.#labels[TABLE_COMMAND_ANNOUNCEMENTS[command]]);
+    }
 
     // The grid may have shrunk under the caret, so clamp before restoring it.
     const size = tableSize(next);
@@ -1968,8 +2048,18 @@ export class NEditor {
           return false;
         }
 
-        event.preventDefault();
         const grown = tableInsertRow(rows, rows.length);
+
+        // At MAX_TABLE_ROWS the grid comes back unchanged, and swallowing Tab
+        // anyway made the last cell a keyboard trap that lied about it: an undo
+        // entry for nothing, "row added" announced, and then a focus call for a
+        // row that was never created. There is nowhere left to move inside the
+        // table, so Tab goes back to meaning what it means everywhere else.
+        if (sameRows(rows, grown)) {
+          return false;
+        }
+
+        event.preventDefault();
         this.#commit(updateBlock(this.#blocks, target.block.id, { rows: grown }));
         this.#focusCell(target.block.id, grown.length - 1, 0, 0);
         this.#announce(this.#labels.rowAdded);
@@ -2322,10 +2412,16 @@ export class NEditor {
   #handleDocumentPointerDown = (event: PointerEvent): void => {
     this.#pointerDown = true;
 
-    const node = isNode(event.target) ? event.target : null;
+    const popovers = this.#openPopovers();
 
-    for (const popover of this.#openPopovers()) {
-      if (!popover.contains(node)) {
+    if (popovers.length === 0) {
+      return;
+    }
+
+    const path = composedTargets(event);
+
+    for (const popover of popovers) {
+      if (!path.some((node) => popover.contains(node))) {
         popover.close(false);
       }
     }
@@ -3354,6 +3450,11 @@ export class NEditor {
    * renders it away. A drop carries the same flavours as a clipboard, so it is
    * parsed by the same code: dropped content becomes blocks, never markup.
    *
+   * Cancelling the default costs the caret the browser would have placed, so
+   * it is derived from the drop coordinates instead. Without that step the
+   * payload lands wherever the selection was left before the drag — in another
+   * block entirely, and over the top of any text still selected there.
+   *
    * The cost is that dragging text inside the editor copies rather than moves,
    * because the native move is one gesture and cancelling the drop cancels
    * both halves of it. Losing a move is a great deal cheaper than keeping the
@@ -3371,14 +3472,78 @@ export class NEditor {
       return;
     }
 
-    const resolved = this.#resolve(event.target);
+    // Where the pointer let go, not where the caret happened to be. The
+    // selection still holds whatever the user left behind before the drag
+    // started, which is both the wrong place to insert and — when it is a
+    // range — text this insertion would silently delete.
+    const point = this.#caretFromPoint(event.clientX, event.clientY);
+    const resolved = (point && this.#resolve(point.node)) ?? this.#resolve(event.target);
 
     if (!resolved) {
       return;
     }
 
+    this.#placeCaretForDrop(resolved, point);
     this.#insertForeignContent(resolved, data.getData('text/html'), data.getData('text/plain'));
   };
+
+  /**
+   * The caret a viewport point names, in whichever spelling this engine ships.
+   *
+   * `caretPositionFromPoint` is the standard one and `caretRangeFromPoint` the
+   * older WebKit name; the supported range spans browsers that have only one
+   * or the other, so both are tried. A shadow root is asked before the
+   * document because the document's answer stops at the host element, which
+   * belongs to no block — and the standard call is additionally handed the
+   * root, which is how a newer engine is told to look inside it.
+   */
+  #caretFromPoint(x: number, y: number): CaretPoint | null {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      return null;
+    }
+
+    const root = this.#root.getRootNode();
+    const shadow = 'host' in root ? (root as ShadowRoot) : null;
+    const options = shadow ? { shadowRoots: [shadow] } : undefined;
+
+    for (const source of (shadow ? [shadow, this.#document] : [this.#document]) as CaretSource[]) {
+      const position = source.caretPositionFromPoint?.(x, y, options);
+
+      if (position && isNode(position.offsetNode)) {
+        return { node: position.offsetNode, offset: position.offset };
+      }
+
+      const range = source.caretRangeFromPoint?.(x, y);
+
+      if (range) {
+        return { node: range.startContainer, offset: range.startOffset };
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Collapses the selection to the point a drop landed on.
+   *
+   * Everything downstream of here reads the caret back out of the DOM, so this
+   * is the whole of what makes dropped content appear under the pointer. When
+   * the point cannot be resolved there is still one guarantee left to keep: a
+   * drop inserts, it never overwrites, so a range standing in this host is
+   * collapsed rather than handed to `richDelete`.
+   */
+  #placeCaretForDrop(target: ResolvedTarget, point: CaretPoint | null): void {
+    if (point && target.content.contains(point.node)) {
+      this.#selection()?.collapse(point.node, point.offset);
+      return;
+    }
+
+    const existing = getSelectionRange(target.content);
+
+    if (existing && existing.start !== existing.end) {
+      setCaretOffset(target.content, existing.start);
+    }
+  }
 
   /**
    * The one way content from outside the editor enters a block.

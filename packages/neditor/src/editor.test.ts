@@ -817,3 +817,109 @@ describe('public API methods that had no coverage', () => {
     expect(editor.getSelectionState()?.range.end).toBe(3);
   });
 });
+
+describe('a table at its row cap refuses instead of pretending', () => {
+  // The cap `tableInsertRow` enforces, so the grid below is one row from full.
+  const MAX_TABLE_ROWS = 1000;
+
+  const full = (): Block =>
+    block({
+      id: 'grid',
+      type: 'table',
+      rows: Array.from({ length: MAX_TABLE_ROWS }, () => [[{ text: 'a' }], [{ text: 'b' }]]),
+    });
+
+  const cellAt = (editor: NEditor, coords: string): HTMLElement =>
+    editor.element.querySelector<HTMLElement>(`[data-cell="${coords}"]`)!;
+
+  const announcement = (editor: NEditor): string =>
+    editor.element.querySelector<HTMLElement>('.neditor-live-region')?.textContent ?? '';
+
+  const toolbarButton = (name: string): HTMLButtonElement =>
+    document.querySelector<HTMLButtonElement>(
+      `.neditor-table-toolbar__button[aria-label="${name}"]`,
+    )!;
+
+  test('Tab in the last cell releases focus rather than trapping it', () => {
+    const editor = mount([full()]);
+    const last = cellAt(editor, `${MAX_TABLE_ROWS - 1}:1`);
+    last.focus();
+
+    // Swallowed, the key was a WCAG 2.1.2 trap that lied about why: it banked
+    // an undo entry, announced a row, and then reached for a row the cap had
+    // just refused to create.
+    expect(press(last, 'Tab')).toBe(false);
+    expect(editor.getDocument().blocks[0]?.rows).toHaveLength(MAX_TABLE_ROWS);
+    expect(editor.canUndo).toBe(false);
+    expect(announcement(editor)).toBe('');
+  });
+
+  test('Tab one row short of the cap still grows the table', () => {
+    const editor = mount([
+      block({
+        id: 'grid',
+        type: 'table',
+        rows: Array.from({ length: MAX_TABLE_ROWS - 1 }, () => [[{ text: 'a' }], [{ text: 'b' }]]),
+      }),
+    ]);
+    const last = cellAt(editor, `${MAX_TABLE_ROWS - 2}:1`);
+    last.focus();
+
+    expect(press(last, 'Tab')).toBe(true);
+    expect(editor.getDocument().blocks[0]?.rows).toHaveLength(MAX_TABLE_ROWS);
+    expect(announcement(editor)).toBe('Row added');
+  });
+
+  test('the toolbar insert button records nothing and announces nothing', () => {
+    const editor = mount([full()]);
+    const first = cellAt(editor, '0:0');
+    first.focus();
+    press(first, 'F10');
+
+    toolbarButton('Insert row below').click();
+
+    expect(editor.getDocument().blocks[0]?.rows).toHaveLength(MAX_TABLE_ROWS);
+    // An undo entry for a document that never changed makes the next Ctrl+Z a
+    // no-op, and "Row inserted below" tells a screen-reader user about a row
+    // that is not there to move into.
+    expect(editor.canUndo).toBe(false);
+    expect(announcement(editor)).toBe('');
+  });
+
+  test('the toolbar still inserts, and still says so, below the cap', () => {
+    const editor = mount([
+      block({
+        id: 'grid',
+        type: 'table',
+        rows: [
+          [[{ text: 'A' }], [{ text: 'B' }]],
+          [[{ text: 'C' }], [{ text: 'D' }]],
+        ],
+      }),
+    ]);
+    const first = cellAt(editor, '0:0');
+    first.focus();
+    press(first, 'F10');
+
+    toolbarButton('Insert row below').click();
+
+    expect(editor.getDocument().blocks[0]?.rows).toHaveLength(3);
+    expect(editor.canUndo).toBe(true);
+    expect(announcement(editor)).toBe('Row inserted below');
+  });
+
+  test('deleting the only row still counts as an edit', () => {
+    const editor = mount([block({ id: 'grid', type: 'table', rows: [[[{ text: 'A' }]]] })]);
+    const first = cellAt(editor, '0:0');
+    first.focus();
+    press(first, 'F10');
+
+    toolbarButton('Delete this row').click();
+
+    // The last row is emptied rather than removed, which is a real change to
+    // the document: detecting the cap's no-op must not swallow this one too.
+    expect(editor.getDocument().blocks[0]?.rows).toEqual([[[]]]);
+    expect(editor.canUndo).toBe(true);
+    expect(announcement(editor)).toBe('Row deleted');
+  });
+});

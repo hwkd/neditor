@@ -451,3 +451,99 @@ describe('the click that ends a drag is part of the drag', () => {
     expect(editor.getSelectedBlocks()).toHaveLength(1);
   });
 });
+
+describe('a popover in a shadow root is not dismissed by its own pointer', () => {
+  /** Mounts into a shadow root, the way a custom element embeds the editor. */
+  function mountInShadow(blocks: Block[]): { editor: NEditor; shadow: ShadowRoot } {
+    const wrapper = document.createElement('div');
+    document.body.append(wrapper);
+    const shadow = wrapper.attachShadow({ mode: 'open' });
+    const host = document.createElement('div');
+    shadow.append(host);
+    const editor = createEditor({ element: host, doc: { blocks } });
+    editors.push(editor);
+
+    return { editor, shadow };
+  }
+
+  /**
+   * A pointerdown as a listener on the *document* really receives one.
+   *
+   * happy-dom hands that listener the node that was actually hit, which is the
+   * one thing a browser never does: an event that crossed a shadow boundary is
+   * retargeted, and `target` is reported as the shadow host. The pair the DOM
+   * spec requires is therefore built by hand — `target` pinned to the host by
+   * dispatching there, `composedPath()` still answering with the real path from
+   * the node outwards — because that pair is the whole of the bug.
+   */
+  function retargetedPointerDown(node: Node, host: Element): void {
+    const path: EventTarget[] = [];
+
+    for (let step: Node | null = node; step;) {
+      path.push(step);
+      step = step.parentNode ?? ((step as ShadowRoot).host as Node | undefined) ?? null;
+    }
+
+    path.push(window);
+
+    const event = new PointerEvent('pointerdown', {
+      bubbles: true,
+      cancelable: true,
+      pointerType: 'mouse',
+      pointerId: 1,
+    });
+
+    Object.defineProperty(event, 'composedPath', { value: () => path });
+    host.dispatchEvent(event);
+  }
+
+  function openLinkIn(shadow: ShadowRoot, editor: NEditor, host: HTMLElement): HTMLElement {
+    selectIn(host, 0, 3);
+    editor.openLinkEditor();
+
+    return shadow.querySelector<HTMLElement>('.neditor-link-editor')!;
+  }
+
+  const shadowHosts = (shadow: ShadowRoot): HTMLElement[] => [
+    ...shadow.querySelectorAll<HTMLElement>('.neditor-block__content'),
+  ];
+
+  test('a pointer in the popover input leaves it open', () => {
+    const { editor, shadow } = mountInShadow([block({ content: [{ text: 'abc' }] })]);
+    const popover = openLinkIn(shadow, editor, shadowHosts(shadow)[0]!);
+
+    expect(popover.hidden).toBe(false);
+
+    retargetedPointerDown(popover.querySelector('input')!, shadow.host);
+
+    // The portal lives in the shadow root, so the document is told the pointer
+    // landed on the host element and `contains` answers "outside" for a click
+    // that landed squarely inside the field. Clicking in to type a URL closed
+    // the editor and discarded the edit.
+    expect(popover.hidden).toBe(false);
+  });
+
+  test('a pointer elsewhere in the shadow root still dismisses it', () => {
+    const { editor, shadow } = mountInShadow([
+      block({ content: [{ text: 'abc' }] }),
+      block({ content: [{ text: 'def' }] }),
+    ]);
+    const [first, second] = shadowHosts(shadow);
+    const popover = openLinkIn(shadow, editor, first!);
+
+    retargetedPointerDown(second!, shadow.host);
+
+    // Same retargeted target, opposite answer: reading the path rather than
+    // the target must not cost the dismissal it was added for.
+    expect(popover.hidden).toBe(true);
+  });
+
+  test('a pointer outside the shadow root still dismisses it', () => {
+    const { editor, shadow } = mountInShadow([block({ content: [{ text: 'abc' }] })]);
+    const popover = openLinkIn(shadow, editor, shadowHosts(shadow)[0]!);
+
+    pointer('pointerdown', document.body);
+
+    expect(popover.hidden).toBe(true);
+  });
+});
