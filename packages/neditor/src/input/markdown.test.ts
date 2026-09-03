@@ -653,3 +653,37 @@ describe('table rows that look like alignment', () => {
     expect(blockText(blocks[0]!)).toBe('| --- | --- |');
   });
 });
+
+describe('a span that reaches back is bounded work, not unbounded', () => {
+  const nested = (n: number): string => '['.repeat(n) + '*a* '.repeat(n) + '](u)'.repeat(n);
+
+  test('nested spans over one stretch stay under a second', () => {
+    // Each closing delimiter used to drag the whole reach back and rebuild it,
+    // so this shape was quadratic: 176KB took 47s inside the paste handler.
+    const source = Array.from({ length: 50 }, () => nested(400)).join('\n');
+    const started = performance.now();
+
+    blocksFromMarkdown(source);
+
+    expect(performance.now() - started).toBeLessThan(4000);
+  });
+
+  test('a genuinely long span still closes', () => {
+    // The budget must stay well clear of anything a person would write: this
+    // is one strikethrough wrapping 400 bold spans, about 3KB.
+    const inner = Array.from({ length: 400 }, (_, i) => `**b${i}**`).join(' ');
+    const runs = blocksFromMarkdown(`~~${inner}~~`)[0]!.content;
+
+    expect(runs.some((run) => (run.marks ?? []).includes('strikethrough'))).toBe(true);
+    expect(runs.map((run) => run.text).join('')).not.toContain('~~');
+  });
+
+  test('ordinary documents never reach the budget at all', () => {
+    const links = Array.from({ length: 500 }, (_, i) => `[l${i}](https://a.test/${i})`).join(' ');
+    const started = performance.now();
+    const runs = blocksFromMarkdown(links)[0]!.content;
+
+    expect(runs.filter((run) => run.link).length).toBe(500);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+});
