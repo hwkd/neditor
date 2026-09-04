@@ -108,11 +108,21 @@ function linkOpener(window: string, angled: boolean): number {
     stop -= 1;
   }
 
-  // Within that reach the label opens at the FIRST `](`, because a label admits
-  // no `]` either — so anything later would be inside the destination.
-  const pair = window.indexOf('](', stop + 1);
+  // Within that reach the label opens at the first `](` that HAS a `[` before
+  // it. Taking the first one unconditionally gave up on the whole rule when a
+  // stray `](` preceded a real link, because that one opens nothing — so
+  // `a] (b) [see](https://x.test/)` lost its link entirely.
+  for (let pair = window.indexOf('](', stop + 1); pair !== -1 && pair < window.length - 1;) {
+    const opener = window.lastIndexOf('[', pair);
 
-  return pair === -1 || pair >= window.length - 1 ? -1 : window.lastIndexOf('[', pair);
+    if (opener !== -1) {
+      return opener;
+    }
+
+    pair = window.indexOf('](', pair + 2);
+  }
+
+  return -1;
 }
 
 export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null {

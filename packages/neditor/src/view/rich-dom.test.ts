@@ -1254,3 +1254,51 @@ describe('a structure tag the block walk reads inline', () => {
     );
   });
 });
+
+describe('startsBlock agrees with visitBlocks', () => {
+  // The pop that trims trailing indentation only holds where a block really
+  // begins, and `startsBlock` is a second copy of a decision `visitBlocks`
+  // makes in its own dispatch. That copy has drifted three times, each time by
+  // omitting tags and each time silently. This walks every tag and fails the
+  // moment the two disagree again, rather than waiting for the shape nobody
+  // tested.
+  const BLOCK_LIKE = [
+    'p',
+    'h1',
+    'h2',
+    'h3',
+    'h4',
+    'h5',
+    'h6',
+    'blockquote',
+    'pre',
+    'hr',
+    'table',
+    'figure',
+    'details',
+    'div',
+    'section',
+  ];
+  const INLINE_LIKE = ['em', 'strong', 'span', 'code', 'a'];
+
+  const texts = (html: string): unknown =>
+    blocksFromHtml(document, html).map((b) =>
+      (b.content ?? []).map((r) => ({ t: r.text, m: r.marks })),
+    );
+
+  test.each(BLOCK_LIKE)('distributing over <%s> equals writing it by hand', (tag) => {
+    const inner = tag === 'hr' ? '' : 'Body';
+    const wrapped = `<b>\n  <em>Intro</em>\n  <${tag}>${inner}</${tag}>\n</b>`;
+    const byHand = `<em><b>Intro</b></em>\n  <${tag}><b>${inner}</b></${tag}>`;
+
+    expect(texts(wrapped)).toEqual(texts(byHand));
+  });
+
+  test.each(INLINE_LIKE)('<%s> is read inline, so the space before it survives', (tag) => {
+    const runs = texts(`<b><section><em>a</em> <${tag}>b</${tag}></section></b>`) as {
+      t: string;
+    }[][];
+
+    expect(runs[0]?.map((r) => r.t).join('')).toContain(' ');
+  });
+});

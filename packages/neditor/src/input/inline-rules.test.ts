@@ -178,3 +178,22 @@ describe('a line of unpaired brackets is not a link scan', () => {
     expect(runs.find((run) => run.link)?.link).toBe('https://a.test/M_(planet)');
   });
 });
+
+describe('a stray "](" before a real link', () => {
+  test('does not swallow the link', () => {
+    // No `)` or whitespace separates the stray `](` from the real one, so the
+    // reach covers both. Taking the first unconditionally found one that opens
+    // nothing, and the rule was skipped: the link vanished and the markup
+    // stayed as text. CommonMark reads `x](y` as literal and `[z](…)` as a link.
+    const runs = blocksFromMarkdown('x](y[z](https://e.com)')[0]!.content;
+
+    expect(runs.find((run) => run.link)?.link).toBe('https://e.com/');
+    expect(runs.map((run) => run.text).join('')).toBe('x](yz');
+  });
+
+  test('several of them still resolve the right one', () => {
+    const runs = blocksFromMarkdown('a](b](c[d](https://a.test/d)')[0]!.content;
+
+    expect(runs.find((run) => run.link)?.link).toBe('https://a.test/d');
+  });
+});

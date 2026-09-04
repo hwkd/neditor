@@ -1098,8 +1098,34 @@ function isSourceWhitespace(node: Node): boolean {
   return node.nodeType !== ELEMENT_NODE && (node.nodeValue ?? '').trim().length === 0;
 }
 
-/** The tags `visitBlocks` turns into a block by name, whatever they contain. */
-const STANDALONE_BLOCK_TAGS = new Set(['PRE', 'TABLE', 'FIGURE', 'IMG', 'HR']);
+/**
+ * The tags `visitBlocks` turns into a block by name, whatever they contain.
+ *
+ * This is a second copy of a decision `visitBlocks` makes in its own dispatch,
+ * and it has drifted from it three times — each time by omitting tags, and each
+ * time silently, because the shapes the tests happened to use were the ones
+ * still covered. `startsBlock agrees with visitBlocks` in the tests walks every
+ * entry here and fails if the two ever disagree again.
+ */
+const STANDALONE_BLOCK_TAGS = new Set([
+  'H1',
+  'H2',
+  'H3',
+  'H4',
+  'H5',
+  'H6',
+  'UL',
+  'OL',
+  'LI',
+  'BLOCKQUOTE',
+  'DETAILS',
+  'PRE',
+  'TABLE',
+  'FIGURE',
+  'IMG',
+  'HR',
+  'P',
+]);
 
 /**
  * Whether `visitBlocks` will begin a new block here rather than read it inline.
