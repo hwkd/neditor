@@ -1234,3 +1234,23 @@ describe('a sealed block reads its whole subtree, so nothing in it is layout', (
     expect((wrapped[0]?.content ?? []).map((r) => r.text)).toEqual(['emph']);
   });
 });
+
+describe('a structure tag the block walk reads inline', () => {
+  const texts = (html: string): unknown =>
+    blocksFromHtml(document, html).map((b) =>
+      (b.content ?? []).map((r) => ({ t: r.text, m: r.marks })),
+    );
+
+  test('a figcaption keeps the break that separates it, with its marks', () => {
+    // <figcaption>, <summary>, <td> and <tr> are structure tags, but visitBlocks
+    // reads them inline when they hold no block of their own — so whitespace in
+    // front of one separates two runs rather than being layout to discard.
+    expect(
+      texts('<b><figure><em>Some inline</em>\n<figcaption>Caption</figcaption></figure></b>'),
+    ).toEqual(
+      texts(
+        '<figure><b><em>Some inline</em>\n</b><figcaption><b>Caption</b></figcaption></figure>',
+      ),
+    );
+  });
+});

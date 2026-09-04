@@ -102,3 +102,28 @@ describe('sanitizeImageUrl', () => {
     expect(sanitizeImageUrl(input)).toBe(null);
   });
 });
+
+describe('a scheme-less destination must look like a host', () => {
+  test.each(['bar', './rel', 'foo/baz', 'notahost'])('%j is not a URL', (input) => {
+    // Assuming any bare token was a host turned `bar` into `https://bar/` and
+    // `./rel` into `https://./rel`, so a Markdown relative destination resolved
+    // somewhere that does not exist — and `[foo](bar)` sitting inside a longer
+    // URL began matching as a link of its own.
+    expect(sanitizeUrl(input)).toBeNull();
+  });
+
+  test.each([
+    ['example.com', 'https://example.com/'],
+    ['example.com/p?q=1', 'https://example.com/p?q=1'],
+    ['//evil.example/x', 'https://evil.example/x'],
+  ])('%j still resolves', (input, expected) => {
+    expect(sanitizeUrl(input)).toBe(expected);
+  });
+
+  test.each([
+    ['/relative', '/relative'],
+    ['#frag', '#frag'],
+  ])('%j stays as written', (input, expected) => {
+    expect(sanitizeUrl(input)).toBe(expected);
+  });
+});

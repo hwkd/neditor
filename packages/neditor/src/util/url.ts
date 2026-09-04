@@ -30,7 +30,20 @@ export function sanitizeUrl(input: string): string | null {
   // is resolved the same way — https is the scheme a browser on an https page
   // would have supplied, and pinning it means the href stored in the document
   // names the site it actually reaches.
+  //
+  // Only where the token can actually be a host, though. Assuming it always is
+  // turned every bare word into a site: `bar` became `https://bar/` and `./rel`
+  // became `https://./rel`, so a Markdown relative destination resolved to
+  // somewhere that does not exist, and `[foo](bar)` sitting inside a longer
+  // URL started matching as a link of its own.
   const hasScheme = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(trimmed);
+  const authority = trimmed.startsWith('//') ? trimmed.slice(2) : trimmed;
+  const host = authority.split(/[/?#]/, 1)[0] ?? '';
+
+  if (!hasScheme && !/^[^.\s]+(\.[^.\s]+)+$/.test(host)) {
+    return null;
+  }
+
   const candidate = hasScheme ? trimmed : `https:${trimmed.startsWith('//') ? '' : '//'}${trimmed}`;
 
   let parsed: URL;

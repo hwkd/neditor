@@ -716,3 +716,18 @@ describe('a backslash before a triangle', () => {
     ).toBe('* not italic *');
   });
 });
+
+describe('a destination that holds its own "]("', () => {
+  const href = (source: string): string | undefined =>
+    blocksFromMarkdown(source)[0]?.content.find((run) => run.link)?.link;
+
+  test.each(['https://www.google.com/search?q=[foo](bar)', 'https://a.test/x?ids[](1)'])(
+    'round-trips through the angle-bracket form: %s',
+    (url) => {
+      // The writer emits these in angle brackets; the reader used to resolve the
+      // inner `[foo](bar)` as a link of its own and hand back a different,
+      // still-valid-looking URL.
+      expect(href(`[see](<${url}>)`)).toBe(url);
+    },
+  );
+});

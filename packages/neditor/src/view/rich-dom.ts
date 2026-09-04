@@ -1098,6 +1098,33 @@ function isSourceWhitespace(node: Node): boolean {
   return node.nodeType !== ELEMENT_NODE && (node.nodeValue ?? '').trim().length === 0;
 }
 
+/** The tags `visitBlocks` turns into a block by name, whatever they contain. */
+const STANDALONE_BLOCK_TAGS = new Set(['PRE', 'TABLE', 'FIGURE', 'IMG', 'HR']);
+
+/**
+ * Whether `visitBlocks` will begin a new block here rather than read it inline.
+ *
+ * The run has to be closed at every structure element, but whitespace before
+ * one is only source layout when a block really starts there — that is the one
+ * case `visitBlocks` discards it. `<summary>`, `<figcaption>`, `<td>` and
+ * `<tr>` are structure tags that hold no block of their own, so they are read
+ * as inline content of the same block: dropping the whitespace in front of one
+ * deleted the separator between two runs, or left it behind stripped of the
+ * wrapper's marks.
+ */
+function startsBlock(element: Element, tag: string): boolean {
+  // Deliberately not BLOCK_TAGS: `FIGCAPTION`, `TD` and `TR` are in it, but
+  // `visitBlocks` buffers them as inline content when they hold no block of
+  // their own — which is exactly when the whitespace in front of one is the
+  // separator between two runs rather than layout to discard.
+  return (
+    CONTAINER_TAGS.has(tag) ||
+    STANDALONE_BLOCK_TAGS.has(tag) ||
+    containsBlockLevel(element) ||
+    containsImage(element)
+  );
+}
+
 /** Source layout a formatter left behind, as opposed to a space someone typed. */
 function isIndentation(node: Node): boolean {
   return isSourceWhitespace(node) && (node.nodeValue ?? '').includes('\n');
@@ -1159,7 +1186,7 @@ function distributeFormatting(
     const tag = element ? tagNameOf(element) : '';
 
     if (element && (STRUCTURE_TAGS.has(tag) || containsBlockLevel(element))) {
-      wrapRun(true);
+      wrapRun(startsBlock(element, tag));
 
       // A wrapper of its own hands its formatting to the chain here and is
       // marked as spent — unless the walk is sealed, where it is read where it

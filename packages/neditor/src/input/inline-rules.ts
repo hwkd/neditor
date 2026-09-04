@@ -101,22 +101,39 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
     // the regex off the rest of the window — left to walk back from every `[`
     // it turned a line of unpaired brackets, `[0, 1) [1, 2) ...`, into a
     // second of work per paste, because every `)` restarted the scan.
-    let searched = window;
+    // A link pattern can only start at a `[` that opens a `](`, so the openers
+    // are found rather than the window walked from every bracket in it — a line
+    // of unpaired brackets, which has no `](` at all, is rejected outright, and
+    // that is what keeps this off the quadratic path.
+    //
+    // The candidates are tried nearest-first instead of the last one being
+    // assumed to be the label's: a destination may hold a `](` of its own —
+    // `[see](<https://…?q=[foo](bar)>)`, which this editor writes itself — and
+    // assuming put the opener inside the URL, returning a different,
+    // still-valid-looking link.
     let searchedFrom = 0;
+    let match: RegExpExecArray | null = null;
 
     if (rule.isLink) {
-      const pair = window.lastIndexOf('](');
-      const opener = pair === -1 ? -1 : window.lastIndexOf('[', pair);
+      for (let pair = window.lastIndexOf(']('), tried = 0; pair !== -1 && tried < 8; tried += 1) {
+        const opener = window.lastIndexOf('[', pair);
 
-      if (opener === -1) {
-        continue;
+        if (opener === -1) {
+          break;
+        }
+
+        match = rule.pattern.exec(window.slice(opener));
+
+        if (match) {
+          searchedFrom = opener;
+          break;
+        }
+
+        pair = window.lastIndexOf('](', pair - 1);
       }
-
-      searchedFrom = opener;
-      searched = window.slice(opener);
+    } else {
+      match = rule.pattern.exec(window);
     }
-
-    const match = rule.pattern.exec(searched);
     const whole = match?.[0];
     const inner = match?.[1];
 
