@@ -127,3 +127,55 @@ describe('a scheme-less destination must look like a host', () => {
     expect(sanitizeUrl(input)).toBe(expected);
   });
 });
+
+describe('a disguise the URL parser sees through but a string test does not', () => {
+  /**
+   * The site-relative branch exists so `/path` stays local, and it deliberately
+   * excludes `//host` because the leading `//` opens an authority. But browsers
+   * strip TAB, LF and CR from a URL and fold a backslash into a slash for
+   * special schemes *before* parsing, so `/\host` and `/<TAB>/host` reach an
+   * attacker's origin while a `startsWith('/')` test still reads them as local.
+   * A consumer branching on the sanitizer's output -- a client-side router, an
+   * external-link interstitial, a link-rewriting pass -- routed the attacker's
+   * destination down the trusted path.
+   */
+  const BACKSLASH = String.fromCharCode(92);
+
+  test.each([
+    ['a backslash after the slash', `/${BACKSLASH}evil.example/x`],
+    ['a doubled backslash', `/${BACKSLASH}${BACKSLASH}evil.example/x`],
+    ['a backslash then a slash', `/${BACKSLASH}/evil.example/x`],
+    ['an embedded tab', '/\t/evil.example/x'],
+    ['an embedded newline', '/\n/evil.example/x'],
+    ['an embedded carriage return', '/\r/evil.example/x'],
+  ])('%s resolves to the host it actually reaches', (_name, input) => {
+    expect(sanitizeUrl(input)).toBe('https://evil.example/x');
+  });
+
+  test('the stored href names the same origin the browser would open', () => {
+    for (const input of [`/${BACKSLASH}evil.example/x`, '/\t/evil.example/x']) {
+      const stored = sanitizeUrl(input)!;
+
+      expect(new URL(stored).origin).toBe(new URL(input, 'https://site.test/page').origin);
+    }
+  });
+
+  test('an image source cannot use the disguise either', () => {
+    expect(sanitizeImageUrl(`/${BACKSLASH}evil.example/p.png`)).toBe('https://evil.example/p.png');
+  });
+
+  test('genuinely local links are untouched', () => {
+    expect(sanitizeUrl('/docs/page')).toBe('/docs/page');
+    expect(sanitizeUrl('#section')).toBe('#section');
+    expect(sanitizeUrl('/a/b?q=1#f')).toBe('/a/b?q=1#f');
+  });
+
+  test('a backslash in a local path folds the way the browser folds it', () => {
+    expect(sanitizeUrl(`/notes${BACKSLASH}file.txt`)).toBe('/notes/file.txt');
+  });
+
+  test('a scheme is left to the URL parser, which folds only where it should', () => {
+    expect(sanitizeUrl('mailto:a@b.test')).toBe('mailto:a@b.test');
+    expect(sanitizeUrl('https://a.test/x')).toBe('https://a.test/x');
+  });
+});

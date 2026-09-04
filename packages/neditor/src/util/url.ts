@@ -9,11 +9,25 @@ const SAFE_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:']);
  * anything outside {@link SAFE_SCHEMES} is rejected rather than escaped.
  */
 export function sanitizeUrl(input: string): string | null {
-  const trimmed = input.trim();
+  // TAB, LF and CR are stripped from anywhere in a URL before it is parsed, so
+  // a test made on the raw string is a test on something no browser ever sees:
+  // `/<TAB>/host` reads as a local path here and opens an authority there.
+  const trimmed = input.trim().replaceAll(/[\t\n\r]/g, '');
 
   if (trimmed.length === 0) {
     return null;
   }
+
+  const hasScheme = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(trimmed);
+
+  // With no scheme this resolves against the page, which is http or https --
+  // "special" schemes, where the URL parser folds a backslash into a slash.
+  // `/\host` therefore opens an authority exactly the way `//host` does, so the
+  // site-relative test has to be made on the folded form or it waves through
+  // the very disguise it exists to catch. A scheme is left alone: `new URL`
+  // below already applies the right rule for whichever scheme it turns out to
+  // be, and mailto: and tel: do not fold at all.
+  const relative = hasScheme ? trimmed : trimmed.replaceAll('\\', '/');
 
   // In-page and site-relative links carry no scheme and cannot execute.
   //
@@ -21,8 +35,8 @@ export function sanitizeUrl(input: string): string | null {
   // leading `//` opens an authority: it leaves the site while reading as a
   // local path, so it falls through to be resolved and checked like any other
   // absolute destination.
-  if (trimmed.startsWith('#') || (trimmed.startsWith('/') && !trimmed.startsWith('//'))) {
-    return trimmed;
+  if (relative.startsWith('#') || (relative.startsWith('/') && !relative.startsWith('//'))) {
+    return relative;
   }
 
   // `example.com` is what people actually type; assume https rather than
@@ -36,15 +50,17 @@ export function sanitizeUrl(input: string): string | null {
   // became `https://./rel`, so a Markdown relative destination resolved to
   // somewhere that does not exist, and `[foo](bar)` sitting inside a longer
   // URL started matching as a link of its own.
-  const hasScheme = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(trimmed);
-  const authority = trimmed.startsWith('//') ? trimmed.slice(2) : trimmed;
+  // Any run of two or more leading slashes starts the authority, not just two:
+  // a browser reads `///host/x` as `host` too. Folding a backslash can produce
+  // exactly that, so the run is collapsed rather than a fixed two dropped.
+  const authority = relative.startsWith('//') ? relative.replace(/^\/+/, '') : relative;
   const host = authority.split(/[/?#]/, 1)[0] ?? '';
 
   if (!hasScheme && !/^[^.\s]+(\.[^.\s]+)+$/.test(host)) {
     return null;
   }
 
-  const candidate = hasScheme ? trimmed : `https:${trimmed.startsWith('//') ? '' : '//'}${trimmed}`;
+  const candidate = hasScheme ? trimmed : `https://${authority}`;
 
   let parsed: URL;
 
