@@ -1363,6 +1363,27 @@ describe('a caption that holds a block is not sealed', () => {
     ).toBe(true);
   });
 
+  test.each([
+    ['a refused scheme', 'javascript:x'],
+    ['no source at all', ''],
+    ['a relative path', './a.png'],
+  ])('a figure whose image pushImage rejects is not sealed: %s', (_name, src) => {
+    // Holding an <img> is not the question the seal asks. pushImage refuses a
+    // source sanitizeImageUrl rejects and visitBlocks then recurses into the
+    // figure and splits it, so sealing on containsImage sealed a subtree that
+    // does get split — and the pop stood down inside it, leaving the figure's
+    // own indentation in the document as text.
+    const html = `<figure><em>Intro</em>\n  <p>Body</p><img src="${src}"></figure>`;
+
+    expect(texts(`<b>${html}</b>`)).toEqual(texts(html));
+  });
+
+  test('a figure whose image is usable still seals', () => {
+    const html = '<figure><em>Intro</em>\n  <p>Body</p><img src="https://x.test/a.png"></figure>';
+
+    expect(texts(`<b>${html}</b>`)).toEqual(texts(html));
+  });
+
   test('a caption with no block in it is still sealed', () => {
     expect(texts('<b><figure><em>x</em>\n<figcaption>Cap</figcaption></figure></b>')).toEqual(
       texts('<figure><b><em>x</em>\n</b><figcaption><b>Cap</b></figcaption></figure>'),

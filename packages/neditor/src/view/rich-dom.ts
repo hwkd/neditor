@@ -838,6 +838,20 @@ function containsImage(element: Element): boolean {
 }
 
 /**
+ * Whether the image here is one `pushImage` will actually take.
+ *
+ * Holding an `<img>` is not the same question: `pushImage` refuses a source
+ * `sanitizeImageUrl` rejects — empty, `javascript:`, or a bare relative path —
+ * and `visitBlocks` then recurses into the figure and splits it like anything
+ * else. Sealing on the weaker question sealed a subtree that does get split.
+ */
+function hasUsableImage(element: Element): boolean {
+  const image = tagNameOf(element) === 'IMG' ? element : firstImage(element);
+
+  return sanitizeImageUrl(image?.getAttribute('src') ?? '') !== null;
+}
+
+/**
  * An element that only styles the content inside it, rather than laying it out.
  *
  * Its formatting travels down to the content inside, but only where a block is
@@ -906,7 +920,7 @@ function sealsFormatting(element: Element, tag: string): boolean {
     );
   }
 
-  return SEALED_TAGS.has(tag) || (tag === 'FIGURE' && containsImage(element));
+  return SEALED_TAGS.has(tag) || (tag === 'FIGURE' && hasUsableImage(element));
 }
 
 /** What a chain of inline wrappers leaves on the content inside it. */
