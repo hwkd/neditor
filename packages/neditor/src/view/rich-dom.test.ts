@@ -1324,6 +1324,25 @@ describe('a caption that holds a block is not sealed', () => {
     expect(texts(`<code>${html}</code>`)).toEqual(texts(html));
   });
 
+  test.each([
+    [
+      'a block in the body',
+      '<details open><summary>S</summary><em>Intro</em>\n  <p>Body</p></details>',
+    ],
+    [
+      'a block in the summary',
+      '<details><summary><a href="https://x.test/1"><i>A</i>\n<p>B</p></a></summary></details>',
+    ],
+    ['no block at all', '<details open><summary>S</summary><em>only inline</em></details>'],
+  ])('a details with %s parses the same wrapped or not', (_name, html) => {
+    // visitDetails takes the summary out and re-visits what is left, so it is
+    // the BODY that decides whether the subtree reads as one block. Asking of
+    // the whole element got these two backwards: a block in the summary says
+    // nothing about the body, and a block in the body means the seal's premise
+    // is false.
+    expect(texts(`<b>${html}</b>`)).toEqual(texts(html));
+  });
+
   test('a caption with no block in it is still sealed', () => {
     expect(texts('<b><figure><em>x</em>\n<figcaption>Cap</figcaption></figure></b>')).toEqual(
       texts('<figure><b><em>x</em>\n</b><figcaption><b>Cap</b></figcaption></figure>'),

@@ -872,6 +872,11 @@ const DISTRIBUTED = new WeakSet<Element>();
  * no image to show, the same figure is descended into block by block instead,
  * and a wrapper inside it is reached and pushed inward there.
  */
+/** Whether the element is itself block-level, as opposed to merely holding one. */
+function isBlockLevel(element: Element): boolean {
+  return BLOCK_TAGS.has(tagNameOf(element));
+}
+
 function sealsFormatting(element: Element, tag: string): boolean {
   // A seal says `parseRichText` will read this whole subtree as one block's
   // text. For most of SEALED_TAGS that holds by construction, but `visitBlocks`
@@ -882,6 +887,18 @@ function sealsFormatting(element: Element, tag: string): boolean {
   // qualification; these two needed the same one.
   if (tag === 'FIGCAPTION' || tag === 'SUMMARY') {
     return !containsBlockLevel(element);
+  }
+
+  // `DETAILS` needs the same question asked of its BODY. `visitDetails` takes
+  // the summary out and re-runs `visitBlocks` over what is left, so it is that
+  // remainder which decides whether the subtree reads as one block — a block in
+  // the summary says nothing about it, and asking of the whole element got the
+  // two cases backwards.
+  if (tag === 'DETAILS') {
+    return ![...element.children].some(
+      (child) =>
+        tagNameOf(child) !== 'SUMMARY' && (isBlockLevel(child) || containsBlockLevel(child)),
+    );
   }
 
   return SEALED_TAGS.has(tag) || (tag === 'FIGURE' && containsImage(element));
