@@ -145,6 +145,38 @@ describe('theme tokens', () => {
     }
   });
 
+  /**
+   * The dark themes flip every foreground to white. If the surface under them
+   * stays `transparent` -- as it is in the light block, where dark ink on a
+   * host's default white is the safe assumption -- then white text is
+   * composited onto whatever the host paints, and on an ordinary light-only
+   * page the whole document renders at 1.00:1 and vanishes. `theme` defaults
+   * to `'auto'`, so this was the out-of-the-box result for every visitor whose
+   * OS was in dark mode.
+   */
+  test('a theme that flips the ink to white also owns the ground it sits on', () => {
+    const blocks = blocksDefining(NEDITOR_STYLES, '--neditor-text');
+
+    // Light, `prefers-color-scheme: dark`, and the explicit `theme: 'dark'`.
+    expect(blocks).toHaveLength(3);
+
+    for (const { selector, tokens } of blocks.slice(1)) {
+      const surface = parseColour(tokens['--neditor-surface'] as string);
+
+      expect(surface.a, `${selector}: a dark theme's surface must be opaque`).toBe(1);
+
+      for (const [token, floor] of [
+        ['--neditor-text', 4.5],
+        ['--neditor-text-muted', 4.5],
+        ['--neditor-placeholder', 3],
+      ] as const) {
+        const ink = parseColour(tokens[token] as string);
+
+        expect(contrast(ink, surface), `${token} on ${selector}`).toBeGreaterThan(floor);
+      }
+    }
+  });
+
   test('each dark theme redefines exactly what the other one does', () => {
     const [, media, attribute] = blocksDefining(NEDITOR_STYLES, '--neditor-accent') as [
       TokenBlock,

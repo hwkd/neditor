@@ -347,3 +347,36 @@ describe('a newline at the end of a block gets a line box', () => {
     expect(host.innerHTML).toBe('');
   });
 });
+
+describe('the package stylesheet is a default, not an override', () => {
+  /**
+   * The README tells consumers to theme the editor with `.neditor { --neditor-*: ... }`
+   * from their own stylesheet. Appending ours last in `<head>` put it after
+   * theirs, so on equal specificity -- which that recipe has, by construction --
+   * ours won and their theming silently did nothing.
+   */
+  test('it is inserted before the stylesheets the page already had', () => {
+    // injectStyles is a no-op once the marker is present, and earlier mounts in
+    // this file leave one behind. Without clearing it the assertion never
+    // exercises the insert at all -- it passed with the fix reverted.
+    for (const stale of document.head.querySelectorAll('style[data-neditor-styles]')) {
+      stale.remove();
+    }
+
+    const theirs = document.createElement('style');
+    theirs.textContent = '.neditor { --neditor-accent: rgb(1 2 3); }';
+    document.head.append(theirs);
+
+    const editor = mount([block({ content: [{ text: 'themed' }] })]);
+    const ours = document.head.querySelector('style[data-neditor-styles]');
+
+    expect(ours, 'the package stylesheet must be injected').not.toBeNull();
+    expect(
+      Boolean(ours!.compareDocumentPosition(theirs) & Node.DOCUMENT_POSITION_FOLLOWING),
+      "the page's own stylesheet must come after ours, so it wins on equal specificity",
+    ).toBe(true);
+
+    editor.destroy();
+    theirs.remove();
+  });
+});

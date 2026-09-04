@@ -54,6 +54,14 @@ export const NEDITOR_STYLES = `
     --neditor-text: rgb(255 255 255 / 0.9);
     --neditor-text-muted: rgb(255 255 255 / 0.68);
     --neditor-placeholder: rgb(255 255 255 / 0.55);
+    /* Opaque, unlike the light surface. The foregrounds above are all white,
+       so a transparent surface means white text composited onto whatever the
+       host happens to paint: on an ordinary light-only page the whole document
+       renders at 1.00:1 and disappears. A widget that flips its own ink has to
+       own the ground it flips it onto. Consumers who want it to blend can set
+       --neditor-surface back to transparent, which now works from their own
+       stylesheet -- see injectStyles. */
+    --neditor-surface: rgb(25 25 25);
     --neditor-surface-raised: rgb(37 37 37);
     --neditor-border: rgb(255 255 255 / 0.11);
     --neditor-hover: rgb(255 255 255 / 0.06);
@@ -81,6 +89,8 @@ export const NEDITOR_STYLES = `
   --neditor-text: rgb(255 255 255 / 0.9);
   --neditor-text-muted: rgb(255 255 255 / 0.68);
   --neditor-placeholder: rgb(255 255 255 / 0.55);
+  /* Opaque for the reason given in the prefers-color-scheme block. */
+  --neditor-surface: rgb(25 25 25);
   --neditor-surface-raised: rgb(37 37 37);
   --neditor-border: rgb(255 255 255 / 0.11);
   --neditor-hover: rgb(255 255 255 / 0.06);
@@ -1011,6 +1021,11 @@ function styleRootFor(node: Node): Document | ShadowRoot {
  * Injects {@link NEDITOR_STYLES} once per root. Repeat calls are no-ops, so
  * mounting many editors on a page still yields a single style element.
  *
+ * The element goes *first* in its container, so the page's own stylesheet comes
+ * after it and wins on equal specificity. That is what makes the documented
+ * `.neditor { --neditor-*: ... }` theming recipe work; appending it last meant
+ * the package silently overrode every consumer theme.
+ *
  * `nonce` is forwarded to the `<style>` element, which a `style-src` policy
  * without `'unsafe-inline'` requires — otherwise the editor renders unstyled.
  */
@@ -1031,5 +1046,9 @@ export function injectStyles(node: Document | ShadowRoot | Element, nonce?: stri
   }
 
   style.textContent = NEDITOR_STYLES;
-  container.append(style);
+  // First, not last. Appending put the package sheet after the consumer's own,
+  // so `.neditor { --neditor-accent: ... }` -- the recipe the README gives --
+  // lost every tie on equal specificity and silently did nothing. A library
+  // stylesheet is a default: it goes first and is overridden by the page.
+  container.prepend(style);
 }
