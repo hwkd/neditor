@@ -1390,3 +1390,59 @@ describe('a caption that holds a block is not sealed', () => {
     );
   });
 });
+
+describe('reading a pasted subtree is linear in its size', () => {
+  /**
+   * A list item holds the whole list nested under it, and a `<details>` holds
+   * every `<details>` below it. Both readers used to deep-clone the element to
+   * delete the parts they did not want -- once per level, so the same nodes were
+   * copied over and over. Pasting ~10 KB of nested `<ul>` froze the paste
+   * handler for 15 seconds and allocated 1.4 GB; 33 KB of nested `<details>`
+   * exhausted the heap outright. They skip during the walk now instead.
+   *
+   * The budget is deliberately loose. It is not measuring speed -- it is the
+   * difference between reading each node once and reading it once per ancestor,
+   * which at this size is three orders of magnitude, so any threshold in
+   * between distinguishes them without being sensitive to the machine.
+   */
+  const BUDGET_MS = 3000;
+
+  test('deeply nested lists cost about what the same blocks cost flat', () => {
+    const nested = `${'<ul><li>a'.repeat(800)}${'</li></ul>'.repeat(800)}`;
+
+    const started = performance.now();
+    const blocks = blocksFromHtml(document, nested);
+    const elapsed = performance.now() - started;
+
+    expect(blocks).toHaveLength(800);
+    expect(elapsed, `${Math.round(elapsed)}ms for 800 nested list items`).toBeLessThan(BUDGET_MS);
+  });
+
+  // Larger than the list case on purpose: a toggle costs one clone per level
+  // where a list item costs several, so 800 of them stayed inside the budget
+  // even unfixed. Measured, not guessed -- at this size the old reader takes
+  // seconds or dies outright, and the new one takes single-digit milliseconds.
+  test('deeply nested toggles do too', () => {
+    const nested = `${'<details><summary>s</summary>'.repeat(1200)}${'</details>'.repeat(1200)}`;
+
+    const started = performance.now();
+    const blocks = blocksFromHtml(document, nested);
+    const elapsed = performance.now() - started;
+
+    expect(blocks).toHaveLength(1200);
+    expect(elapsed, `${Math.round(elapsed)}ms for 1200 nested toggles`).toBeLessThan(BUDGET_MS);
+  });
+
+  test('the nesting is still read, not just skipped past', () => {
+    const blocks = blocksFromHtml(
+      document,
+      '<ul><li>one<ul><li>two<ul><li>three</li></ul></li></ul></li></ul>',
+    );
+
+    expect(blocks.map((block) => [blockText(block), block.depth])).toEqual([
+      ['one', 0],
+      ['two', 1],
+      ['three', 2],
+    ]);
+  });
+});

@@ -259,12 +259,36 @@ export function renderRichText(doc: Document, content: readonly TextRun[]): Docu
  * line selectable; it is presentation, not content, and must not become a
  * newline. Block elements reuse it to decide whether they end a line.
  */
-function hasContentAfter(node: Node, root: Node): boolean {
+/**
+ * Elements a reader wants treated as absent, along with everything inside them.
+ *
+ * This replaced cloning the subtree and deleting the unwanted parts out of the
+ * copy. That is the same answer, but a list item holds the whole list below it,
+ * so cloning one per level is quadratic in the nesting depth: 10 KB of pasted
+ * nested `<ul>` took 15 seconds and 1.4 GB inside the paste handler. Skipping
+ * during the walk reads each node once.
+ */
+type SkipPredicate = (element: Element, tag: string) => boolean;
+
+/** A list nested inside a list item is the *next* block, not this one's text. */
+const isNestedList: SkipPredicate = (_element, tag) => tag === 'UL' || tag === 'OL';
+
+function hasContentAfter(node: Node, root: Node, skip?: SkipPredicate): boolean {
   const walker = root.ownerDocument?.createTreeWalker(root, SHOW_TEXT | SHOW_ELEMENT, {
     // FILTER_REJECT skips the element *and* its subtree, so a following
     // <script> never counts as content.
-    acceptNode: (candidate) =>
-      SKIP_TAGS.has(tagNameOf(candidate)) ? FILTER_REJECT : FILTER_ACCEPT,
+    //
+    // `skip` is rejected here as well as in `walk`, or the two disagree about
+    // what "content" is: a <br> whose only follower is a nested list kept its
+    // newline here while the walk that produced the runs never saw the list.
+    acceptNode: (candidate) => {
+      const tag = tagNameOf(candidate);
+
+      return SKIP_TAGS.has(tag) ||
+        (candidate.nodeType === ELEMENT_NODE && skip?.(candidate as Element, tag) === true)
+        ? FILTER_REJECT
+        : FILTER_ACCEPT;
+    },
   });
 
   if (!walker) {
@@ -339,6 +363,7 @@ function walk(
   link: string | undefined,
   root: Node,
   out: TextRun[],
+  skip?: SkipPredicate,
 ): void {
   for (const child of [...node.childNodes]) {
     if (child.nodeType === TEXT_NODE) {
@@ -358,7 +383,7 @@ function walk(
     }
 
     if (tagNameOf(child) === 'BR') {
-      if (hasContentAfter(child, root)) {
+      if (hasContentAfter(child, root, skip)) {
         out.push({ text: '\n', marks: [...marks], link });
       }
 
@@ -372,7 +397,7 @@ function walk(
     const element = child as Element;
     const tag = tagNameOf(element);
 
-    if (SKIP_TAGS.has(tag)) {
+    if (SKIP_TAGS.has(tag) || skip?.(element, tag) === true) {
       continue;
     }
 
@@ -394,18 +419,18 @@ function walk(
       nextLink = sanitizeUrl(element.getAttribute('href') ?? '') ?? undefined;
     }
 
-    walk(element, nextMarks, nextLink, root, out);
+    walk(element, nextMarks, nextLink, root, out, skip);
 
-    if (isBlock && hasContentAfter(element, root)) {
+    if (isBlock && hasContentAfter(element, root, skip)) {
       breakLine(out, marks, link);
     }
   }
 }
 
 /** Reads a rendered (or pasted) subtree back into canonical runs. */
-export function parseRichText(root: Node): RichText {
+export function parseRichText(root: Node, skip?: SkipPredicate): RichText {
   const out: TextRun[] = [];
-  walk(root, [], undefined, root, out);
+  walk(root, [], undefined, root, out, skip);
   return normalizeRuns(out);
 }
 
@@ -1319,14 +1344,36 @@ function extractTodoPrefix(runs: RichText): { runs: RichText; checked: boolean }
 }
 
 /** A copy of `element` with nested lists removed, since those are their own blocks. */
-function withoutNestedLists(element: Element): Element {
-  const clone = element.cloneNode(true) as Element;
+/**
+ * First descendant matching `match`, not descending into anything `skip` hides.
+ *
+ * The pruning is the point: `querySelectorAll` over the whole subtree once per
+ * nesting level is the quadratic term this file exists to avoid.
+ */
+function findWithin(
+  root: Element,
+  skip: SkipPredicate,
+  match: (element: Element) => boolean,
+): Element | null {
+  for (const child of root.children) {
+    const tag = tagNameOf(child);
 
-  for (const nested of clone.querySelectorAll('ul, ol')) {
-    nested.remove();
+    if (SKIP_TAGS.has(tag) || skip(child, tag)) {
+      continue;
+    }
+
+    if (match(child)) {
+      return child;
+    }
+
+    const deeper = findWithin(child, skip, match);
+
+    if (deeper) {
+      return deeper;
+    }
   }
 
-  return clone;
+  return null;
 }
 
 /**
@@ -1337,7 +1384,7 @@ function withoutNestedLists(element: Element): Element {
  * dropping it here loses a paragraph, heading or quote on every copy-paste.
  */
 function pushBlock(out: Block[], type: BlockType, element: Element, depth: number): void {
-  const runs = parseRichText(withoutNestedLists(element));
+  const runs = parseRichText(element, isNestedList);
 
   out.push(createBlock(type, runs, depthOf(element, depth)));
 }
@@ -1350,7 +1397,7 @@ function depthOf(element: Element, fallback: number): number {
 }
 
 function pushCallout(out: Block[], element: Element, depth: number, icon: string): void {
-  const runs = parseRichText(withoutNestedLists(element));
+  const runs = parseRichText(element, isNestedList);
   const block = createBlock('callout', runs, depthOf(element, depth));
   block.icon = icon;
   out.push(block);
@@ -1372,10 +1419,10 @@ function visitDetails(doc: Document, element: Element, depth: number, out: Block
   block.collapsed = !element.hasAttribute('open');
   out.push(block);
 
-  const body = element.cloneNode(true) as Element;
-  body.querySelector('summary')?.remove();
-
-  visitBlocks(doc, body, block.depth + 1, out);
+  // The summary is skipped by identity rather than removed from a copy: a
+  // <details> holds every nested <details> below it, so cloning one per level
+  // was quadratic in the nesting depth exactly as the list case was.
+  visitBlocks(doc, element, block.depth + 1, out, summary ?? undefined);
 }
 
 /** Reads a `<table>` into a grid; `normalizeTableRows` squares off ragged rows. */
@@ -1429,7 +1476,7 @@ function visitQuote(element: Element, depth: number, out: Block[]): void {
   // it would be a block the source never had. Our own callouts keep theirs,
   // since the marker says the block was really there.
   const bare =
-    icon === null && lists.length > 0 && isRichEmpty(parseRichText(withoutNestedLists(element)));
+    icon === null && lists.length > 0 && isRichEmpty(parseRichText(element, isNestedList));
 
   if (!bare) {
     if (icon === null) {
@@ -1508,10 +1555,13 @@ function visitListItem(
 ): void {
   const itemDepth = depthOf(item, depth);
   const nested = childLists(item);
-  const clone = withoutNestedLists(item);
-  const checkbox = clone.querySelector('input[type="checkbox"]');
+  const checkbox = findWithin(
+    item,
+    isNestedList,
+    (element) => tagNameOf(element) === 'INPUT' && element.getAttribute('type') === 'checkbox',
+  );
   const state = item.getAttribute(TODO_ATTR);
-  let runs = parseRichText(clone);
+  let runs = parseRichText(item, isNestedList);
   let type = fallback;
   let checked = false;
 
@@ -1568,7 +1618,7 @@ function visitList(list: Element, depth: number, out: Block[]): void {
  * Inline nodes between block elements are buffered and flushed as a paragraph,
  * so stray text at the top level is not silently dropped.
  */
-function visitBlocks(doc: Document, node: Node, depth: number, out: Block[]): void {
+function visitBlocks(doc: Document, node: Node, depth: number, out: Block[], exclude?: Node): void {
   let buffer: Node[] = [];
 
   const flushInline = (): void => {
@@ -1591,6 +1641,10 @@ function visitBlocks(doc: Document, node: Node, depth: number, out: Block[]): vo
   };
 
   for (const child of [...node.childNodes]) {
+    if (child === exclude) {
+      continue;
+    }
+
     if (child.nodeType === TEXT_NODE) {
       if ((child.nodeValue ?? '').trim().length > 0) {
         buffer.push(child);
@@ -1664,7 +1718,7 @@ function visitBlocks(doc: Document, node: Node, depth: number, out: Block[]): vo
 
       if (!pushImage(out, element, depth) && tag === 'FIGURE') {
         // No usable image, but the figure may still hold a caption or a table.
-        visitBlocks(doc, element, depth, out);
+        visitBlocks(doc, element, depth, out, exclude);
       }
 
       continue;
@@ -1692,7 +1746,7 @@ function visitBlocks(doc: Document, node: Node, depth: number, out: Block[]): vo
 
     if (CONTAINER_TAGS.has(tag)) {
       flushInline();
-      visitBlocks(doc, element, depth, out);
+      visitBlocks(doc, element, depth, out, exclude);
       continue;
     }
 
