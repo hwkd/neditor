@@ -1400,37 +1400,45 @@ describe('reading a pasted subtree is linear in its size', () => {
    * handler for 15 seconds and allocated 1.4 GB; 33 KB of nested `<details>`
    * exhausted the heap outright. They skip during the walk now instead.
    *
-   * The budget is deliberately loose. It is not measuring speed -- it is the
-   * difference between reading each node once and reading it once per ancestor,
-   * which at this size is three orders of magnitude, so any threshold in
-   * between distinguishes them without being sensitive to the machine.
+   * Measured against the flat spelling of the same block count rather than
+   * against a stopwatch: the ratio is the property -- reading each node once
+   * versus once per ancestor -- and it does not move with the machine. Unfixed
+   * these ratios are in the hundreds; fixed they are near one.
    */
-  const BUDGET_MS = 3000;
+  const RATIO = 25;
+
+  function elapsed(html: string, expected: number): number {
+    const started = performance.now();
+    const blocks = blocksFromHtml(document, html);
+
+    expect(blocks).toHaveLength(expected);
+
+    return Math.max(performance.now() - started, 0.1);
+  }
 
   test('deeply nested lists cost about what the same blocks cost flat', () => {
-    const nested = `${'<ul><li>a'.repeat(800)}${'</li></ul>'.repeat(800)}`;
+    const n = 250;
+    const nested = elapsed(`${'<ul><li>a'.repeat(n)}${'</li></ul>'.repeat(n)}`, n);
+    const flat = elapsed(`<ul>${'<li>a</li>'.repeat(n)}</ul>`, n);
 
-    const started = performance.now();
-    const blocks = blocksFromHtml(document, nested);
-    const elapsed = performance.now() - started;
-
-    expect(blocks).toHaveLength(800);
-    expect(elapsed, `${Math.round(elapsed)}ms for 800 nested list items`).toBeLessThan(BUDGET_MS);
+    expect(
+      nested / flat,
+      `nested ${Math.round(nested)}ms vs flat ${Math.round(flat)}ms`,
+    ).toBeLessThan(RATIO);
   });
 
-  // Larger than the list case on purpose: a toggle costs one clone per level
-  // where a list item costs several, so 800 of them stayed inside the budget
-  // even unfixed. Measured, not guessed -- at this size the old reader takes
-  // seconds or dies outright, and the new one takes single-digit milliseconds.
   test('deeply nested toggles do too', () => {
-    const nested = `${'<details><summary>s</summary>'.repeat(1200)}${'</details>'.repeat(1200)}`;
+    const n = 250;
+    const nested = elapsed(
+      `${'<details><summary>s</summary>'.repeat(n)}${'</details>'.repeat(n)}`,
+      n,
+    );
+    const flat = elapsed(`${'<details><summary>s</summary></details>'.repeat(n)}`, n);
 
-    const started = performance.now();
-    const blocks = blocksFromHtml(document, nested);
-    const elapsed = performance.now() - started;
-
-    expect(blocks).toHaveLength(1200);
-    expect(elapsed, `${Math.round(elapsed)}ms for 1200 nested toggles`).toBeLessThan(BUDGET_MS);
+    expect(
+      nested / flat,
+      `nested ${Math.round(nested)}ms vs flat ${Math.round(flat)}ms`,
+    ).toBeLessThan(RATIO);
   });
 
   test('the nesting is still read, not just skipped past', () => {
@@ -1444,5 +1452,47 @@ describe('reading a pasted subtree is linear in its size', () => {
       ['two', 1],
       ['three', 2],
     ]);
+  });
+});
+
+describe('nesting deeper than the model can express is bounded, not followed', () => {
+  /**
+   * The readers descend recursively, so before this a deeply nested paste threw
+   * `RangeError: Maximum call stack size exceeded` straight out of the `paste`
+   * handler -- around 1,500 levels, and reachable with a few kilobytes. The
+   * model clamps block depth to 32, so nothing that deep was ever going to
+   * survive as structure anyway.
+   *
+   * Past the bound the text is still read, as one block: the point is to stop
+   * recursing, not to drop what the author wrote.
+   */
+  test('a list nested far past the bound reads without throwing', () => {
+    const html = `${'<ul><li>a'.repeat(3000)}${'</li></ul>'.repeat(3000)}`;
+
+    const blocks = blocksFromHtml(document, html);
+
+    expect(blocks.length).toBeGreaterThan(0);
+    expect(blocks.length).toBeLessThan(3000);
+    expect(blocks.every((one) => blockText(one).length > 0)).toBe(true);
+  });
+
+  test('so does a toggle, and a plain wrapper chain', () => {
+    const toggles = `${'<details><summary>s</summary>'.repeat(3000)}${'</details>'.repeat(3000)}`;
+    const wrappers = `${'<div>'.repeat(20000)}deep${'</div>'.repeat(20000)}`;
+
+    expect(blocksFromHtml(document, toggles).length).toBeLessThan(3000);
+    expect(blocksFromHtml(document, wrappers).map(blockText)).toEqual(['deep']);
+  });
+
+  test('inline nesting past the bound keeps its text', () => {
+    const html = `<p>${'<span>'.repeat(20000)}deep${'</span>'.repeat(20000)}</p>`;
+
+    expect(blocksFromHtml(document, html).map(blockText)).toEqual(['deep']);
+  });
+
+  test('ordinary nesting is nowhere near the bound and is read in full', () => {
+    const html = `${'<ul><li>a'.repeat(20)}${'</li></ul>'.repeat(20)}`;
+
+    expect(blocksFromHtml(document, html)).toHaveLength(20);
   });
 });

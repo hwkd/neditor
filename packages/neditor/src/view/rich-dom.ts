@@ -112,6 +112,7 @@ const SHOW_ELEMENT = 0x1;
 const SHOW_TEXT = 0x4;
 const FILTER_ACCEPT = 1;
 const FILTER_REJECT = 2;
+const FILTER_SKIP = 3;
 
 /**
  * A node's tag name, always uppercase.
@@ -357,6 +358,79 @@ function breakLine(out: TextRun[], marks: Mark[], link: string | undefined): voi
   }
 }
 
+/**
+ * How deep the readers will follow nested *blocks* before they stop descending.
+ *
+ * The descent is recursive, so without a bound a deeply nested paste overflows
+ * the stack and throws `RangeError` out of the `paste` handler. Eight times the
+ * depth the model can even represent -- `MAX_DEPTH` is 32, so everything below
+ * that already flattens to the same level -- and far enough under the limit
+ * (around 1,500 levels) to leave room for a smaller stack than this one.
+ *
+ * Content past the bound is not dropped: it is read as text and emitted as one
+ * block, which costs a single pass rather than one per remaining level.
+ */
+const MAX_BLOCK_NESTING = 1024;
+
+/**
+ * The list descent gets a tighter one, and its own counter.
+ *
+ * `visitList` and `visitListItem` call each other through `parseRichText`, so a
+ * level of nested list costs about twice the frames a wrapper does -- measured:
+ * with every bound removed, wrappers, toggles and inline spans all survive 3,200
+ * levels and lists give out at half that. Meanwhile a list nested past
+ * `MAX_DEPTH` is already flattened by the model, so there is nothing to lose in
+ * stopping early. Separate counters rather than one shared threshold, or a list
+ * inside a few hundred wrappers would refuse to descend at all.
+ */
+const MAX_LIST_NESTING = 256;
+
+/**
+ * The same bound for the inline walk, which is a separate budget on purpose.
+ *
+ * Formatting wrappers nest far deeper than block structure does in real
+ * clipboard payloads -- Google Docs ships hundreds of them around one
+ * paragraph, and this package pins 512 -- while costing about a third of the
+ * frames per level that the block descent does. One shared threshold would have
+ * to be set for the block path and would then truncate legitimate formatting.
+ */
+const MAX_INLINE_NESTING = 2048;
+
+let blockNesting = 0;
+let listNesting = 0;
+let inlineNesting = 0;
+
+/**
+ * The text of a subtree, gathered with a cursor.
+ *
+ * Not `textContent`: the DOM implementation this package is tested against
+ * computes that by recursing per level, so reading it off the very subtree the
+ * bound above exists to protect overflowed the stack anyway -- the bound held
+ * and the salvage step blew up instead. A TreeWalker steps, so it does not.
+ */
+function subtreeText(node: Node): string {
+  const walker = node.ownerDocument?.createTreeWalker(node, SHOW_TEXT | SHOW_ELEMENT, {
+    acceptNode: (candidate) =>
+      SKIP_TAGS.has(tagNameOf(candidate))
+        ? FILTER_REJECT
+        : candidate.nodeType === TEXT_NODE
+          ? FILTER_ACCEPT
+          : FILTER_SKIP,
+  });
+
+  if (!walker) {
+    return '';
+  }
+
+  let text = '';
+
+  for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
+    text += found.nodeValue ?? '';
+  }
+
+  return text;
+}
+
 function walk(
   node: Node,
   marks: Mark[],
@@ -419,7 +493,24 @@ function walk(
       nextLink = sanitizeUrl(element.getAttribute('href') ?? '') ?? undefined;
     }
 
-    walk(element, nextMarks, nextLink, root, out, skip);
+    // The inline walk recurses per element too, and shares the stack with the
+    // block descent above it, so it takes the same bound. Past it the subtree's
+    // text is taken whole rather than dropped -- one pass, no further frames.
+    if (inlineNesting >= MAX_INLINE_NESTING) {
+      const remainder = subtreeText(element);
+
+      if (remainder.length > 0) {
+        out.push({ text: remainder, marks: [...nextMarks], link: nextLink });
+      }
+    } else {
+      inlineNesting += 1;
+
+      try {
+        walk(element, nextMarks, nextLink, root, out, skip);
+      } finally {
+        inlineNesting -= 1;
+      }
+    }
 
     if (isBlock && hasContentAfter(element, root, skip)) {
       breakLine(out, marks, link);
@@ -1409,6 +1500,15 @@ function pushCallout(out: Block[], element: Element, depth: number, icon: string
  * Whatever else it contains is nested one level deeper, so a `<details>` from
  * anywhere else keeps its structure rather than collapsing into one block.
  */
+/** Everything left below the bound, as one block rather than none. */
+function pushRemainder(out: Block[], node: Node, depth: number): void {
+  const text = subtreeText(node);
+
+  if (text.trim().length > 0) {
+    out.push(createBlock('paragraph', text, depth));
+  }
+}
+
 function visitDetails(doc: Document, element: Element, depth: number, out: Block[]): void {
   const summary = element.querySelector('summary');
   const block = createBlock(
@@ -1553,6 +1653,30 @@ function visitListItem(
   out: Block[],
   declared = false,
 ): void {
+  // `visitList` and `visitListItem` call each other without passing through
+  // `visitBlocks`, so the bound has to be taken here as well or a nested list
+  // walks straight past `MAX_BLOCK_NESTING` entirely.
+  if (listNesting >= MAX_LIST_NESTING) {
+    pushRemainder(out, item, depthOf(item, depth));
+    return;
+  }
+
+  listNesting += 1;
+
+  try {
+    visitListItemInner(item, fallback, depth, out, declared);
+  } finally {
+    listNesting -= 1;
+  }
+}
+
+function visitListItemInner(
+  item: Element,
+  fallback: BlockType,
+  depth: number,
+  out: Block[],
+  declared: boolean,
+): void {
   const itemDepth = depthOf(item, depth);
   const nested = childLists(item);
   const checkbox = findWithin(
@@ -1619,6 +1743,27 @@ function visitList(list: Element, depth: number, out: Block[]): void {
  * so stray text at the top level is not silently dropped.
  */
 function visitBlocks(doc: Document, node: Node, depth: number, out: Block[], exclude?: Node): void {
+  if (blockNesting >= MAX_BLOCK_NESTING) {
+    pushRemainder(out, node, depth);
+    return;
+  }
+
+  blockNesting += 1;
+
+  try {
+    visitBlocksInner(doc, node, depth, out, exclude);
+  } finally {
+    blockNesting -= 1;
+  }
+}
+
+function visitBlocksInner(
+  doc: Document,
+  node: Node,
+  depth: number,
+  out: Block[],
+  exclude?: Node,
+): void {
   let buffer: Node[] = [];
 
   const flushInline = (): void => {
@@ -1774,6 +1919,12 @@ export function blocksFromHtml(doc: Document, html: string): Block[] {
   template.innerHTML = html;
 
   const out: Block[] = [];
+  // Reset rather than trust the last run: an exception thrown out of a walk
+  // unwinds the try/finally pairs, but a future caller that catches one would
+  // otherwise inherit a counter that never came back to zero.
+  blockNesting = 0;
+  listNesting = 0;
+  inlineNesting = 0;
   visitBlocks(doc, template.content, 0, out);
 
   return out;
