@@ -430,6 +430,17 @@ export function normalizeDocument(doc: Partial<NEditorDocument> | undefined): NE
           : 0,
       };
 
+      // A code block is literal text in both serializers: `toMarkdown` writes a
+      // fence, whose content CommonMark reads back verbatim, and
+      // `blocksFromHtml` takes a <pre> as its text. Formatting held here
+      // survived in the model and in nothing else -- `blocksToHtml` wrote an
+      // <a> inside the <pre> that reading the same clipboard back discarded --
+      // so it is dropped at the boundary rather than kept until a round trip
+      // silently loses it.
+      if (normalized.type === 'code') {
+        normalized.content = normalizeRuns(normalized.content.map((run) => ({ text: run.text })));
+      }
+
       if (normalized.type === 'todo') {
         normalized.checked = block.checked === true;
       }
@@ -583,8 +594,10 @@ export function setBlockType(blocks: readonly Block[], id: string, type: BlockTy
     if (isVoidType(type) || isTableType(type)) {
       next.content = [];
     } else if (type === 'code' && CODE_BLOCK_STRIPS_MARKS) {
-      // A code block is uniformly monospace, so inline marks would be noise.
-      next.content = normalizeRuns(next.content.map((run) => ({ text: run.text, link: run.link })));
+      // A code block is uniformly monospace, so inline marks would be noise --
+      // and a link fares no better: neither serializer can carry one through a
+      // fence or a <pre>, so keeping it here only defers losing it.
+      next.content = normalizeRuns(next.content.map((run) => ({ text: run.text })));
     }
 
     // Converting a block to the type it already is changes nothing, and the

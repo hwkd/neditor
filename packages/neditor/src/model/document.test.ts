@@ -490,3 +490,59 @@ describe('normalizeDocument is the boundary, so it degrades instead of throwing'
     }
   });
 });
+
+describe('a code block holds what its serializers can carry, and no more', () => {
+  /**
+   * `toMarkdown` writes a fence, and CommonMark reads a fence's content
+   * verbatim; `blocksFromHtml` takes a `<pre>` as its text. Marks and links
+   * held here therefore survived in the model and nowhere else --
+   * `blocksToHtml` wrote an `<a>` inside the `<pre>` that reading the same
+   * clipboard back discarded, so a copy-paste destroyed it silently.
+   */
+  test('normalizeDocument drops formatting a fence cannot carry', () => {
+    const doc = normalizeDocument({
+      blocks: [
+        {
+          id: 'c',
+          type: 'code',
+          depth: 0,
+          content: [{ text: 'see docs', marks: ['bold'], link: 'https://a.test/x' }],
+        } as unknown as Block,
+      ],
+    });
+
+    expect(doc.blocks[0]?.content).toEqual([{ text: 'see docs' }]);
+  });
+
+  test('converting a formatted block to code drops it too', () => {
+    const blocks = setBlockType(
+      [
+        {
+          id: 'p',
+          type: 'paragraph',
+          depth: 0,
+          content: [{ text: 'see docs', marks: ['bold'], link: 'https://a.test/x' }],
+        },
+      ],
+      'p',
+      'code',
+    );
+
+    expect(blocks[0]?.content).toEqual([{ text: 'see docs' }]);
+  });
+
+  test('every other block type keeps its link', () => {
+    const doc = normalizeDocument({
+      blocks: [
+        {
+          id: 'p',
+          type: 'paragraph',
+          depth: 0,
+          content: [{ text: 'see docs', link: 'https://a.test/x' }],
+        } as unknown as Block,
+      ],
+    });
+
+    expect(doc.blocks[0]?.content[0]?.link).toBe('https://a.test/x');
+  });
+});

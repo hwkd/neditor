@@ -793,3 +793,32 @@ describe('a destination carrying many "](" pairs', () => {
     expect(href(source)).toBe(url(12));
   });
 });
+
+describe('a GFM delimiter row as GFM actually defines it', () => {
+  /**
+   * The cell is `-` one or more times with optional colons. Requiring three
+   * turned the compact spellings -- what someone typing a table by hand
+   * reaches for, and what several generators emit -- into a paragraph of pipes,
+   * while the README promises GFM tables paste as tables.
+   */
+  test.each([
+    ['single hyphens', '| - | - |'],
+    ['two hyphens', '| -- | -- |'],
+    ['three, as before', '| --- | --- |'],
+    ['left and right alignment, compact', '|:-|-:|'],
+    ['centred', '| :---: | --- |'],
+    ['no padding', '|-|-|'],
+  ])('%s makes a table', (_name, divider) => {
+    const blocks = blocksFromMarkdown(`| a | b |\n${divider}\n| c | d |`);
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.type).toBe('table');
+    expect(blocks[0]?.rows?.[1]?.[1]).toEqual([{ text: 'd' }]);
+  });
+
+  test('a row of pipes that is not a delimiter is still not a table', () => {
+    const blocks = blocksFromMarkdown('| a | b |\n| c | d |');
+
+    expect(blocks.every((one) => one.type !== 'table')).toBe(true);
+  });
+});

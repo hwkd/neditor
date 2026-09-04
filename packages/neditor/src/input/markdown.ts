@@ -70,8 +70,15 @@ const IMAGE_LINE = /^!\[((?:\\.|[^\]\n])*)\]\((?:<([^<>\n]*)>|([^)\s]+))\)$/;
 /** A GFM table row; the leading pipe is what identifies one. */
 const TABLE_ROW = /^\|/;
 
-/** The `| --- | --- |` line, which is alignment rather than content. */
-const TABLE_DIVIDER_CELL = /^:?-{3,}:?$/;
+/**
+ * The `| --- | --- |` line, which is alignment rather than content.
+ *
+ * One hyphen is enough. GFM's delimiter cell is `-` repeated one or more times
+ * with optional colons, and requiring three silently turned `| - | - |` -- the
+ * spelling anyone typing a table by hand reaches for, and what several
+ * generators emit -- into a paragraph of pipes.
+ */
+const TABLE_DIVIDER_CELL = /^:?-+:?$/;
 
 /** Splits a GFM row on unescaped pipes and unescapes the rest. */
 function splitTableRow(line: string): string[] {
