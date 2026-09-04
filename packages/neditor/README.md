@@ -572,7 +572,13 @@ quote, and an icon that is not an emoji still names a callout.
 
 Tables and images are faithful in both formats — a GFM table pasted as plain text
 becomes a real table, cell formatting included, and a ragged one is squared off
-rather than rejected.
+rather than rejected. The delimiter row is read as GFM defines it, so `| - | - |`
+works as well as `| --- | --- |`, with or without alignment colons.
+
+One GFM allowance is not implemented: a row must keep its outer pipes. Deciding
+that `a | b` starts a table means looking ahead to the next line for a delimiter
+row, and this reader works a line at a time — so the stricter rule stands rather
+than risk turning a sentence containing a pipe into a table.
 
 The Markdown writer is defensive wherever the format is ambiguous, so what it
 writes is what `blocksFromMarkdown` reads back:
