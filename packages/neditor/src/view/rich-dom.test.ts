@@ -1198,3 +1198,39 @@ describe('source layout around a pushed-inward wrapper', () => {
     expect(texts(wrapped)).toEqual(texts(byHand));
   });
 });
+
+describe('a sealed block reads its whole subtree, so nothing in it is layout', () => {
+  const cellRuns = (html: string): unknown =>
+    blocksFromHtml(document, html).map((b) => (b.type === 'table' ? b.rows : (b.content ?? [])));
+
+  test('a wrapped table cell equals the hand-distributed spelling', () => {
+    // Inside <td>/<li>/<blockquote> parseRichText takes the whole subtree as
+    // one block's text, so popping the whitespace out of the shell left it
+    // stripped of the wrapper's marks and split one run into three.
+    const wrapped = '<b><table><tr><td><span>Cell</span>\n<p>para</p></td></tr></table></b>';
+    const byHand = '<table><tr><td><b><span>Cell</span>\n</b><p><b>para</b></p></td></tr></table>';
+
+    expect(cellRuns(wrapped)).toEqual(cellRuns(byHand));
+  });
+
+  test('a link keeps its href across the break inside a blockquote', () => {
+    const runs = blocksFromHtml(
+      document,
+      '<a href="https://e.com/"><blockquote><i>Q</i>\n<ul><li>L</li></ul></blockquote></a>',
+    )[0]!.content;
+
+    for (const run of runs) {
+      expect(run.link).toBe('https://e.com/');
+    }
+  });
+
+  test('an unsealed container still drops its indentation', () => {
+    // The narrowing must not undo what it narrowed: a <footer> is not sealed.
+    const wrapped = blocksFromHtml(
+      document,
+      '<footer>\n  <em>emph</em>\n  <ul><li>i</li></ul>\n</footer>',
+    );
+
+    expect((wrapped[0]?.content ?? []).map((r) => r.text)).toEqual(['emph']);
+  });
+});

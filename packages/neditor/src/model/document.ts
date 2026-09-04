@@ -992,7 +992,11 @@ export function toMarkdown(doc: NEditorDocument): string {
           // space after it, so a triangle behind whitespace still lands where a
           // toggle's marker is read. Anchored tighter, `-  ▾ x` came back as a
           // toggle with the triangle eaten.
-          return marked('-', text.replace(/^(\s*)([\u25B8\u25BE])/, '$1\\$2'));
+          // The prefix skips escaped soft breaks as well as spaces: a leading
+          // newline is written `\` + newline, so a bare `\s*` stopped at that
+          // backslash, wrote no escape, and the triangle behind it was read as
+          // a toggle marker.
+          return marked('-', text.replace(/^((?:\\\n|\s)*)([\u25B8\u25BE])/, '$1\\$2'));
         case 'numbered_list':
           return marked(`${numbers.get(block.id) ?? 1}.`);
         case 'todo':

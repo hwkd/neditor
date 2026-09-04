@@ -1127,7 +1127,12 @@ function distributeFormatting(
     //   * only whitespace carrying a line break. That is what pretty-printing
     //     leaves behind; a bare space between two elements is the author's, and
     //     hand-writing keeps it.
-    while (atBlock && run.length > 0 && isIndentation(run[run.length - 1]!)) {
+    //   * never inside a sealed block. There `parseRichText` reads the whole
+    //     subtree as one block's text, so nothing in it is invisible layout:
+    //     popped out of the shell, the whitespace came back stripped of the
+    //     wrapper's marks and href and split one run into three — a pasted
+    //     table cell read `Cell` bold, `\n` plain, `para` bold.
+    while (atBlock && !sealed && run.length > 0 && isIndentation(run[run.length - 1]!)) {
       run.pop();
     }
 

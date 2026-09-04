@@ -431,3 +431,23 @@ describe('a bullet whose text opens with a toggle marker', () => {
     ).toBe('press ▾ now');
   });
 });
+
+describe('a bullet whose triangle sits behind a soft break', () => {
+  const bullet = (text: string): Block => ({
+    id: 'b',
+    type: 'bulleted_list',
+    depth: 0,
+    content: [{ text }],
+  });
+
+  test.each(['\n▾ x', '\n\n▸ y', ' ▾ x', '▾ x'])('stays a bullet: %j', (text) => {
+    // escapeMarkdownText writes a leading newline as `\` + newline, so a bare
+    // `\s*` prefix stopped at that backslash and never escaped the triangle.
+    const back = normalizeDocument({
+      blocks: blocksFromMarkdown(toMarkdown({ blocks: [bullet(text)] })),
+    }).blocks[0]!;
+
+    expect(back.type).toBe('bulleted_list');
+    expect(blockText(back)).toContain(text.trim().charAt(0));
+  });
+});
