@@ -361,3 +361,60 @@ describe('one armed-formatting keystroke is one history entry', () => {
     expect(rows[0]?.[0]).toEqual([{ text: 'A' }, { text: 'x', marks: ['bold'] }]);
   });
 });
+
+describe('an edit that sets a field to the value it already holds is not an edit', () => {
+  /**
+   * `#commit` recognises a no-op by reference, and every model operation
+   * returned a freshly spread block whether or not the patch changed anything.
+   * So re-picking the callout icon already showing, re-applying an image dialog
+   * nobody touched, or re-setting the link already there each banked an undo
+   * entry and emitted a `change` byte-identical to the document before it --
+   * which an autosave listener writes back as the author's next revision.
+   */
+  test('re-picking the icon a callout already has banks nothing', () => {
+    const editor = mount([
+      block({ id: 'c', type: 'callout', icon: '💡', content: [{ text: 'note' }] }),
+    ]);
+    const changes: unknown[] = [];
+    editor.on('change', (doc) => changes.push(doc));
+
+    editor.setCalloutIcon('c', '💡');
+
+    expect(editor.canUndo, 'a no-op icon pick must not be undoable').toBe(false);
+    expect(changes).toHaveLength(0);
+  });
+
+  test('a different icon still records exactly one entry', () => {
+    const editor = mount([
+      block({ id: 'c', type: 'callout', icon: '💡', content: [{ text: 'note' }] }),
+    ]);
+    const changes: unknown[] = [];
+    editor.on('change', (doc) => changes.push(doc));
+
+    editor.setCalloutIcon('c', '🔥');
+
+    expect(editor.canUndo).toBe(true);
+    expect(changes).toHaveLength(1);
+    expect(editor.getDocument().blocks[0]?.icon).toBe('🔥');
+  });
+
+  test('converting a block to the type it already is banks nothing', () => {
+    const editor = mount([block({ id: 'p', content: [{ text: 'text' }] })]);
+    const changes: unknown[] = [];
+    editor.on('change', (doc) => changes.push(doc));
+
+    editor.setBlockType('p', 'paragraph');
+
+    expect(editor.canUndo).toBe(false);
+    expect(changes).toHaveLength(0);
+  });
+
+  test('a real conversion still records exactly one entry', () => {
+    const editor = mount([block({ id: 'p', content: [{ text: 'text' }] })]);
+
+    editor.setBlockType('p', 'heading1');
+
+    expect(editor.canUndo).toBe(true);
+    expect(editor.getDocument().blocks[0]?.type).toBe('heading1');
+  });
+});

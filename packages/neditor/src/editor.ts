@@ -371,6 +371,15 @@ export interface SelectionState {
   readonly range: OffsetRange;
   readonly marks: readonly Mark[];
   readonly link: string | null;
+  /**
+   * Which table cell the selection is in, absent outside a table.
+   *
+   * `focusRange` takes this as its fourth argument and resolves a table without
+   * it to the first cell, so leaving it out of the state made the documented
+   * save/restore pair silently wrong inside a table: restoring put the caret in
+   * the header and the next `toggleMark` formatted that cell instead.
+   */
+  readonly cell?: CellCoords;
 }
 
 export interface NEditorEvents {
@@ -982,6 +991,7 @@ export class NEditor {
       range,
       marks,
       link: richActiveLink(content, range.start, range.end),
+      ...(target.cell ? { cell: target.cell } : {}),
     };
   }
 
@@ -1130,6 +1140,13 @@ export class NEditor {
 
   /** Converts a block to another type, the same edit the slash menu performs. */
   setBlockType(id: string, type: BlockType): void {
+    // Every other public mutator asks this; this one did not, so a host that
+    // kept a block-type control wired across an edit/preview toggle rewrote a
+    // read-only document and fired `change` for it.
+    if (!this.#canEdit()) {
+      return;
+    }
+
     this.#commit(setBlockType(this.#blocks, id, type));
     this.focus(id, CARET_END);
     this.#announce(formatLabel(this.#labels.changedTo, { type: this.#typeName(type) }));

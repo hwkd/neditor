@@ -1,4 +1,4 @@
-import type { RichText } from './rich-text.ts';
+import type { RichText, TextRun } from './rich-text.ts';
 import { cloneRichText, normalizeRuns } from './rich-text.ts';
 
 /**
@@ -83,7 +83,17 @@ export function normalizeTableRows(value: unknown): TableRows {
   );
 
   return rows.map((row) =>
-    Array.from({ length: columns }, (_, index) => normalizeRuns((row[index] ?? []) as RichText)),
+    Array.from({ length: columns }, (_, index) => {
+      const cell = row[index];
+
+      // A cell that is not a list of runs is read as a single run, which
+      // `normalizeRuns` then keeps or drops on its own terms. Passing it
+      // straight through threw `runs is not iterable` out of `normalizeDocument`
+      // -- the one function documented as the untrusted-input boundary -- so a
+      // stored table whose cells were bare `{ text }` objects took down
+      // `createEditor` and `setDocument` with it and left a blank page.
+      return normalizeRuns(Array.isArray(cell) ? (cell as RichText) : [cell as TextRun]);
+    }),
   );
 }
 

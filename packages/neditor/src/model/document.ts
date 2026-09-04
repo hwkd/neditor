@@ -490,12 +490,42 @@ export function removeBlock(blocks: readonly Block[], id: string): Block[] {
   return blocks.filter((block) => block.id !== id);
 }
 
+/**
+ * Same own keys, each holding the same value by reference.
+ *
+ * `sameBlocks` compares blocks by reference, so a block rebuilt with identical
+ * contents reads as an edit. That is the deliberate conservative direction for
+ * content -- proving deep equality costs more than the spurious history entry
+ * -- but the scalar patches below are cheap to check and were the ones users
+ * hit: picking the callout icon already set, applying an image dialog with
+ * nothing changed, setting the link already there, or converting a block to the
+ * type it already is each banked an undo entry and emitted a byte-identical
+ * `change` for an autosave listener to write back as a new revision.
+ */
+function sameFields(a: Block, b: Block): boolean {
+  const keys = Object.keys(a);
+  const record = a as unknown as Record<string, unknown>;
+  const other = b as unknown as Record<string, unknown>;
+
+  return (
+    keys.length === Object.keys(b).length && keys.every((key) => Object.is(record[key], other[key]))
+  );
+}
+
 export function updateBlock(
   blocks: readonly Block[],
   id: string,
   patch: Partial<Omit<Block, 'id'>>,
 ): Block[] {
-  return blocks.map((block) => (block.id === id ? { ...block, ...patch } : block));
+  return blocks.map((block) => {
+    if (block.id !== id) {
+      return block;
+    }
+
+    const next = { ...block, ...patch };
+
+    return sameFields(block, next) ? block : next;
+  });
 }
 
 /** Converts a block to another type, clearing state that does not apply. */
@@ -557,7 +587,12 @@ export function setBlockType(blocks: readonly Block[], id: string, type: BlockTy
       next.content = normalizeRuns(next.content.map((run) => ({ text: run.text, link: run.link })));
     }
 
-    return next;
+    // Converting a block to the type it already is changes nothing, and the
+    // caller should not record history for it. `cloneTableRows` above makes a
+    // table's `rows` a fresh array, so a table-to-table conversion still reads
+    // as an edit -- the conservative direction, and the same one `sameBlocks`
+    // takes for content.
+    return sameFields(block, next) ? block : next;
   });
 }
 

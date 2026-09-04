@@ -451,3 +451,42 @@ describe('a bullet whose triangle sits behind a soft break', () => {
     expect(blockText(back)).toContain(text.trim().charAt(0));
   });
 });
+
+describe('normalizeDocument is the boundary, so it degrades instead of throwing', () => {
+  /**
+   * A table cell is an array of runs. A stored document whose cells are bare
+   * `{ text }` objects -- a plausible hand-written or legacy shape -- reached
+   * `normalizeRuns` unguarded and threw `runs is not iterable`, which took
+   * `createEditor` and `setDocument` down with it and left the host element
+   * empty. Every other malformed field already degraded quietly; this was the
+   * one that crashed.
+   */
+  test('a table whose cells are single runs is read, not thrown on', () => {
+    const doc = normalizeDocument({
+      blocks: [
+        {
+          id: 't1',
+          type: 'table',
+          depth: 0,
+          content: [],
+          rows: [[{ text: 'Name' }, { text: 'Qty' }]],
+        } as unknown as Block,
+      ],
+    });
+
+    expect(doc.blocks[0]?.rows?.[0]?.[0]).toEqual([{ text: 'Name' }]);
+    expect(doc.blocks[0]?.rows?.[0]?.[1]).toEqual([{ text: 'Qty' }]);
+  });
+
+  test('a cell holding something that is not a run at all becomes empty', () => {
+    for (const cell of [42, true, 'text']) {
+      const doc = normalizeDocument({
+        blocks: [
+          { id: 't', type: 'table', depth: 0, content: [], rows: [[cell]] } as unknown as Block,
+        ],
+      });
+
+      expect(doc.blocks[0]?.rows?.[0]?.[0], `cell ${JSON.stringify(cell)}`).toEqual([]);
+    }
+  });
+});

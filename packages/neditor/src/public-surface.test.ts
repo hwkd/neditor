@@ -380,3 +380,77 @@ describe('the package stylesheet is a default, not an override', () => {
     theirs.remove();
   });
 });
+
+describe('editable: false covers every public mutator', () => {
+  /**
+   * `setBlockType` was the one that never asked. A host that keeps a block-type
+   * control wired across an edit/preview toggle rewrote the read-only document
+   * and fired `change` for it -- which the README names as the exact thing
+   * `editable: false` promises not to do.
+   */
+  test('setBlockType does not rewrite a read-only document', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'hello' }] })], { editable: false });
+    const changes: unknown[] = [];
+    editor.on('change', (doc) => changes.push(doc));
+
+    editor.setBlockType('a', 'heading1');
+
+    expect(editor.getDocument().blocks[0]?.type).toBe('paragraph');
+    expect(changes).toHaveLength(0);
+    expect(editor.canUndo).toBe(false);
+  });
+
+  test('it still converts when the editor is editable', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'hello' }] })]);
+
+    editor.setBlockType('a', 'heading1');
+
+    expect(editor.getDocument().blocks[0]?.type).toBe('heading1');
+  });
+});
+
+describe('the selection a host saves is the selection it gets back', () => {
+  /**
+   * `getSelectionState()` and `focusRange()` are the documented save/restore
+   * pair for "stash the selection, open my own dialog, put it back". Inside a
+   * table the state omitted the cell, and `focusRange` resolves a table without
+   * one to its first cell -- so the restore silently moved the caret into the
+   * header and the next `toggleMark` formatted that cell instead of the user's.
+   */
+  test('a selection inside a table cell restores to that cell', () => {
+    const editor = mount([
+      block({
+        id: 'tbl',
+        type: 'table',
+        rows: [
+          [[{ text: 'H1' }], [{ text: 'H2' }]],
+          [[{ text: 'a1' }], [{ text: 'b1' }]],
+        ],
+      }),
+    ]);
+    const cell = editor.element.querySelector<HTMLElement>('[data-cell="1:1"]')!;
+    cell.focus();
+    const range = document.createRange();
+    range.selectNodeContents(cell);
+    const selection = getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    const state = editor.getSelectionState()!;
+
+    expect(state.cell, 'the state must say which cell it was read from').toEqual({
+      row: 1,
+      column: 1,
+    });
+
+    editor.focusRange(state.blockId, state.range.start, state.range.end, state.cell);
+    editor.toggleMark('bold');
+
+    const rows = editor.getDocument().blocks[0]!.rows!;
+
+    expect(rows[1]?.[1]?.[0]?.marks, 'the mark belongs to the cell the user was in').toEqual([
+      'bold',
+    ]);
+    expect(rows[0]?.[0]?.[0]?.marks ?? []).toEqual([]);
+  });
+});
