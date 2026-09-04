@@ -51,11 +51,11 @@
     "access": "public"
   },
   "scripts": {
-    "build": "vp pack && node scripts/emit-css.mjs",
+    "build": "vp pack && node scripts/emit-css.mjs && node scripts/check-dts.mjs",
     "dev": "vp pack --watch",
     "test": "vp test --run",
     "prepack": "vp pack && node scripts/emit-css.mjs",
-    "prepublishOnly": "vp test --run"
+    "prepublishOnly": "vp test --run && node scripts/check-dts.mjs"
   },
   "devDependencies": {
     "happy-dom": "catalog:",

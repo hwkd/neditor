@@ -30,7 +30,7 @@ export type { NEditorEvents, NEditorOptions, SelectionState } from './editor.ts'
  * exporting it, which is why this is not a plain re-export; exporting it there
  * and re-exporting it here would say the same thing more directly.
  */
-export type CellCoords = NonNullable<Parameters<NEditor['focusRange']>[3]>;
+export type { CellCoords } from './editor.ts';
 
 export type { Block, BlockType, NEditorDocument } from './model/document.ts';
 export type { HistoryEntry, HistoryState, SelectionSnapshot } from './model/history.ts';

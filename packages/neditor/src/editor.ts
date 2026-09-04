@@ -142,7 +142,7 @@ export interface NEditorOptions {
 }
 
 /** Where a table cell sits, row-major, as `data-cell="row:column"` carries it. */
-interface CellCoords {
+export interface CellCoords {
   readonly row: number;
   readonly column: number;
 }
