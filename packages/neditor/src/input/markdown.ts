@@ -171,21 +171,20 @@ const CLOSERS = new Set(['*', '_', '~', '`', '>', ')']);
 const RUN_WINDOW = 32;
 
 /**
- * How much run-shuffling one block may spend keeping a long span reachable.
+ * How far back one span may reach, in runs.
  *
  * Reaching past the window costs a recall and a rebuild of everything it pulls
  * in, so spans that nest over one stretch of text — `[[[[…](u)](u)](u)` — make
  * the pass quadratic. Unbounded, 176KB of that took 47 seconds on the paste
- * handler's own thread: the hostile-clipboard hang this parser was rewritten
- * to remove, reappearing on the other input path.
+ * handler's own thread.
  *
- * At this budget a single span still closes over roughly 400 inner spans (~3KB
- * of already-formatted text) and the pathological case costs under a second.
- * Past it the scan stops honouring an opener beyond the window and its
- * delimiters stay in the text — the old fixed-cut behaviour, but at 400 spans
- * rather than 32 runs, and only for input pathological enough to earn it.
+ * A bound on the total a block may spend was the first answer and the wrong
+ * one: it never reset, so it latched, and an ordinary long document silently
+ * stopped closing its spans once the SUM of ordinary reaches crossed it. This
+ * bounds each reach instead, which is what makes the pass linear — n matches
+ * paying at most this each — and leaves a document of any length alone.
  */
-const RECALL_BUDGET = 2000;
+const RECALL_REACH = 800;
 
 /**
  * Characters that can open an inline rule.
@@ -335,14 +334,6 @@ export function parseInlineMarkdown(text: string): RichText {
   let opens: number[] = [];
   let openFrom = 0;
   let origin = 0;
-  // How many runs have been dragged back so a span could reach past the window.
-  // Each recall is followed by a rebuild of everything it pulled in, so the
-  // work is quadratic in how often a long reach is exercised — nested spans
-  // over one stretch of text (`[[[[…](u)](u)`) made a 176KB paste take 47s on
-  // the paste handler's own thread. Past the budget the window stops honouring
-  // an opener that far back, which is what the fixed 32-run cut used to do:
-  // the same degradation, but only for input pathological enough to earn it.
-  let recalled = 0;
   let retired = false;
 
   const flush = (): void => {
@@ -422,7 +413,6 @@ export function parseInlineMarkdown(text: string): RichText {
     }
 
     if (back.length > 0) {
-      recalled += back.length;
       content = [...back.reverse(), ...content];
     }
   };
@@ -462,14 +452,18 @@ export function parseInlineMarkdown(text: string): RichText {
       return;
     }
 
-    const open = recalled > RECALL_BUDGET ? undefined : opens[openFrom];
+    const open = opens[openFrom];
     const barrier = open === undefined ? matchable.length : open - origin - 1;
     let cut = 0;
 
     while (recallable > 0) {
       const length = done[done.length - recallable]!.text.length;
+      // Past the reach the cut happens whatever is still open. Each recall is
+      // followed by a rebuild of everything it pulled in, so this is what keeps
+      // one span's reach from being charged to every match after it.
+      const forced = recallable > RECALL_REACH;
 
-      if (cut + length > barrier) {
+      if (!forced && cut + length > barrier) {
         break;
       }
 

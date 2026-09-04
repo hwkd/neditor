@@ -678,6 +678,24 @@ describe('a span that reaches back is bounded work, not unbounded', () => {
     expect(runs.map((run) => run.text).join('')).not.toContain('~~');
   });
 
+  test('a long line of ordinary links keeps every one of them', () => {
+    // The first bound was cumulative and never reset, so it latched: once the
+    // SUM of ordinary reaches crossed it, every later span in the block
+    // silently stopped closing and its markup stayed as text. Each link here
+    // wraps 150 words, well past the window, so each one really does reach
+    // back — which is what made the sum grow. Bounding each reach instead
+    // leaves a document of any length alone.
+    const passage = (n: number): string =>
+      Array.from({ length: 150 }, (_, i) => (i % 2 === 1 ? `**w${i}**` : `w${i}`)).join(' ') +
+      `](https://x.test/${n})`;
+    const source = Array.from({ length: 20 }, (_, n) => `[${passage(n)}`).join(' sep ');
+
+    const runs = blocksFromMarkdown(source)[0]!.content;
+
+    expect(runs.every((run) => run.link !== undefined || run.text.trim() === 'sep')).toBe(true);
+    expect(runs.map((run) => run.text).join('')).not.toContain('](https://x.test/');
+  });
+
   test('ordinary documents never reach the budget at all', () => {
     const links = Array.from({ length: 500 }, (_, i) => `[l${i}](https://a.test/${i})`).join(' ');
     const started = performance.now();

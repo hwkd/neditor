@@ -873,6 +873,17 @@ const DISTRIBUTED = new WeakSet<Element>();
  * and a wrapper inside it is reached and pushed inward there.
  */
 function sealsFormatting(element: Element, tag: string): boolean {
+  // A seal says `parseRichText` will read this whole subtree as one block's
+  // text. For most of SEALED_TAGS that holds by construction, but `visitBlocks`
+  // dispatches neither FIGCAPTION nor SUMMARY by name — holding a block, they
+  // fall through to `containsBlockLevel` and are split like anything else. Left
+  // sealed there, the same caption parsed differently depending only on whether
+  // an inline wrapper happened to reach it first. `FIGURE` already carried this
+  // qualification; these two needed the same one.
+  if (tag === 'FIGCAPTION' || tag === 'SUMMARY') {
+    return !containsBlockLevel(element);
+  }
+
   return SEALED_TAGS.has(tag) || (tag === 'FIGURE' && containsImage(element));
 }
 

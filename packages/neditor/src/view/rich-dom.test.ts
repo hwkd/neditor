@@ -1302,3 +1302,31 @@ describe('startsBlock agrees with visitBlocks', () => {
     expect(runs[0]?.map((r) => r.t).join('')).toContain(' ');
   });
 });
+
+describe('a caption that holds a block is not sealed', () => {
+  const texts = (html: string): unknown =>
+    blocksFromHtml(document, html).map((b) => (b.content ?? []).map((r) => r.text));
+
+  const CAPTION =
+    '<figure><figcaption><a href="https://x.test/1"><i>A</i>\n<p>B</p></a></figcaption></figure>';
+  const SUMMARY =
+    '<details><summary><a href="https://x.test/1"><i>A</i>\n<p>B</p></a></summary></details>';
+
+  test.each([
+    ['figcaption', CAPTION],
+    ['summary', SUMMARY],
+  ])('%s parses the same wrapped or not', (_name, html) => {
+    // Sealing says parseRichText reads the whole subtree as one block, but
+    // visitBlocks dispatches neither tag by name — holding a block, they split
+    // like anything else. Sealed anyway, the same caption parsed differently
+    // depending only on whether an inline wrapper reached it first.
+    expect(texts(`<b>${html}</b>`)).toEqual(texts(html));
+    expect(texts(`<code>${html}</code>`)).toEqual(texts(html));
+  });
+
+  test('a caption with no block in it is still sealed', () => {
+    expect(texts('<b><figure><em>x</em>\n<figcaption>Cap</figcaption></figure></b>')).toEqual(
+      texts('<figure><b><em>x</em>\n</b><figcaption><b>Cap</b></figcaption></figure>'),
+    );
+  });
+});
