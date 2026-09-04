@@ -53,7 +53,12 @@ export class IconPicker {
   constructor(doc: Document, hooks: IconPickerHooks, labels: NEditorLabels) {
     this.#hooks = hooks;
     // Contains an input, so it must be allowed to take focus.
-    this.#element = createPortal(doc, 'neditor-icon-picker', { keepFocus: false });
+    this.#element = createPortal(doc, 'neditor-icon-picker', {
+      keepFocus: false,
+      onEscape: () => {
+        this.#hooks.onDismiss();
+      },
+    });
     this.#element.setAttribute('role', 'dialog');
     this.#element.setAttribute('aria-label', labels.iconDialog);
 

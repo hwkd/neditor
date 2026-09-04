@@ -112,6 +112,9 @@ function contentTagFor(type: BlockType): string {
   }
 }
 
+/** Distinguishes the DOM ids of editors that share a page. */
+let instances = 0;
+
 export class Renderer {
   readonly #root: HTMLElement;
   readonly #hooks: RendererHooks;
@@ -125,10 +128,28 @@ export class Renderer {
 
   readonly #labels: NEditorLabels;
 
+  /** This renderer's slot in `instances`, fixed for its lifetime. */
+  readonly #instance: number;
+
   constructor(root: HTMLElement, hooks: RendererHooks, labels: NEditorLabels) {
     this.#root = root;
     this.#hooks = hooks;
     this.#labels = labels;
+    instances += 1;
+    this.#instance = instances;
+  }
+
+  /**
+   * A document-unique id for a block's content element.
+   *
+   * Block ids are unique within a document, not within a page, and keeping them
+   * stable across a published/draft pair is the point of them. Two editors over
+   * the same document therefore emitted the same `id` twice, and every
+   * `aria-labelledby` resolves to the first match in the document -- so the
+   * second editor's to-do announced the first editor's text.
+   */
+  #domId(blockId: string): string {
+    return `neditor-${this.#instance}-${blockId}-content`;
   }
 
   /**
@@ -154,7 +175,12 @@ export class Renderer {
         host.contentEditable = flag;
       }
 
-      host.setAttribute('aria-readonly', String(!this.#editable));
+      // Deliberately no `aria-readonly`. These hosts are h1/h2/h3, blockquote,
+      // pre, div, figcaption and table cells -- none of whose roles permit it,
+      // so browsers drop it and axe reports a critical `aria-allowed-attr`
+      // violation on every block of every instance. `contenteditable` already
+      // tells assistive technology whether the field takes input, which is the
+      // thing the attribute was trying to say.
     }
 
     // A control that cannot act is not an offer. Both image buttons open a
@@ -302,7 +328,7 @@ export class Renderer {
     // and erase the h1/h2/h3/blockquote semantics the tag was chosen for, so
     // heading navigation would report nothing. contenteditable already exposes
     // an editable text field on top of the element's own role.
-    content.id = `${block.id}-content`;
+    content.id = this.#domId(block.id);
 
     const placeholder = this.#labels.placeholders[block.type];
 
@@ -469,7 +495,7 @@ export class Renderer {
       checkbox.setAttribute('role', 'checkbox');
       // Named by the to-do's own text; the box itself is drawn entirely in CSS
       // and would otherwise announce as an unlabelled "checkbox".
-      checkbox.setAttribute('aria-labelledby', `${block.id}-content`);
+      checkbox.setAttribute('aria-labelledby', this.#domId(block.id));
       // Keeps the caret in the text when the checkbox is clicked.
       checkbox.tabIndex = -1;
       checkbox.addEventListener('mousedown', (event) => {

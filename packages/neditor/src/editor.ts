@@ -518,6 +518,9 @@ export class NEditor {
   /** True when the editor supplied the root's accessible name and owes it back. */
   readonly #ownsAriaLabel: boolean;
 
+  /** Whether the `role` that makes that name legal is ours to take away. */
+  #ownsRole = false;
+
   #blocks: Block[];
   #editable: boolean;
   #destroyed = false;
@@ -671,6 +674,18 @@ export class NEditor {
 
     if (this.#ownsAriaLabel) {
       this.#root.setAttribute('aria-label', options.label ?? this.#labels.editor);
+
+      // A bare <div> has the `generic` role, and ARIA 1.2 lists aria-label
+      // among the properties *prohibited* on it: the name is discarded, so the
+      // documented `label` option produced no accessible name at all. `group`
+      // is the lightest role that permits naming and does not displace the
+      // heading, list and table semantics the blocks inside carry -- the same
+      // reason `role="textbox"` is refused on the block hosts.
+      this.#ownsRole = !this.#root.hasAttribute('role');
+
+      if (this.#ownsRole) {
+        this.#root.setAttribute('role', 'group');
+      }
     }
     // Block selection has no caret, so the root itself must hold focus for
     // keystrokes to reach the editor.
@@ -1262,6 +1277,10 @@ export class NEditor {
     // never ours to remove.
     if (this.#ownsAriaLabel) {
       this.#root.removeAttribute('aria-label');
+    }
+
+    if (this.#ownsRole) {
+      this.#root.removeAttribute('role');
     }
   }
 

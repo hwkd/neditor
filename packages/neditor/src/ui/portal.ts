@@ -20,6 +20,16 @@ export interface PortalOptions {
    * block being edited. Portals that contain a focusable input opt out.
    */
   readonly keepFocus?: boolean;
+
+  /**
+   * Dismiss on Escape from anywhere inside, which a `role="dialog"` owes its
+   * user. Handled here rather than on each control: the dialogs bound it to
+   * their text input alone, so Escape did nothing while focus was on a preset
+   * swatch or an Apply button -- and those buttons are the last tab stops in
+   * the document, so tabbing off them left the dialog open over the editor with
+   * no way back to it.
+   */
+  readonly onEscape?: () => void;
 }
 
 export function createPortal(
@@ -35,6 +45,21 @@ export function createPortal(
   if (options.keepFocus ?? true) {
     element.addEventListener('mousedown', (event) => {
       event.preventDefault();
+    });
+  }
+
+  const { onEscape } = options;
+
+  if (onEscape) {
+    element.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+
+      event.preventDefault();
+      // The editor's own key handling must not also see this.
+      event.stopPropagation();
+      onEscape();
     });
   }
 

@@ -547,3 +547,70 @@ describe('a popover in a shadow root is not dismissed by its own pointer', () =>
     expect(popover.hidden).toBe(true);
   });
 });
+
+describe('Escape closes a dialog from anywhere inside it', () => {
+  /**
+   * All three of these carry `role="dialog"`, and bound Escape to their text
+   * input alone. Focus on a preset swatch or an Apply button -- and those
+   * buttons are the last tab stops in the document, since the portals mount on
+   * `document.body` -- and Escape did nothing, leaving the dialog open over the
+   * editor with nowhere left to tab.
+   */
+  const escape = (from: HTMLElement): boolean =>
+    !from.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+    );
+
+  test('the icon picker closes from a preset swatch', () => {
+    const editor = mount([block({ type: 'callout', content: [{ text: 'note' }] })]);
+    editor.element
+      .querySelector<HTMLElement>('.neditor-block__icon')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    const popover = portal('neditor-icon-picker');
+    const swatch = popover.querySelector<HTMLElement>('.neditor-icon-picker__icon')!;
+
+    expect(popover.hidden).toBe(false);
+    expect(escape(swatch), 'the dialog must consume the key it acts on').toBe(true);
+    expect(popover.hidden).toBe(true);
+  });
+
+  test('the image editor closes from its Apply button', () => {
+    const editor = mount([block({ type: 'image' })]);
+    editor.element
+      .querySelector<HTMLElement>('.neditor-image__placeholder')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    const popover = portal('neditor-image-editor');
+    const button = popover.querySelector<HTMLElement>('button')!;
+
+    expect(popover.hidden).toBe(false);
+    expect(escape(button)).toBe(true);
+    expect(popover.hidden).toBe(true);
+  });
+
+  test('the link editor closes from its Apply button', () => {
+    const editor = mount([block({ content: [{ text: 'linkable' }] })]);
+    selectIn(hosts(editor)[0]!, 0, 4);
+    editor.openLinkEditor();
+
+    const popover = portal('neditor-link-editor');
+    const button = popover.querySelector<HTMLElement>('button')!;
+
+    expect(popover.hidden).toBe(false);
+    expect(escape(button)).toBe(true);
+    expect(popover.hidden).toBe(true);
+  });
+
+  test('the text input inside one still closes it too', () => {
+    const editor = mount([block({ type: 'callout', content: [{ text: 'note' }] })]);
+    editor.element
+      .querySelector<HTMLElement>('.neditor-block__icon')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    const popover = portal('neditor-icon-picker');
+
+    expect(escape(popover.querySelector<HTMLElement>('input')!)).toBe(true);
+    expect(popover.hidden).toBe(true);
+  });
+});

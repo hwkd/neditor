@@ -458,3 +458,97 @@ describe('localisation', () => {
     );
   });
 });
+
+describe('ARIA the element is actually allowed to carry', () => {
+  /**
+   * The rule this file already holds elsewhere, applied to two attributes that
+   * were breaking it: an ARIA attribute a role does not permit is dropped by
+   * browsers, so it announces nothing while looking like coverage.
+   */
+  test('no aria-readonly on hosts whose roles forbid it', () => {
+    for (const editable of [true, false]) {
+      const editor = mount(
+        [
+          block({ id: 'h', type: 'heading1', content: [{ text: 'Title' }] }),
+          block({ id: 'p', content: [{ text: 'Body' }] }),
+          block({ id: 'q', type: 'quote', content: [{ text: 'Quoted' }] }),
+        ],
+        { editable },
+      );
+
+      expect(
+        editor.element.querySelectorAll('[aria-readonly]'),
+        `editable: ${editable}`,
+      ).toHaveLength(0);
+    }
+  });
+
+  test('contenteditable still says whether the field takes input', () => {
+    expect(
+      mount([block({ content: [{ text: 'x' }] })], { editable: false })
+        .element.querySelector('.neditor-block__content')
+        ?.getAttribute('contenteditable'),
+    ).toBe('false');
+  });
+
+  test('the root carries a role that permits the name it is given', () => {
+    const editor = mount([block({})], { label: 'Article body' });
+
+    expect(editor.element.getAttribute('aria-label')).toBe('Article body');
+    // `generic` -- a div with no role -- prohibits aria-label outright.
+    expect(editor.element.getAttribute('role')).toBe('group');
+  });
+
+  test("destroy() takes back the role it added, and leaves the page's own", () => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const mine = createEditor({ element: host, doc: { blocks: [block({})] } });
+    mine.destroy();
+
+    expect(host.hasAttribute('role')).toBe(false);
+
+    host.setAttribute('role', 'application');
+    const theirs = createEditor({ element: host, doc: { blocks: [block({})] } });
+    theirs.destroy();
+
+    expect(host.getAttribute('role')).toBe('application');
+    host.remove();
+  });
+});
+
+describe('two editors on one page do not collide in the document', () => {
+  /**
+   * Block ids are unique per document, and keeping them stable across a
+   * published/draft pair is the point of them -- so two editors over the same
+   * document emitted the same DOM `id` twice. Every `aria-labelledby` resolves
+   * to the first match in the document, so the second editor's to-do announced
+   * the first editor's text.
+   */
+  test("a to-do is named by its own text, not the other editor's", () => {
+    const first = mount([
+      block({ id: 'task-1', type: 'todo', checked: true, content: [{ text: 'Ship v1' }] }),
+    ]);
+    const second = mount([
+      block({ id: 'task-1', type: 'todo', content: [{ text: 'Ship v2 instead' }] }),
+    ]);
+
+    const labelledBy = second.element
+      .querySelector('.neditor-block__checkbox')!
+      .getAttribute('aria-labelledby')!;
+    const named = document.getElementById(labelledBy);
+
+    expect(named).not.toBeNull();
+    expect(named!.textContent).toBe('Ship v2 instead');
+    expect(second.element.contains(named)).toBe(true);
+    expect(first.element.contains(named)).toBe(false);
+  });
+
+  test('the page holds no duplicate ids', () => {
+    mount([block({ id: 'same', content: [{ text: 'one' }] })]);
+    mount([block({ id: 'same', content: [{ text: 'two' }] })]);
+
+    const ids = [...document.querySelectorAll('[id]')].map((one) => one.id);
+
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+});

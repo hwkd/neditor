@@ -26,7 +26,12 @@ export class LinkEditor {
 
   constructor(doc: Document, hooks: LinkEditorHooks, labels: NEditorLabels) {
     this.#hooks = hooks;
-    this.#element = createPortal(doc, 'neditor-link-editor', { keepFocus: false });
+    this.#element = createPortal(doc, 'neditor-link-editor', {
+      keepFocus: false,
+      onEscape: () => {
+        this.#hooks.onCancel();
+      },
+    });
     this.#element.setAttribute('role', 'dialog');
     this.#element.setAttribute('aria-label', labels.link);
 
