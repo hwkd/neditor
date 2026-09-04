@@ -696,6 +696,28 @@ describe('a span that reaches back is bounded work, not unbounded', () => {
     expect(runs.map((run) => run.text).join('')).not.toContain('](https://x.test/');
   });
 
+  test.each([200, 417, 500, 660])('a span wrapping %i formatted pairs still closes', (n) => {
+    // Two bounds have been tried here and both were wrong in the same way: a
+    // cumulative one that latched, then a per-span ceiling of 800 runs that
+    // refused any span past it outright, dropping the mark and leaving the raw
+    // delimiters in the text. Neither bought anything measurable. What limits
+    // the reach is INLINE_SPAN_LIMIT, which counts characters.
+    const runs = blocksFromMarkdown(`~~${'*ab* '.repeat(n)}~~`)[0]!.content;
+
+    expect(runs.filter((run) => (run.marks ?? []).includes('strikethrough')).length).toBe(n * 2);
+    expect(runs.map((run) => run.text).join('')).not.toContain('~~');
+  });
+
+  test('the limit that does apply is characters, not runs', () => {
+    // 1320 runs inside the character limit closes; one single run past it does
+    // not. A run-count ceiling would have had these the other way round.
+    const many = blocksFromMarkdown(`~~${'*ab* '.repeat(660)}~~`)[0]!.content;
+    const long = blocksFromMarkdown(`~~${'x '.repeat(1100)}~~`)[0]!.content;
+
+    expect(many.some((run) => (run.marks ?? []).includes('strikethrough'))).toBe(true);
+    expect(long.some((run) => (run.marks ?? []).includes('strikethrough'))).toBe(false);
+  });
+
   test('ordinary documents never reach the budget at all', () => {
     const links = Array.from({ length: 500 }, (_, i) => `[l${i}](https://a.test/${i})`).join(' ');
     const started = performance.now();

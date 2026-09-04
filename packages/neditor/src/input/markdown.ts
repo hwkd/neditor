@@ -171,22 +171,6 @@ const CLOSERS = new Set(['*', '_', '~', '`', '>', ')']);
 const RUN_WINDOW = 32;
 
 /**
- * How far back one span may reach, in runs.
- *
- * Reaching past the window costs a recall and a rebuild of everything it pulls
- * in, so spans that nest over one stretch of text — `[[[[…](u)](u)](u)` — make
- * the pass quadratic. Unbounded, 176KB of that took 47 seconds on the paste
- * handler's own thread.
- *
- * A bound on the total a block may spend was the first answer and the wrong
- * one: it never reset, so it latched, and an ordinary long document silently
- * stopped closing its spans once the SUM of ordinary reaches crossed it. This
- * bounds each reach instead, which is what makes the pass linear — n matches
- * paying at most this each — and leaves a document of any length alone.
- */
-const RECALL_REACH = 800;
-
-/**
  * Characters that can open an inline rule.
  *
  * A rule's opening delimiter is one of these, so a delimiter still present in
@@ -458,12 +442,8 @@ export function parseInlineMarkdown(text: string): RichText {
 
     while (recallable > 0) {
       const length = done[done.length - recallable]!.text.length;
-      // Past the reach the cut happens whatever is still open. Each recall is
-      // followed by a rebuild of everything it pulled in, so this is what keeps
-      // one span's reach from being charged to every match after it.
-      const forced = recallable > RECALL_REACH;
 
-      if (!forced && cut + length > barrier) {
+      if (cut + length > barrier) {
         break;
       }
 
