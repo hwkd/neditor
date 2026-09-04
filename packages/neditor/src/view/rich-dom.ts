@@ -885,7 +885,12 @@ function sealsFormatting(element: Element, tag: string): boolean {
   // sealed there, the same caption parsed differently depending only on whether
   // an inline wrapper happened to reach it first. `FIGURE` already carried this
   // qualification; these two needed the same one.
-  if (tag === 'FIGCAPTION' || tag === 'SUMMARY') {
+  // A `<summary>` is not among them, despite holding blocks the same way: it is
+  // never reached by `visitBlocks` at all, because `visitDetails` strips it out
+  // of the body clone and reads it whole with `parseRichText`. Unsealing it
+  // split a toggle's title into marked / plain / marked around its own
+  // indentation — the discontinuity the seal exists to prevent.
+  if (tag === 'FIGCAPTION') {
     return !containsBlockLevel(element);
   }
 

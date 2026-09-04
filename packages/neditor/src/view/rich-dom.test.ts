@@ -1343,6 +1343,26 @@ describe('a caption that holds a block is not sealed', () => {
     expect(texts(`<b>${html}</b>`)).toEqual(texts(html));
   });
 
+  test.each([
+    ['bold', '<b>', 'marks'],
+    ['a link', '<a href="https://e.com/">', 'link'],
+  ])('a toggle title stays continuous under %s', (_name, open, kind) => {
+    // A <summary> is never reached by visitBlocks: visitDetails strips it out
+    // of the body clone and reads it whole. Unsealing it let the pop lift the
+    // title's own indentation out of the shell, splitting the title into
+    // marked / plain / marked — with a link, the middle of the title stopped
+    // being part of it. The test covers a block in the summary AND one in the
+    // body at once, which is the combination the earlier cases each missed.
+    const close = open.startsWith('<a') ? '</a>' : '</b>';
+    const html = `${open}<details open><summary><em>Intro</em>\n  <p>Body</p></summary><p>rest</p></details>${close}`;
+    const title = blocksFromHtml(document, html)[0]!.content;
+
+    expect(title).toHaveLength(2);
+    expect(
+      kind === 'link' ? title.every((r) => r.link) : title.every((r) => (r.marks ?? []).length > 0),
+    ).toBe(true);
+  });
+
   test('a caption with no block in it is still sealed', () => {
     expect(texts('<b><figure><em>x</em>\n<figcaption>Cap</figcaption></figure></b>')).toEqual(
       texts('<figure><b><em>x</em>\n</b><figcaption><b>Cap</b></figcaption></figure>'),
