@@ -313,12 +313,15 @@ createEditor({
 out keeps its default. `placeholders` and `slashCommands` merge per entry, so
 translating one of them does not blank the rest.
 
-Two sets of _visible_ button glyphs are not reachable that way. The format
-toolbar's `B`, `I`, `U`, `S` and `</>` are typographic mnemonics rather than
-words, and the table toolbar's `⤫ row` and `⤫ col` are English text that should
-be in `labels` and is not. Both toolbars take their accessible names from
-`labels`, so a screen reader announces the translation; only the glyph a sighted
-user reads stays English.
+One set of _visible_ button glyphs is not reachable that way: the format
+toolbar's `B`, `I`, `U`, `S` and `</>`, which are typographic mnemonics rather
+than words. The toolbar takes its accessible names from `labels`, so a screen
+reader announces the translation; only the glyph a sighted user reads stays
+English.
+
+The table toolbar's `⤫ row` and `⤫ col` **are** in `labels`, as
+`deleteRowGlyph` and `deleteColumnGlyph`, and so is the word printed in the
+corner of a code block, as `codeBlockLabel`.
 
 Two other things are still missing, and you should decide whether they matter
 for your audience: list blocks are not wrapped in a real `<ul>`/`<ol>`, so the

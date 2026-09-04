@@ -454,3 +454,60 @@ describe('the selection a host saves is the selection it gets back', () => {
     expect(rows[0]?.[0]?.[0]?.marks ?? []).toEqual([]);
   });
 });
+
+describe('labels reach the strings a reader actually sees', () => {
+  test('a code block carries the label the host set', () => {
+    const editor = mount([block({ type: 'code', content: [{ text: 'const x = 1;' }] })], {
+      labels: { codeBlockLabel: 'code source' },
+    });
+
+    expect(
+      editor.element.querySelector<HTMLElement>('.neditor-block__pre')?.dataset.neditorCodeLabel,
+    ).toBe('code source');
+  });
+
+  test('and the default when it set nothing', () => {
+    const editor = mount([block({ type: 'code', content: [{ text: 'x' }] })]);
+
+    expect(
+      editor.element.querySelector<HTMLElement>('.neditor-block__pre')?.dataset.neditorCodeLabel,
+    ).toBe('code');
+  });
+});
+
+describe('history state a host can bind a button to', () => {
+  /**
+   * `#travel` refuses outright while `editable` is false, so reporting the raw
+   * stack depth described an editor that could be stepped back and an `undo()`
+   * that returned false -- a toolbar button enabled and then inert.
+   */
+  test('a read-only editor reports no history to travel', () => {
+    const editor = mount([block({ id: 'b', content: [{ text: 'hi' }] })]);
+    editor.setBlockType('b', 'heading1');
+
+    expect(editor.canUndo).toBe(true);
+
+    editor.setEditable(false);
+
+    expect(editor.canUndo).toBe(false);
+    expect(editor.undo()).toBe(false);
+    expect(editor.canRedo).toBe(false);
+    expect(editor.redo()).toBe(false);
+  });
+
+  test('and says so, so a toolbar rendered from the event keeps up', () => {
+    const editor = mount([block({ id: 'b', content: [{ text: 'hi' }] })]);
+    editor.setBlockType('b', 'heading1');
+    const seen: boolean[] = [];
+    editor.on('history', (state) => seen.push(state.canUndo));
+
+    editor.setEditable(false);
+
+    expect(seen).toEqual([false]);
+
+    editor.setEditable(true);
+
+    expect(seen).toEqual([false, true]);
+    expect(editor.canUndo).toBe(true);
+  });
+});

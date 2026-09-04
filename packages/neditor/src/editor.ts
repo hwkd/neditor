@@ -132,9 +132,12 @@ export interface NEditorOptions {
   /**
    * Where the floating toolbars, menus and popovers are appended.
    *
-   * Defaults to the document body. A modal `<dialog>` is promoted to the top
+   * Defaults to the mount point's own root node: `document.body` for an
+   * ordinary mount, and the shadow root for an editor inside a custom element
+   * -- where appending to the body instead would leave every popover outside
+   * the tree that carries the styles. A modal `<dialog>` is promoted to the top
    * layer and paints above any z-index, so pass the dialog itself to keep them
-   * visible; a shadow root works the same way.
+   * visible.
    */
   portalContainer?: HTMLElement | ShadowRoot;
   /** `nonce` for the injected `<style>`, for a strict `style-src` policy. */
@@ -926,12 +929,21 @@ export class NEditor {
     this.#emitHistory();
   }
 
+  /**
+   * Whether `undo()` would do anything -- which a read-only editor's would not.
+   *
+   * `#travel` refuses outright while `editable` is false, so forwarding the
+   * stack depth alone described a document that could be stepped back and an
+   * `undo()` that returned false: a host binding a toolbar button to this
+   * enabled it and then did nothing when it was pressed.
+   */
   get canUndo(): boolean {
-    return this.#history.canUndo;
+    return this.#canEdit() && this.#history.canUndo;
   }
 
+  /** Whether `redo()` would do anything. Read-only says no, for the same reason. */
   get canRedo(): boolean {
-    return this.#history.canRedo;
+    return this.#canEdit() && this.#history.canRedo;
   }
 
   /** Reverts the last edit. Returns false when there is nothing to undo. */
@@ -956,6 +968,9 @@ export class NEditor {
   setEditable(editable: boolean): void {
     this.#editable = editable;
     this.#renderer.setEditable(editable);
+    // `canUndo` and `canRedo` both answer differently now, and a host that
+    // renders its toolbar from the `history` event had no way to hear it.
+    this.#emitHistory();
 
     if (!editable) {
       this.#toolbar.hide();
@@ -1427,7 +1442,10 @@ export class NEditor {
   }
 
   #emitHistory(): void {
-    this.#emitter.emit('history', this.#history.state);
+    // The getters' answer, not the raw stack depth: a host renders its toolbar
+    // from one or the other, and they must not disagree about whether pressing
+    // the button would do anything.
+    this.#emitter.emit('history', { canUndo: this.canUndo, canRedo: this.canRedo });
   }
 
   #selectionSnapshot(): SelectionSnapshot | null {

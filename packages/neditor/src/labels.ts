@@ -88,6 +88,15 @@ export interface NEditorLabels {
   deleteColumn: string;
   /** Visible text on the delete-column button, beside its accessible name. */
   deleteColumnGlyph: string;
+  /**
+   * The word printed in the corner of a code block.
+   *
+   * Drawn by the stylesheet, from an attribute the renderer sets. It used to be
+   * a literal in the CSS, which put an English word on every code block in
+   * every language with no way to reach it: `labels` did not cover it, and a
+   * pseudo-element's content is not in the DOM to be translated afterwards.
+   */
+  codeBlockLabel: string;
 
   /** Live-region announcements. `{count}` and `{type}` are substituted. */
   blocksSelected: string;
@@ -248,6 +257,7 @@ export const DEFAULT_LABELS: NEditorLabels = {
   insertColumnRight: 'Insert column right',
   deleteColumn: 'Delete this column',
   deleteColumnGlyph: '⤫ col',
+  codeBlockLabel: 'code',
 
   blocksSelected: '{count} blocks selected',
   blockSelected: '1 block selected',

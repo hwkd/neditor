@@ -206,6 +206,7 @@ export const NEDITOR_STYLES = `
   padding: 0.1875rem 0;
   text-align: end;
   color: var(--neditor-text);
+  -webkit-user-select: none;
   user-select: none;
 }
 
@@ -276,7 +277,11 @@ export const NEDITOR_STYLES = `
 }
 
 .neditor-block__pre::before {
-  content: 'code';
+  /* Read from the element rather than written here, so the documented labels
+     route reaches it. As a literal it was English on every page in every
+     language, and a pseudo-element's content is not in the DOM for a consumer
+     to translate afterwards either. */
+  content: attr(data-neditor-code-label);
   position: absolute;
   top: 0.5rem;
   inset-inline-start: 1rem;
@@ -317,6 +322,7 @@ export const NEDITOR_STYLES = `
   font-size: 1.125rem;
   line-height: 1.35;
   cursor: pointer;
+  -webkit-user-select: none;
   user-select: none;
 }
 
@@ -575,6 +581,7 @@ export const NEDITOR_STYLES = `
 .neditor[data-selecting='true'] .neditor-block__content {
   /* Once whole blocks are the unit, the browser must stop painting text over
      them as the pointer keeps moving. */
+  -webkit-user-select: none;
   user-select: none;
 }
 

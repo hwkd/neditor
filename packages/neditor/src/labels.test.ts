@@ -176,3 +176,19 @@ describe('every visible string is reachable through labels', () => {
     expect(labels.deleteColumnGlyph).toBe('⤫ col');
   });
 });
+
+describe('the code block label is drawn from the element, not the stylesheet', () => {
+  /**
+   * It was a literal in the CSS, so it read "code" on every page in every
+   * language: `labels` did not cover it, and a pseudo-element's content is not
+   * in the DOM for a consumer to translate afterwards.
+   */
+  test('the stylesheet reads it rather than printing its own', () => {
+    expect(NEDITOR_STYLES).toContain('content: attr(data-neditor-code-label)');
+    expect(NEDITOR_STYLES).not.toContain("content: 'code'");
+  });
+
+  test('and there is a default for it to read', () => {
+    expect(DEFAULT_LABELS.codeBlockLabel).toBe('code');
+  });
+});

@@ -340,6 +340,8 @@ export class Renderer {
     if (block.type === 'code') {
       const pre = doc.createElement('pre');
       pre.className = 'neditor-block__pre';
+      // The corner label the stylesheet prints, so `labels` reaches it.
+      pre.dataset.neditorCodeLabel = this.#labels.codeBlockLabel;
       pre.append(content);
       root.append(pre);
     } else if (block.type === 'callout') {

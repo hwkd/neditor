@@ -274,3 +274,25 @@ describe('README', () => {
     expect(readme).toContain('`⤫ row` and `⤫ col`');
   });
 });
+
+describe('the stylesheet works on the engines the package says it supports', () => {
+  /**
+   * `browserslist` names Safari, which has never shipped unprefixed
+   * `user-select` -- so all three rules were inert there: the drag handle's
+   * glyph, the callout icon, and the guard that stops a drag or a block
+   * selection from smearing a text selection across the document.
+   */
+  test('every user-select is paired with its -webkit- form', () => {
+    const plain = [...NEDITOR_STYLES.matchAll(/^\s*user-select:/gm)];
+    const prefixed = [...NEDITOR_STYLES.matchAll(/^\s*-webkit-user-select:/gm)];
+
+    expect(plain.length).toBeGreaterThan(0);
+    expect(prefixed.length, 'one -webkit-user-select per user-select').toBe(plain.length);
+  });
+
+  test('the prefixed form comes first, so the standard one wins where both are read', () => {
+    for (const match of NEDITOR_STYLES.matchAll(/-webkit-user-select:[^;]+;\s*([a-z-]+):/g)) {
+      expect(match[1]).toBe('user-select');
+    }
+  });
+});
