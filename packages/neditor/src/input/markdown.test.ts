@@ -731,3 +731,25 @@ describe('a destination that holds its own "]("', () => {
     },
   );
 });
+
+describe('a destination carrying many "](" pairs', () => {
+  const url = (n: number): string =>
+    'https://x.test/q?z=' + Array.from({ length: n }, (_, i) => `[${i}](p${i})`).join('');
+  const href = (source: string): string | undefined =>
+    blocksFromMarkdown(source)[0]?.content.find((run) => run.link)?.link;
+
+  test.each([1, 7, 8, 12, 40])('parses with %i of them', (n) => {
+    // Enumerating candidate openers needed a bound, and past it the link was
+    // not merely mis-resolved but lost outright, leaving the raw Markdown as
+    // visible block text. The opener is computed now, so there is no cliff.
+    expect(href(`[see](<${url(n)}>)`)).toBe(url(n));
+  });
+
+  test('and survives a serializer round trip', () => {
+    const source = toMarkdown({
+      blocks: [{ id: 'p', type: 'paragraph', depth: 0, content: [{ text: 'see', link: url(12) }] }],
+    });
+
+    expect(href(source)).toBe(url(12));
+  });
+});

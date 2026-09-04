@@ -27,6 +27,8 @@ interface InlineRule {
   readonly mark?: Mark;
   /** Capture group 2 is the href. */
   readonly isLink?: boolean;
+  /** The `](<…>)` form, whose destination is delimited rather than run-length. */
+  readonly angled?: boolean;
 }
 
 const INLINE_RULES: readonly InlineRule[] = [
@@ -47,7 +49,7 @@ const INLINE_RULES: readonly InlineRule[] = [
   { closer: '>', pattern: /<u>([^<\n]+)<\/u>$/, mark: 'underline' },
   // The angle-bracket form first: it is how a destination holding a `)` — the
   // character that would otherwise close the link — is written.
-  { closer: ')', pattern: /\[([^\]\n]+)\]\(<([^<>\n]*)>\)$/, isLink: true },
+  { closer: ')', pattern: /\[([^\]\n]+)\]\(<([^<>\n]*)>\)$/, isLink: true, angled: true },
   { closer: ')', pattern: /\[([^\]\n]+)\]\(([^)\s]+)\)$/, isLink: true },
 ];
 
@@ -81,6 +83,38 @@ export interface InlineRuleMatch {
  * `textBeforeCaret` is the block's plain-text projection up to the caret, so
  * offsets returned here are block offsets.
  */
+/**
+ * Where the link that ends at the caret begins, or -1 if none does.
+ *
+ * Both patterns are anchored at the caret, so the destination is the last thing
+ * in the window and its shape says exactly which `](` opened it: `](<` for the
+ * angle-bracket form, and for the plain form the one immediately before a run
+ * of characters that are neither `)` nor whitespace — which is all the pattern
+ * admits there. Reading it off directly costs two scans and cannot be wrong,
+ * where guessing was and enumerating needed a bound.
+ */
+function linkOpener(window: string, angled: boolean): number {
+  if (angled) {
+    const pair = window.lastIndexOf('](<');
+
+    return pair === -1 ? -1 : window.lastIndexOf('[', pair);
+  }
+
+  // The destination admits neither `)` nor whitespace, so whichever comes first
+  // going back from the closing `)` bounds how far the whole `](…)` can reach.
+  let stop = window.length - 2;
+
+  while (stop >= 0 && !/[)\s]/.test(window[stop] ?? '')) {
+    stop -= 1;
+  }
+
+  // Within that reach the label opens at the FIRST `](`, because a label admits
+  // no `]` either — so anything later would be inside the destination.
+  const pair = window.indexOf('](', stop + 1);
+
+  return pair === -1 || pair >= window.length - 1 ? -1 : window.lastIndexOf('[', pair);
+}
+
 export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null {
   // One character past the window, so the lookbehinds see what really precedes
   // a candidate opening delimiter rather than the cut.
@@ -101,36 +135,26 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
     // the regex off the rest of the window — left to walk back from every `[`
     // it turned a line of unpaired brackets, `[0, 1) [1, 2) ...`, into a
     // second of work per paste, because every `)` restarted the scan.
-    // A link pattern can only start at a `[` that opens a `](`, so the openers
-    // are found rather than the window walked from every bracket in it — a line
-    // of unpaired brackets, which has no `](` at all, is rejected outright, and
-    // that is what keeps this off the quadratic path.
-    //
-    // The candidates are tried nearest-first instead of the last one being
-    // assumed to be the label's: a destination may hold a `](` of its own —
-    // `[see](<https://…?q=[foo](bar)>)`, which this editor writes itself — and
-    // assuming put the opener inside the URL, returning a different,
-    // still-valid-looking link.
+    // A link pattern can only start at the `[` that opens the destination's
+    // `](`, so that one position is computed rather than the window walked from
+    // every bracket in it — which is what keeps a line of unpaired brackets off
+    // the quadratic path. It is computed and not guessed: a destination may
+    // hold `](` of its own (`[see](<https://…?q=[foo](bar)>)`, which this
+    // editor writes itself), so taking the last one put the opener inside the
+    // URL, and trying candidates in turn needed a cap that lost the link
+    // outright once a URL carried enough of them.
     let searchedFrom = 0;
     let match: RegExpExecArray | null = null;
 
     if (rule.isLink) {
-      for (let pair = window.lastIndexOf(']('), tried = 0; pair !== -1 && tried < 8; tried += 1) {
-        const opener = window.lastIndexOf('[', pair);
+      const opener = linkOpener(window, rule.angled === true);
 
-        if (opener === -1) {
-          break;
-        }
-
-        match = rule.pattern.exec(window.slice(opener));
-
-        if (match) {
-          searchedFrom = opener;
-          break;
-        }
-
-        pair = window.lastIndexOf('](', pair - 1);
+      if (opener === -1) {
+        continue;
       }
+
+      searchedFrom = opener;
+      match = rule.pattern.exec(window.slice(opener));
     } else {
       match = rule.pattern.exec(window);
     }
