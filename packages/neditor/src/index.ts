@@ -25,10 +25,14 @@ export type { NEditorEvents, NEditorOptions, SelectionState } from './editor.ts'
 /**
  * Where a table cell sits, row-major, as `focusRange` takes it.
  *
- * Read off the method rather than restated, so the public name cannot drift
- * from the parameter it stands for. `editor.ts` declares the interface without
- * exporting it, which is why this is not a plain re-export; exporting it there
- * and re-exporting it here would say the same thing more directly.
+ * A plain re-export of the interface `editor.ts` exports. It was once derived
+ * instead — `NonNullable<Parameters<NEditor['focusRange']>[3]>` — so the public
+ * name could not drift from the parameter it stands for. That reads well from
+ * inside and is broken from outside: the alias exports a name, not the
+ * interface the signature actually names, so declaration emit called that one
+ * `CellCoords$1` and every consumer naming it failed with TS4023. Export the
+ * interface itself, or there is nothing for a consumer to name. `scripts/
+ * check-dts.mjs` compiles a consumer against the packed tarball to keep it so.
  */
 export type { CellCoords } from './editor.ts';
 

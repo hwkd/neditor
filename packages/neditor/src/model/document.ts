@@ -818,10 +818,11 @@ export function sliceDocument(blocks: readonly Block[], ids: ReadonlySet<string>
  * is not escaped here is silently reinterpreted: `2 * 3 * 4` came back as
  * italic with two characters missing.
  *
- * The two triangles are the toggle markers. A bullet is written `- text`, so a
- * bullet whose text is a bare `▾` was indistinguishable from the empty toggle
- * written `- ▾`: the text was read as the marker and destroyed. Escaping them
- * is what keeps the marker a marker.
+ * Deliberately not the toggle markers, which are escaped in the `bulleted_list`
+ * case alone. A bullet is written `- text`, so a bullet whose text is a bare
+ * `▾` was indistinguishable from the empty toggle written `- ▾`: the text was read
+ * as the marker and destroyed. Escaping there keeps the marker a marker;
+ * escaping here would put a stray backslash into every other reader's prose.
  */
 const INLINE_ESCAPE = /[\\`*_[\]~|<>]/g;
 

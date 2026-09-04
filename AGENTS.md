@@ -215,3 +215,12 @@ places at once, so they are stated as rules rather than as notes about one call 
   was mutation-checked: revert the change, watch the test fail, restore it. Two
   previous tests asserted a literal against itself and could not distinguish a working
   feature from a deleted one.
+
+- **A comment that inverts the code is a defect, not an untidiness.** The rationale
+  for most decisions here lives only in prose, so a stale docstring is the whole
+  record being wrong: `index.ts` told a reader `CellCoords` was derived off the
+  method and deliberately not re-exported, and recommended the exact change that
+  had already been made because deriving it was broken from outside. Two escape
+  sets likewise still claimed to hold the toggle triangles that had been taken
+  out of them. Behaviour was right in all three; the executable guards held. When
+  a fix moves an invariant, move the sentence that explains it.

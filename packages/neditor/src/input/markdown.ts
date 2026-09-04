@@ -183,8 +183,10 @@ const OPENERS = new Set(['*', '_', '~', '`', '<', '[']);
 /**
  * Characters `escapeMarkdownText` protects, and which `\\` therefore makes literal.
  *
- * The toggle triangles are in here because a bullet whose text is one of them
- * is written escaped; unescaped it would be read back as an empty toggle.
+ * Deliberately not the toggle triangles, though a bullet whose text is one is
+ * written escaped. Honouring `\▾` everywhere ate the backslash out of ordinary
+ * prose, which no other reader does; it is honoured at the one place the writer
+ * emits it, the head of a bullet, and nowhere else.
  */
 const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!]/;
 
