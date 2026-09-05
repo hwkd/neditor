@@ -270,3 +270,62 @@ describe('an empty block selection is no block selection', () => {
     expect(live(editor)).toBe('');
   });
 });
+
+describe('undoing an edit made in block-selection mode leaves somewhere to type', () => {
+  /**
+   * An edit made with blocks selected has no caret to record -- block selection
+   * drops the range and focuses the root -- so the history entry carries a null
+   * selection. `#travel` then clears the block selection and restores nothing,
+   * leaving the root focused with neither a caret nor a selection. That is
+   * neither mode: `#handleKeyDown` resolves nothing from the root and drops
+   * every later keystroke, so the *second* Ctrl+Z did nothing and the editor
+   * was dead until the user clicked back into it.
+   *
+   * `#setBlockSelection` already guards this exact dead end when the last block
+   * is deselected, and says so in a comment. This is the other way in.
+   */
+  const moveDown = (editor: NEditor): void => {
+    press(editor.element, 'ArrowDown', { metaKey: true, shiftKey: true });
+  };
+
+  test('a second undo still lands, rather than being swallowed', () => {
+    const editor = mount([
+      block({ id: 'a', content: [{ text: 'one' }] }),
+      block({ id: 'b', content: [{ text: 'two' }] }),
+      block({ id: 'c', content: [{ text: 'three' }] }),
+    ]);
+
+    editor.selectBlocks(['a']);
+    moveDown(editor);
+    moveDown(editor);
+
+    expect(editor.getDocument().blocks.map((one) => one.id)).toEqual(['b', 'c', 'a']);
+
+    editor.undo();
+
+    expect(editor.getDocument().blocks.map((one) => one.id)).toEqual(['b', 'a', 'c']);
+
+    // The keystroke path, not the API: it is the DOM handler that was dropping
+    // keys, so calling editor.undo() directly would not have shown this at all.
+    // Dispatched at whatever holds focus, which is what a browser does -- and
+    // the whole defect is that nothing useful held it.
+    press(document.activeElement ?? editor.element, 'z', { metaKey: true });
+
+    expect(editor.getDocument().blocks.map((one) => one.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  test('and the editor still has somewhere to type', () => {
+    const editor = mount([
+      block({ id: 'a', content: [{ text: 'one' }] }),
+      block({ id: 'b', content: [{ text: 'two' }] }),
+    ]);
+
+    editor.selectBlocks(['a']);
+    moveDown(editor);
+    editor.undo();
+
+    expect(document.activeElement, 'focus must not be left on the root').not.toBe(editor.element);
+    expect(editor.element.contains(document.activeElement)).toBe(true);
+    expect(editor.getSelectionState()).not.toBeNull();
+  });
+});

@@ -309,7 +309,49 @@ describe('selection is not signalled by colour alone', () => {
 
     const live = editor.element.querySelector('[aria-live]');
 
-    expect(live?.textContent).toContain('1 block selected');
+    // And it says *which* block. This asserted "1 block selected", which is
+    // what every block in the document announced -- so arrowing through
+    // block-selection mode repeated one identical sentence and nothing
+    // identified what Backspace was about to delete.
+    expect(live?.textContent).toContain('a');
+    expect(live?.textContent).not.toBe('1 block selected');
+  });
+
+  test('a second selected block goes back to the count', () => {
+    const editor = mount([
+      block({ id: 'x', content: [{ text: 'Alpha' }] }),
+      block({ id: 'y', content: [{ text: 'Bravo' }] }),
+    ]);
+    editor.selectBlocks(['x', 'y']);
+
+    expect(editor.element.querySelector('[aria-live]')?.textContent).toContain('2 blocks selected');
+  });
+
+  test('each block in turn announces its own text, not the same sentence', () => {
+    const editor = mount([
+      block({ id: 'x', content: [{ text: 'Alpha' }] }),
+      block({ id: 'y', type: 'heading1', content: [{ text: 'Bravo' }] }),
+    ]);
+    const live = editor.element.querySelector('[aria-live]')!;
+
+    editor.selectBlocks(['x']);
+    const first = live.textContent;
+    editor.selectBlocks(['y']);
+    const second = live.textContent;
+
+    expect(first).toContain('Alpha');
+    expect(second).toContain('Bravo');
+    expect(first).not.toBe(second);
+  });
+
+  test('a block with no text of its own is still identified by type', () => {
+    const editor = mount([block({ id: 'd', type: 'divider' })]);
+    editor.selectBlocks(['d']);
+
+    const spoken = editor.element.querySelector('[aria-live]')?.textContent ?? '';
+
+    expect(spoken.length).toBeGreaterThan(0);
+    expect(spoken).not.toBe('1 block selected');
   });
 
   test('the stylesheet gives selection a non-colour cue and honours forced colors', () => {
@@ -550,5 +592,88 @@ describe('two editors on one page do not collide in the document', () => {
     const ids = [...document.querySelectorAll('[id]')].map((one) => one.id);
 
     expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+describe('a rejected URL is signalled by more than a colour', () => {
+  /**
+   * `markInvalid` set a data attribute whose only effect was a red border. A
+   * screen reader was told nothing, and under forced colours the border is
+   * replaced by a system colour -- so for those users the dialog simply refused
+   * to close, with no reason given anywhere.
+   */
+  const openLink = (): { input: HTMLInputElement; popover: HTMLElement } => {
+    const editor = mount([block({ id: 'p', content: [{ text: 'Hello world' }] })]);
+    editor.focusRange('p', 0, 5);
+    editor.openLinkEditor();
+    const popover = document.querySelector<HTMLElement>('.neditor-link-editor')!;
+
+    return { input: popover.querySelector('input')!, popover };
+  };
+
+  test('a bad URL sets aria-invalid and shows a reason', () => {
+    const { input, popover } = openLink();
+
+    expect(input.getAttribute('aria-invalid')).toBeNull();
+
+    input.value = 'My Document.pdf';
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+    expect(input.getAttribute('aria-invalid')).toBe('true');
+
+    const described = document.getElementById(input.getAttribute('aria-describedby') ?? '');
+
+    expect(described, 'the input must point at a message that exists').not.toBeNull();
+    expect(described!.hidden).toBe(false);
+    expect(described!.textContent?.length).toBeGreaterThan(0);
+    expect(popover.hidden, 'and the dialog stays open for a correction').toBe(false);
+  });
+
+  test('reopening the dialog clears the rejection', () => {
+    const editor = mount([block({ id: 'p', content: [{ text: 'Hello world' }] })]);
+    editor.focusRange('p', 0, 5);
+    editor.openLinkEditor();
+
+    // This editor's own portal. Querying the document would find the first
+    // dialog on the page, which is a different editor's in a shared suite.
+    const input = document.querySelectorAll<HTMLInputElement>('.neditor-link-editor input')[
+      document.querySelectorAll('.neditor-link-editor').length - 1
+    ]!;
+
+    input.value = 'not a url';
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+    expect(input.getAttribute('aria-invalid')).toBe('true');
+
+    editor.focusRange('p', 6, 11);
+    editor.openLinkEditor();
+
+    expect(input.getAttribute('aria-invalid')).toBeNull();
+    expect(document.getElementById(input.getAttribute('aria-describedby') ?? '')?.hidden).toBe(
+      true,
+    );
+  });
+
+  test('forced colours restate the rejection, which they previously dropped', () => {
+    expect(NEDITOR_STYLES).toMatch(
+      /forced-colors: active[\s\S]*neditor-link-editor__input\[data-invalid='true'\]/,
+    );
+    expect(NEDITOR_STYLES).toMatch(/forced-colors: active[\s\S]*neditor-link-editor__error/);
+  });
+});
+
+describe('a to-do says what it just became', () => {
+  test('checking one announces, as every sibling state change does', () => {
+    const editor = mount([block({ id: 't', type: 'todo', content: [{ text: 'Buy milk' }] })]);
+    const live = editor.element.querySelector('[aria-live]')!;
+
+    editor.toggleTodo('t');
+
+    expect(live.textContent?.length).toBeGreaterThan(0);
+    const checked = live.textContent;
+
+    editor.toggleTodo('t');
+
+    expect(live.textContent).not.toBe(checked);
   });
 });

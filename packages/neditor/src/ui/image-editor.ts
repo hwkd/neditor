@@ -21,9 +21,13 @@ export interface ImageEditorHooks {
   onCancel(): void;
 }
 
+/** Distinguishes the error-message ids when several dialogs share a page. */
+let imageErrorIds = 0;
+
 export class ImageEditor {
   readonly #element: HTMLElement;
   readonly #src: HTMLInputElement;
+  readonly #error: HTMLElement;
   readonly #alt: HTMLInputElement;
   readonly #removeButton: HTMLButtonElement;
   readonly #hooks: ImageEditorHooks;
@@ -65,7 +69,15 @@ export class ImageEditor {
     });
 
     actions.append(apply, this.#removeButton);
-    this.#element.append(this.#src, this.#alt, actions);
+    // Named rather than colour-only, and wired to the field it belongs to.
+    this.#error = doc.createElement('p');
+    this.#error.className = 'neditor-image-editor__error';
+    this.#error.id = `neditor-image-error-${(imageErrorIds += 1)}`;
+    this.#error.textContent = labels.invalidUrl;
+    this.#error.hidden = true;
+    this.#src.setAttribute('aria-describedby', this.#error.id);
+
+    this.#element.append(this.#src, this.#alt, this.#error, actions);
   }
 
   get element(): HTMLElement {
@@ -84,9 +96,9 @@ export class ImageEditor {
     this.#element.hidden = false;
     this.#open = true;
     this.#src.value = value.src;
+    this.#clearInvalid();
     this.#alt.value = value.alt;
     this.#removeButton.hidden = value.src.length === 0;
-    delete this.#src.dataset.invalid;
 
     positionPortal(this.#element, anchor, { prefer: 'below' });
     this.#src.focus();
@@ -105,8 +117,17 @@ export class ImageEditor {
   /** Flags the URL as unusable and keeps the popover open for a correction. */
   markInvalid(): void {
     this.#src.dataset.invalid = 'true';
+    this.#src.setAttribute('aria-invalid', 'true');
+    this.#error.hidden = false;
     this.#src.focus();
     this.#src.select();
+  }
+
+  /** So a corrected value stops being announced as the rejected one. */
+  #clearInvalid(): void {
+    delete this.#src.dataset.invalid;
+    this.#src.removeAttribute('aria-invalid');
+    this.#error.hidden = true;
   }
 
   contains(node: Node | null): boolean {

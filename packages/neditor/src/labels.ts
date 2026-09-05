@@ -51,6 +51,14 @@ export interface NEditorLabels {
 
   /** Link and image popovers. */
   linkPlaceholder: string;
+  /**
+   * Shown and announced when a URL is rejected.
+   *
+   * The rejection used to be a red border and nothing else: silent to a screen
+   * reader, and dropped entirely under forced colours, so for those users the
+   * dialog simply refused to close with no reason given.
+   */
+  invalidUrl: string;
   linkUrl: string;
   imageUrlPlaceholder: string;
   imageAltPlaceholder: string;
@@ -107,6 +115,20 @@ export interface NEditorLabels {
   blockDeleted: string;
   toggleCollapsed: string;
   toggleExpanded: string;
+  /** Announced when a to-do is ticked or unticked. */
+  todoChecked: string;
+  todoUnchecked: string;
+  /**
+   * Announced when block selection lands on a single block.
+   *
+   * The count alone said "1 block selected" for every block, so arrowing
+   * through a document repeated one identical sentence and nothing ever
+   * identified what Backspace was about to delete. `{type}` is the reader-facing
+   * type name, `{text}` the start of the block's own text.
+   */
+  blockSelectedNamed: string;
+  /** For a block with no text of its own -- a divider, an empty paragraph. */
+  emptyBlockSelectedNamed: string;
   rowAdded: string;
   rowInsertedAbove: string;
   rowInsertedBelow: string;
@@ -232,6 +254,7 @@ export const DEFAULT_LABELS: NEditorLabels = {
   link: 'Link',
 
   linkPlaceholder: 'Paste a link or type a URL',
+  invalidUrl: 'That is not a URL this editor can use',
   linkUrl: 'Link URL',
   imageUrlPlaceholder: 'Paste an image URL',
   imageAltPlaceholder: 'Alt text, for screen readers',
@@ -265,6 +288,10 @@ export const DEFAULT_LABELS: NEditorLabels = {
   blocksDeleted: '{count} blocks deleted',
   blockDeleted: 'Block deleted',
   toggleCollapsed: 'Toggle collapsed',
+  todoChecked: 'Checked',
+  todoUnchecked: 'Unchecked',
+  blockSelectedNamed: '{type} selected, {text}',
+  emptyBlockSelectedNamed: 'Empty {type} selected',
   toggleExpanded: 'Toggle expanded',
   rowAdded: 'Row added',
   rowInsertedAbove: 'Row inserted above',

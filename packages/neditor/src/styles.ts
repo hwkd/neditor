@@ -925,6 +925,16 @@ export const NEDITOR_STYLES = `
   border-color: var(--neditor-accent);
 }
 
+/* The rejection, said rather than only coloured. Hidden until it applies, so
+   the dialog does not carry a standing error message. */
+.neditor-link-editor__error,
+.neditor-image-editor__error {
+  margin: 0.25rem 0 0;
+  flex-basis: 100%;
+  font-size: 0.75em;
+  color: var(--neditor-danger);
+}
+
 .neditor-link-editor__input[data-invalid='true'] {
   border-color: var(--neditor-danger);
 }
@@ -979,6 +989,19 @@ export const NEDITOR_STYLES = `
 @media (forced-colors: active) {
   /* System colours replace the palette, so the tint-based cues vanish. These
      restate every state in terms the mode keeps. */
+  .neditor-link-editor__input[data-invalid='true'],
+  .neditor-image-editor__input[data-invalid='true'] {
+    forced-color-adjust: none;
+    border-color: LinkText;
+    outline: 2px solid LinkText;
+  }
+
+  .neditor-link-editor__error,
+  .neditor-image-editor__error {
+    forced-color-adjust: none;
+    color: LinkText;
+  }
+
   .neditor-block[data-selected='true'] {
     forced-color-adjust: none;
     background: Highlight;

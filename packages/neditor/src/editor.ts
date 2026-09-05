@@ -1267,7 +1267,13 @@ export class NEditor {
       return;
     }
 
-    this.#commit(updateBlock(this.#blocks, id, { checked: !block.checked }));
+    const checked = !block.checked;
+    this.#commit(updateBlock(this.#blocks, id, { checked }));
+    // Every sibling state change announces -- the toggle chevron, a type
+    // conversion, undo, every table command. This one did not, and its checkbox
+    // has tabIndex -1 so focus never lands on it to have the new state read
+    // out: ticking a to-do was completely silent.
+    this.#announce(checked ? this.#labels.todoChecked : this.#labels.todoUnchecked);
   }
 
   destroy(): void {
@@ -1539,7 +1545,18 @@ export class NEditor {
     this.#clearBlockSelection();
 
     this.#applyBlocks(entry.blocks);
-    this.#restoreSelection(entry.selection);
+
+    // An edit made in block-selection mode has no caret to record, so there is
+    // nothing here to restore -- and the block selection was just cleared. That
+    // left the root focused with neither a caret nor a selection, which is
+    // neither mode: `#handleKeyDown` resolves nothing from the root and drops
+    // every later keystroke, the next Ctrl+Z included. `#setBlockSelection`
+    // already handles the same dead end when the last block is deselected; this
+    // is the other way into it.
+    if (!this.#restoreSelection(entry.selection)) {
+      this.#focusFirst([entry.selection?.blockId, this.#blocks[0]?.id]);
+    }
+
     this.#emitHistory();
     this.#announce(direction === 'undo' ? this.#labels.undone : this.#labels.redone);
 
@@ -1645,7 +1662,33 @@ export class NEditor {
    * Zero is its own sentence. Reading it as the plural announced "0 blocks
    * selected", which describes a mode the editor is not supposed to have.
    */
+  /** How much of a block's own text is read out when it is selected. */
+  static readonly #SELECTION_TEXT_LIMIT = 60;
+
   #announceSelectionCount(count: number): void {
+    // A single block says which one. The count alone read "1 block selected"
+    // for every block in the document, so arrowing through block-selection mode
+    // repeated one identical sentence and nothing ever identified what
+    // Backspace was about to delete. More than one is back to the count: naming
+    // them all would be longer than it is useful.
+    if (count === 1) {
+      const id = this.#orderedSelection()[0];
+      const block = id === undefined ? undefined : findBlock(this.#blocks, id);
+
+      if (block) {
+        const text = blockText(block).trim().slice(0, NEditor.#SELECTION_TEXT_LIMIT);
+        const type = this.#typeName(block.type);
+
+        this.#announce(
+          text.length > 0
+            ? formatLabel(this.#labels.blockSelectedNamed, { type, text })
+            : formatLabel(this.#labels.emptyBlockSelectedNamed, { type }),
+        );
+
+        return;
+      }
+    }
+
     this.#announce(
       pluralLabel(
         {
@@ -2776,13 +2819,13 @@ export class NEditor {
     return true;
   }
 
-  #restoreSelection(snapshot: SelectionSnapshot | null): void {
+  #restoreSelection(snapshot: SelectionSnapshot | null): boolean {
     // The block may not exist in the restored document.
     if (!snapshot || !findBlock(this.#blocks, snapshot.blockId)) {
-      return;
+      return false;
     }
 
-    this.focusRange(snapshot.blockId, snapshot.start, snapshot.end, snapshot.cell);
+    return this.focusRange(snapshot.blockId, snapshot.start, snapshot.end, snapshot.cell);
   }
 
   #commitContent(

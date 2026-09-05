@@ -16,9 +16,13 @@ export interface LinkEditorHooks {
   onCancel(): void;
 }
 
+/** Distinguishes the error-message ids when several dialogs share a page. */
+let errorIds = 0;
+
 export class LinkEditor {
   readonly #element: HTMLElement;
   readonly #input: HTMLInputElement;
+  readonly #error: HTMLElement;
   readonly #removeButton: HTMLButtonElement;
   readonly #hooks: LinkEditorHooks;
 
@@ -42,6 +46,15 @@ export class LinkEditor {
     this.#input.spellcheck = false;
     this.#input.autocomplete = 'off';
     this.#input.setAttribute('aria-label', labels.linkUrl);
+
+    // Named rather than colour-only, and wired to the input by
+    // `aria-describedby` so it is read out with the field it belongs to.
+    this.#error = doc.createElement('p');
+    this.#error.className = 'neditor-link-editor__error';
+    this.#error.id = `neditor-link-error-${(errorIds += 1)}`;
+    this.#error.textContent = labels.invalidUrl;
+    this.#error.hidden = true;
+    this.#input.setAttribute('aria-describedby', this.#error.id);
 
     this.#input.addEventListener('keydown', (event) => {
       // The editor's own key handling must not see these.
@@ -73,7 +86,7 @@ export class LinkEditor {
       this.#hooks.onRemove();
     });
 
-    this.#element.append(this.#input, apply, this.#removeButton);
+    this.#element.append(this.#input, this.#error, apply, this.#removeButton);
   }
 
   get element(): HTMLElement {
@@ -92,7 +105,7 @@ export class LinkEditor {
     this.#element.hidden = false;
     this.#open = true;
     this.#input.value = current ?? '';
-    delete this.#input.dataset.invalid;
+    this.#clearInvalid();
     this.#removeButton.hidden = current === null;
 
     positionPortal(this.#element, anchor, { prefer: 'below' });
@@ -113,8 +126,17 @@ export class LinkEditor {
   /** Flags the URL as unusable and keeps the popover open for a correction. */
   markInvalid(): void {
     this.#input.dataset.invalid = 'true';
+    this.#input.setAttribute('aria-invalid', 'true');
+    this.#error.hidden = false;
     this.#input.focus();
     this.#input.select();
+  }
+
+  /** So a corrected value stops being announced as the rejected one. */
+  #clearInvalid(): void {
+    delete this.#input.dataset.invalid;
+    this.#input.removeAttribute('aria-invalid');
+    this.#error.hidden = true;
   }
 
   /** True when focus is inside the popover, so a blur can be ignored. */
