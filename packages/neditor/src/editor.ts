@@ -918,6 +918,10 @@ export class NEditor {
     this.#document.addEventListener('pointerdown', this.#handleDocumentPointerDown);
     this.#document.addEventListener('keydown', this.#handleDocumentKeyDown, true);
     this.#document.addEventListener('selectionchange', this.#handleSelectionChange);
+    // Capture, so a scroll inside any container on the way down is heard: a
+    // scroll event from an element does not bubble.
+    this.#document.addEventListener('scroll', this.#handleViewportChange, true);
+    this.#document.defaultView?.addEventListener('resize', this.#handleViewportChange);
 
     this.#render();
 
@@ -1189,6 +1193,7 @@ export class NEditor {
     this.#clearBlockSelection();
 
     view.content.focus({ preventScroll: true });
+    this.#reveal(view.root);
     setCaretOffset(view.content, offset);
     this.#emitter.emit('focus', { blockId: target });
 
@@ -1215,6 +1220,7 @@ export class NEditor {
     this.#clearBlockSelection();
 
     host.focus({ preventScroll: true });
+    this.#reveal(host);
     setSelectionRange(host, start, end);
 
     return true;
@@ -1345,6 +1351,8 @@ export class NEditor {
     this.#root.removeEventListener('pointerdown', this.#handleRootPointerDown);
     this.#root.removeEventListener('pointerover', this.#handlePointerOver);
     this.#root.removeEventListener('pointerleave', this.#handlePointerLeave);
+    this.#document.removeEventListener('scroll', this.#handleViewportChange, true);
+    this.#document.defaultView?.removeEventListener('resize', this.#handleViewportChange);
     this.#document.removeEventListener('pointermove', this.#handlePointerMove);
     this.#document.removeEventListener('pointerup', this.#handlePointerUp);
     this.#document.removeEventListener('pointercancel', this.#handlePointerCancel);
@@ -1699,6 +1707,11 @@ export class NEditor {
       // root take the keystrokes.
       this.#selection()?.removeAllRanges();
       this.#root.focus({ preventScroll: true });
+      const anchor = this.#selectionAnchor;
+
+      if (anchor) {
+        this.#reveal(this.#renderer.getView(anchor)?.root);
+      }
     }
 
     this.#emitter.emit('blockselection', { ids: [...this.#selected] });
@@ -3183,6 +3196,47 @@ export class NEditor {
     this.#composing = false;
     this.#composition = null;
   }
+
+  /**
+   * Dismisses the floating UI when the ground it was placed against moves.
+   *
+   * Portals are `position: fixed` and are given viewport coordinates once, at
+   * the moment they open. Nothing listened for scroll or resize, so after any
+   * scroll they sat over whatever content had moved under them -- still live,
+   * still acting on the block they were opened from, and pointing at something
+   * else entirely. Dismissing is the honest answer: the anchor they described
+   * is no longer where they are.
+   *
+   * The table toolbar is deliberately left alone. It tracks the caret's cell
+   * rather than a one-off anchor, and `#syncTableToolbar` repositions it.
+   */
+  /**
+   * Brings a block into view, and only if it is not already there.
+   *
+   * `preventScroll: true` on every `focus()` is deliberate -- letting the
+   * browser choose what to scroll moves the wrong container, and on a mount
+   * inside a pane it moves the page. But nothing then scrolled anything, so
+   * `editor.focus(id)` on an off-screen block was a no-op the user could see
+   * nothing of, and arrowing a block selection walked it off the screen.
+   * `block: 'nearest'` scrolls the least it can and does nothing at all when
+   * the element is already fully visible, which is what makes it safe to call
+   * on every focus rather than only the programmatic ones.
+   */
+  #reveal(element: Element | undefined): void {
+    element?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  }
+
+  #handleViewportChange = (): void => {
+    if (this.#destroyed) {
+      return;
+    }
+
+    this.#closeSlashMenu();
+    this.#closeLinkEditor();
+    this.#closeImageEditor();
+    this.#closeIconPicker();
+    this.#toolbar.hide();
+  };
 
   #handleCompositionStart = (event: CompositionEvent): void => {
     this.#composing = true;

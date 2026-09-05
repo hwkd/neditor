@@ -599,3 +599,77 @@ describe('focus is read from the tree the editor is mounted in', () => {
     expect(idOf(), 'the caret belongs to the block the user was editing').toBe('p0');
   });
 });
+
+describe('focusing a block brings it into view', () => {
+  /**
+   * `preventScroll: true` on every focus is deliberate -- letting the browser
+   * choose what to scroll moves the wrong container, and for a mount inside a
+   * pane it moves the page. But nothing then scrolled anything, so
+   * `editor.focus(id)` on an off-screen block was a no-op the user could see
+   * nothing of, and arrowing a block selection walked it off the screen.
+   */
+  const recordReveals = (): { calls: unknown[]; restore: () => void } => {
+    const calls: unknown[] = [];
+    // Swapped by descriptor rather than by reading the method off the
+    // prototype: the latter is an unbound reference, which the linter rightly
+    // objects to even when it is only being stashed to put back.
+    const original = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoView');
+
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      configurable: true,
+      writable: true,
+      value: (options?: unknown) => {
+        calls.push(options);
+      },
+    });
+
+    return {
+      calls,
+      restore: () => {
+        if (original) {
+          Object.defineProperty(Element.prototype, 'scrollIntoView', original);
+        }
+      },
+    };
+  };
+
+  test('focus(id) reveals the block it focused', () => {
+    const editor = mount(
+      Array.from({ length: 40 }, (_, index) =>
+        block({ id: `b${index}`, content: [{ text: `line ${index}` }] }),
+      ),
+    );
+    const { calls, restore } = recordReveals();
+
+    editor.focus('b39', 0);
+    restore();
+
+    expect(calls.length).toBeGreaterThan(0);
+    // `nearest` is what makes this safe on every focus: it scrolls the minimum,
+    // and nothing at all when the element is already fully visible.
+    expect(calls[0]).toEqual({ block: 'nearest', inline: 'nearest' });
+  });
+
+  test('focusRange does too', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'hello world' }] })]);
+    const { calls, restore } = recordReveals();
+
+    editor.focusRange('a', 0, 5);
+    restore();
+
+    expect(calls.length).toBeGreaterThan(0);
+  });
+
+  test('and so does moving a block selection', () => {
+    const editor = mount([
+      block({ id: 'a', content: [{ text: 'one' }] }),
+      block({ id: 'b', content: [{ text: 'two' }] }),
+    ]);
+    const { calls, restore } = recordReveals();
+
+    editor.selectBlocks(['b']);
+    restore();
+
+    expect(calls.length).toBeGreaterThan(0);
+  });
+});

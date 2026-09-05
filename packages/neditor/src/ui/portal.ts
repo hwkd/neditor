@@ -85,15 +85,24 @@ export function positionPortal(
   options: PositionOptions,
 ): void {
   const view = element.ownerDocument.defaultView;
-  const viewportWidth = view?.innerWidth ?? 0;
-  const viewportHeight = view?.innerHeight ?? 0;
+
+  // The visual viewport, not the layout one. `innerHeight` does not shrink when
+  // a software keyboard opens -- that is precisely what `visualViewport`
+  // reports -- so on a phone the menu was placed into the space the keyboard
+  // was covering and never flipped above it: of a 320px menu, 80px was visible.
+  // `offsetTop` matters too, since a pinch-zoomed or keyboard-scrolled visual
+  // viewport no longer starts at the top of the layout one.
+  const visual = view?.visualViewport ?? null;
+  const viewportWidth = visual?.width ?? view?.innerWidth ?? 0;
+  const viewportHeight = visual?.height ?? view?.innerHeight ?? 0;
+  const viewportTop = visual?.offsetTop ?? 0;
   const gap = options.gap ?? 8;
   const margin = options.margin ?? 8;
 
   const { width, height } = element.getBoundingClientRect();
 
-  const roomAbove = anchor.top - gap;
-  const roomBelow = viewportHeight - anchor.bottom - gap;
+  const roomAbove = anchor.top - viewportTop - gap;
+  const roomBelow = viewportTop + viewportHeight - anchor.bottom - gap;
 
   const above =
     options.prefer === 'above' ? roomAbove >= height : roomBelow < height && roomAbove >= height;
@@ -105,5 +114,7 @@ export function positionPortal(
   );
 
   element.style.left = `${Math.round(left)}px`;
-  element.style.top = `${Math.round(Math.min(Math.max(margin, top), viewportHeight - height - margin))}px`;
+  element.style.top = `${Math.round(
+    Math.min(Math.max(viewportTop + margin, top), viewportTop + viewportHeight - height - margin),
+  )}px`;
 }

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 
 import type { Block } from './index.ts';
 import { createEditor } from './index.ts';
+import { positionPortal } from './ui/portal.ts';
 import type { NEditor } from './editor.ts';
 
 /**
@@ -612,5 +613,75 @@ describe('Escape closes a dialog from anywhere inside it', () => {
 
     expect(escape(popover.querySelector<HTMLElement>('input')!)).toBe(true);
     expect(popover.hidden).toBe(true);
+  });
+});
+
+describe('floating UI answers to the ground it was placed against', () => {
+  /**
+   * Portals are `position: fixed` and are given viewport coordinates once, when
+   * they open. Nothing listened for scroll or resize, so after any scroll they
+   * sat over whatever content had moved under them -- still live, still acting
+   * on the block they were opened from, and pointing at something else.
+   */
+  const openIconPicker = (): HTMLElement => {
+    const editor = mount([block({ type: 'callout', content: [{ text: 'note' }] })]);
+    editor.element
+      .querySelector<HTMLElement>('.neditor-block__icon')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    return portal('neditor-icon-picker');
+  };
+
+  test('a scroll anywhere in the page dismisses an open popover', () => {
+    const popover = openIconPicker();
+
+    expect(popover.hidden).toBe(false);
+
+    // From an element, which is where the scroll of a mounted pane comes from
+    // -- and scroll events do not bubble, which is why the listener captures.
+    document.body.dispatchEvent(new Event('scroll', { bubbles: false }));
+
+    expect(popover.hidden).toBe(true);
+  });
+
+  test('so does a resize, which is what an opening keyboard looks like', () => {
+    const popover = openIconPicker();
+
+    expect(popover.hidden).toBe(false);
+
+    window.dispatchEvent(new Event('resize'));
+
+    expect(popover.hidden).toBe(true);
+  });
+});
+
+describe('the portal measures the viewport the user can actually see', () => {
+  /**
+   * `innerHeight` does not shrink when a software keyboard opens -- that is
+   * what `visualViewport` reports -- so the menu was placed into the space the
+   * keyboard covers and never flipped above it.
+   */
+  test('a shrunken visual viewport pushes the menu above the anchor', () => {
+    const element = document.createElement('div');
+    element.style.position = 'fixed';
+    document.body.append(element);
+    element.getBoundingClientRect = () => new DOMRect(0, 0, 320, 320);
+
+    const original = window.visualViewport;
+    Object.defineProperty(window, 'visualViewport', {
+      value: { width: 390, height: 408, offsetTop: 0 },
+      configurable: true,
+    });
+
+    // A caret at y=300: 108px of visible viewport below it, not enough for a
+    // 320px menu, but 300px above it -- which is where it has to go.
+    positionPortal(element, new DOMRect(20, 300, 1, 20), { prefer: 'below' });
+
+    const top = Number.parseInt(element.style.top, 10);
+
+    expect(top + 320, 'the menu must not run under the keyboard').toBeLessThanOrEqual(408);
+
+    Object.defineProperty(window, 'visualViewport', { value: original, configurable: true });
+    element.remove();
   });
 });
