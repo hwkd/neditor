@@ -699,14 +699,25 @@ describe('withHiddenDescendants scales with the selection, not with the document
       (_, index) => ({ id: `b${index}`, type: 'paragraph', depth: 0, content: [] }) as Block,
     );
 
+  /**
+   * The best of several runs, not one. A single timing picks up whatever else
+   * the machine was doing, and this test failed once in a full suite run while
+   * passing alone -- the minimum is the honest answer to "how fast can this go"
+   * and is what distinguishes the two implementations.
+   */
   const timeFor = (count: number): number => {
     const blocks = documentOf(count);
     const ids = blocks.map((one) => one.id);
-    const started = performance.now();
+    let best = Infinity;
 
-    withHiddenDescendants(blocks, ids);
+    for (let run = 0; run < 5; run += 1) {
+      const started = performance.now();
 
-    return Math.max(performance.now() - started, 0.05);
+      withHiddenDescendants(blocks, ids);
+      best = Math.min(best, performance.now() - started);
+    }
+
+    return Math.max(best, 0.05);
   };
 
   // Measured both ways rather than guessed: ten times the document costs about

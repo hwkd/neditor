@@ -836,3 +836,38 @@ describe('a reader closing a toggle does not leave its children selected', () =>
     ).toEqual([]);
   });
 });
+
+describe('setEditable(false) on a read-only editor changes nothing', () => {
+  /**
+   * Clearing the reader's expansions whenever `setEditable` was called meant
+   * the no-op every framework performs on re-render -- passing the same
+   * `editable: false` again -- snapped every toggle the reader had opened.
+   * They are cleared when editing is turned on, which is the case that needed
+   * it.
+   */
+  const doc = () => [
+    block({ id: 't', type: 'toggle', collapsed: true, content: [{ text: 'Summary' }] }),
+    block({ id: 'c', depth: 1, content: [{ text: 'Child' }] }),
+  ];
+  const shows = (editor: NEditor): boolean =>
+    editor.element.querySelector('[data-block-id="c"]') !== null;
+
+  test('a repeated setEditable(false) leaves the reader where they were', () => {
+    const editor = mount(doc(), { editable: false });
+    editor.element.querySelector<HTMLElement>('.neditor-block__chevron')!.click();
+
+    expect(shows(editor)).toBe(true);
+
+    editor.setEditable(false);
+
+    expect(shows(editor), 'a no-op must not close what the reader opened').toBe(true);
+  });
+
+  test('and turning editing on still discards them', () => {
+    const editor = mount(doc(), { editable: false });
+    editor.element.querySelector<HTMLElement>('.neditor-block__chevron')!.click();
+    editor.setEditable(true);
+
+    expect(shows(editor)).toBe(false);
+  });
+});

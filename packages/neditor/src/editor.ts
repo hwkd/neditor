@@ -1100,11 +1100,19 @@ export class NEditor {
   }
 
   setEditable(editable: boolean): void {
+    const was = this.#editable;
     this.#editable = editable;
-    // A reader's view-only expansions describe a document nobody could edit.
-    // Kept across this, they went on overriding the model for an author whose
-    // chevron then reported the opposite of what the page showed.
-    this.#readerExpanded.clear();
+
+    // Only when editing is actually turned on. A reader's view-only expansions
+    // describe a document nobody could edit, and kept across that they went on
+    // overriding the model for an author whose chevron then reported the
+    // opposite of what the page showed -- but clearing unconditionally meant a
+    // host calling `setEditable(false)` on an already read-only editor, which
+    // is the no-op every framework does on re-render, snapped every toggle the
+    // reader had opened.
+    if (editable && !was) {
+      this.#readerExpanded.clear();
+    }
     this.#renderer.setEditable(editable);
     // `canUndo` and `canRedo` both answer differently now, and a host that
     // renders its toolbar from the `history` event had no way to hear it.

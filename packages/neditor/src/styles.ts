@@ -144,12 +144,10 @@ export const NEDITOR_STYLES = `
      every level of nesting went flush. Apart, a bare 0 is a perfectly good
      padding and the indent is unaffected by it. */
   padding-inline-start: var(--neditor-gutter-width);
-  /* The selection's 2px outdent is subtracted here rather than set as its own
-     margin-inline-start: as a separate declaration it overrode this one
-     outright, and selecting a nested block flattened it to the left margin. */
-  margin-inline-start: calc(
-    var(--neditor-depth, 0) * var(--neditor-indent) - var(--neditor-selected-offset, 0px)
-  );
+  margin-inline-start: calc(var(--neditor-depth, 0) * var(--neditor-indent));
+  /* Positioning context for the selection bar, which is drawn as a
+     pseudo-element rather than a border -- see [data-selected]. */
+  position: relative;
   /* Both, now that the indent moved: the animation on indent and outdent is
      the margin's, and naming only the padding would have left it snapping. */
   transition:
@@ -587,13 +585,27 @@ export const NEDITOR_STYLES = `
 .neditor-block[data-selected='true'] {
   background: var(--neditor-selection);
   border-radius: 3px;
-  /* Logical, so the bar sits on the reading-start edge in both directions. */
-  border-inline-start: 2px solid var(--neditor-accent);
-  /* Read by the indent calc above, so the bar hangs outside the text without
-     replacing the block's depth. */
-  --neditor-selected-offset: 2px;
-  /* Not colour alone (1.4.1): the bar survives high-contrast modes and reads
-     for anyone who cannot distinguish the tint from the page. */
+}
+
+/* The selection bar. Not colour alone (1.4.1): it survives high-contrast modes
+   and reads for anyone who cannot distinguish the tint from the page.
+
+   Drawn as a pseudo-element rather than as a border, because a border takes
+   space and the compensating outdent had to live somewhere. As its own
+   margin-inline-start it overrode the depth indent that moved into that
+   property, flattening a selected nested block; folded into the indent's calc
+   it took the indent down with it whenever a host set a unitless value, and it
+   was still missing from the gutter's own sum, which put the drag handle 2px
+   inside the text of every selected block. Out of the box model, none of that
+   arises. Logical inset, so it sits on the reading-start edge either way. */
+.neditor-block[data-selected='true']::before {
+  content: '';
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 2px;
+  border-radius: 3px 0 0 3px;
+  background: var(--neditor-accent);
 }
 
 /* The native highlight would double up on the block overlay. */
@@ -1026,6 +1038,12 @@ export const NEDITOR_STYLES = `
     color: HighlightText;
     box-shadow: none;
     outline: 2px solid Highlight;
+  }
+
+  /* The bar inherits the opt-out from the block, so its author colour would be
+     kept and painted onto the system Highlight. A system colour instead. */
+  .neditor-block[data-selected='true']::before {
+    background: HighlightText;
   }
 
   /* forced-color-adjust inherits, so the opt-out above took the whole subtree

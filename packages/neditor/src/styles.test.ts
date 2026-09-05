@@ -446,24 +446,61 @@ describe('sizes that matter on a phone and for a broken image', () => {
   });
 });
 
-describe('the selection bar hangs outside the indent, it does not replace it', () => {
+describe('the selection bar is drawn outside the box model', () => {
   /**
-   * The depth indent moved into `margin-inline-start`, and the selected block's
-   * 2px outdent was already a `margin-inline-start` of its own -- so selecting a
-   * nested block flattened it to the left margin. The outdent is a variable the
-   * indent subtracts now, so the two compose instead of competing.
+   * It was a `border-inline-start` plus a compensating outdent, and that
+   * outdent could not be put anywhere safe. As its own `margin-inline-start` it
+   * overrode the depth indent that had moved into that property, flattening a
+   * selected nested block. Folded into the indent's calc it took the indent
+   * down with it whenever a host set a unitless value. And either way the
+   * border stayed out of the gutter's own sum, so the drag handle sat 2px
+   * inside the text of every selected block. A pseudo-element takes no space,
+   * so none of that arises.
    */
-  test('the selected rule sets no margin of its own', () => {
+  test('the selected rule sets no margin, no border and no offset token', () => {
     const rule = NEDITOR_STYLES.slice(
       NEDITOR_STYLES.indexOf(".neditor-block[data-selected='true'] {"),
     );
     const body = rule.slice(0, rule.indexOf('}'));
 
     expect(body).not.toMatch(/margin-inline-start:/);
-    expect(body).toContain('--neditor-selected-offset: 2px;');
+    expect(body).not.toMatch(/border-inline-start:/);
+    expect(NEDITOR_STYLES).not.toContain('--neditor-selected-offset');
   });
 
-  test('and the indent subtracts it', () => {
-    expect(NEDITOR_STYLES).toContain('var(--neditor-selected-offset, 0px)');
+  test('the bar itself is an absolutely positioned pseudo-element', () => {
+    const rule = NEDITOR_STYLES.slice(
+      NEDITOR_STYLES.indexOf(".neditor-block[data-selected='true']::before {"),
+    );
+    const body = rule.slice(0, rule.indexOf('}'));
+
+    expect(body).toContain('position: absolute;');
+    expect(body, 'logical, so it sits on the reading-start edge either way').toContain(
+      'inset-inline-start: 0;',
+    );
+  });
+
+  test('and the block is its positioning context', () => {
+    const rule = NEDITOR_STYLES.slice(NEDITOR_STYLES.indexOf('.neditor-block {'));
+
+    expect(rule.slice(0, rule.indexOf('}'))).toContain('position: relative;');
+  });
+
+  /**
+   * A pseudo-element inherits `forced-color-adjust` from the element it belongs
+   * to, and the selected block opts out -- so the bar's author colour would be
+   * kept and painted onto the system Highlight. The forced-colors block
+   * restates every other selection cue; it has to restate this one.
+   */
+  test('forced colours restate the bar rather than leaving it an author colour', () => {
+    expect(NEDITOR_STYLES).toMatch(
+      /forced-colors: active[\s\S]*\.neditor-block\[data-selected='true'\]::before \{[^}]*HighlightText/,
+    );
+  });
+
+  test('the indent is the depth alone, with nothing subtracted from it', () => {
+    expect(NEDITOR_STYLES).toContain(
+      'margin-inline-start: calc(var(--neditor-depth, 0) * var(--neditor-indent));',
+    );
   });
 });
