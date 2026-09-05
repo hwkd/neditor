@@ -263,12 +263,21 @@ function isApplePlatform(view: (Window & typeof globalThis) | null): boolean {
  * of a hand-written list is unbounded, so the rule names what it means instead.
  *
  * A custom element is included because its name must contain a hyphen and it
- * has no implicit role by definition; everything else keeps whatever it has.
+ * has no implicit role by definition; `<body>` because HTML-AAM maps it to
+ * generic too and mounting a full-page editor on it is a real thing to do.
+ *
+ * This is an under-approximation and stays one deliberately. Other elements map
+ * to generic as well -- `<pre>`, `<b>`, `<a>` without an href, an unknown
+ * non-hyphenated tag -- and are not listed, because nobody mounts an editor in
+ * them and because erring this way costs an accessible name on a host that
+ * would never be used, while erring the other way destroys the semantics of
+ * hosts that are. The two directions are not symmetric, and the first three
+ * attempts at this rule all failed by choosing the wrong one.
  */
 function hasGenericRole(element: HTMLElement): boolean {
   const tag = element.tagName;
 
-  return tag === 'DIV' || tag === 'SPAN' || tag.includes('-');
+  return tag === 'DIV' || tag === 'SPAN' || tag === 'BODY' || tag.includes('-');
 }
 
 /** Marks a clipboard this editor wrote; see `#handleCopy`. */

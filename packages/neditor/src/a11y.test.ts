@@ -812,3 +812,29 @@ describe('the role is added only where the element really has none', () => {
     },
   );
 });
+
+describe('a full-page mount is named too', () => {
+  /**
+   * HTML-AAM maps `<body>` to `generic`, which prohibits `aria-label` -- so a
+   * full-page editor mounted on it had a name the browser discarded, the exact
+   * failure the role exists to prevent for a bare `<div>`. It is the one
+   * plausible mount among the generic elements the predicate does not list;
+   * the rest (`<pre>`, `<b>`, `<a>` without an href) are left out on purpose,
+   * and the comment on `hasGenericRole` says why.
+   */
+  test('mounting on document.body still produces an accessible name', () => {
+    const editor = createEditor({
+      element: document.body,
+      label: 'My notes',
+      doc: { blocks: [block({})] },
+    });
+
+    expect(document.body.getAttribute('aria-label')).toBe('My notes');
+    expect(document.body.getAttribute('role'), 'generic prohibits the name').toBe('group');
+
+    editor.destroy();
+
+    expect(document.body.hasAttribute('role')).toBe(false);
+    expect(document.body.hasAttribute('aria-label')).toBe(false);
+  });
+});
