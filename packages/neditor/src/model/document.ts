@@ -1,6 +1,7 @@
 import { sanitizeImageUrl } from '../util/url.ts';
 import { createBlockId } from './ids.ts';
 import type { Mark, RichText, TextRun } from './rich-text.ts';
+import { INLINE_SPAN_LIMIT } from '../input/inline-rules.ts';
 import type { TableRows } from './table.ts';
 import {
   cloneTableRows,
@@ -959,6 +960,31 @@ const MARK_DELIMITERS: ReadonlyArray<readonly [Mark, string, string]> = [
  * Surrounding whitespace is hoisted outside the delimiters, because `**bold **`
  * does not parse as emphasis in any Markdown dialect.
  */
+/**
+ * The longest text a single emphasis or link span is written across.
+ *
+ * The reader will not look further back than `INLINE_SPAN_LIMIT` characters for
+ * an opening delimiter, so a longer span is one it can never close: bolding a
+ * 350-word paragraph and exporting it gave back the raw `**` at each end with
+ * the formatting gone. Comfortably under the reader's bound, which also has to
+ * cover the delimiters and any escaping this adds.
+ */
+const SAFE_SPAN = Math.floor(INLINE_SPAN_LIMIT * 0.75);
+
+/** Splits at the last space at or before `SAFE_SPAN`, or nowhere if there is none. */
+function splitLongSpan(text: string): [string, string] | null {
+  if (text.length <= SAFE_SPAN) {
+    return null;
+  }
+
+  const at = text.lastIndexOf(' ', SAFE_SPAN);
+
+  // A single unbroken token longer than the bound cannot be split without
+  // changing the text, so it is written whole and does not round-trip. Nothing
+  // a person types looks like that.
+  return at <= 0 ? null : [text.slice(0, at), text.slice(at)];
+}
+
 function runToMarkdown(run: TextRun): string {
   // One span per line. A mark or a link is line-bounded in the reader -- every
   // inline pattern excludes `\n`, so no rule can match a span that crosses one
@@ -970,6 +996,16 @@ function runToMarkdown(run: TextRun): string {
       .split('\n')
       .map((line) => runToMarkdown({ ...run, text: line }))
       .join('\\\n');
+  }
+
+  // And one span per readable length, for the same reason: a span the reader
+  // cannot reach the start of is a span it leaves as literal delimiters.
+  if (run.marks?.length || run.link) {
+    const split = splitLongSpan(run.text);
+
+    if (split) {
+      return split.map((part) => runToMarkdown({ ...run, text: part })).join('');
+    }
   }
 
   const escaped = escapeMarkdownText(run.text);

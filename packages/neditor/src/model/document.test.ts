@@ -618,3 +618,67 @@ describe('a mark or link that spans a soft break', () => {
     expect(roundTrip([{ text: 'one\ntwo' }])).toEqual([{ text: 'one\ntwo' }]);
   });
 });
+
+describe('a span longer than the reader will look back', () => {
+  /**
+   * The reader will not search further than `INLINE_SPAN_LIMIT` characters back
+   * for an opening delimiter, and the writer had no matching bound -- so
+   * selecting a long paragraph, pressing Cmd+B and exporting gave back the raw
+   * `**` at each end with the formatting gone. One gesture, visible corruption.
+   * The writer splits at a space now, which renders identically and reads back.
+   */
+  const words = (count: number): string =>
+    Array.from({ length: count }, (_, index) => `w${index}`).join(' ');
+
+  const roundTrip = (content: TextRun[]): TextRun[] =>
+    normalizeDocument({
+      blocks: blocksFromMarkdown(
+        toMarkdown(
+          normalizeDocument({
+            blocks: [{ id: 'p', type: 'paragraph', depth: 0, content } as Block],
+          }),
+        ),
+      ),
+    }).blocks[0]!.content;
+
+  test.each([
+    ['bold', { marks: ['bold'] as Mark[] }],
+    ['italic', { marks: ['italic'] as Mark[] }],
+    ['a link', { link: 'https://example.com/x' }],
+  ])('%s over 2500 characters keeps its text and its formatting', (_name, extra) => {
+    const text = words(700);
+
+    expect(text.length).toBeGreaterThan(2000);
+
+    const back = roundTrip([{ text, ...extra }]);
+    const formatted = back
+      .filter((run) => (run.marks ?? []).length > 0 || run.link !== undefined)
+      .map((run) => run.text.length)
+      .reduce((total, length) => total + length, 0);
+
+    expect(back.map((run) => run.text).join('')).toBe(text);
+    expect(back.map((run) => run.text).join('')).not.toContain('**');
+    // All but the space each split lands on, which is the same residue the
+    // soft-break split leaves and is invisible either way.
+    expect(formatted).toBeGreaterThan(text.length - 5);
+  });
+
+  test('a span inside the bound is still written as one', () => {
+    const text = words(300);
+    const back = roundTrip([{ text, marks: ['bold'] }]);
+
+    expect(back).toHaveLength(1);
+    expect(back[0]?.marks).toEqual(['bold']);
+  });
+
+  /**
+   * Stated rather than hidden: a single unbroken token past the bound has no
+   * space to split at, and splitting it anywhere else would change the text.
+   * Nothing a person types looks like this.
+   */
+  test('one unbroken token past the bound is the case that still does not survive', () => {
+    const back = roundTrip([{ text: 'x'.repeat(2500), marks: ['bold'] }]);
+
+    expect(back.every((run) => (run.marks ?? []).length === 0)).toBe(true);
+  });
+});

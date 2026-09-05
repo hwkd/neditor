@@ -1545,3 +1545,34 @@ describe('a code block keeps its first line through the clipboard', () => {
     expect(html).toContain('<pre><code>');
   });
 });
+
+describe('a code block reads the text the sanitizer left, not everything under it', () => {
+  /**
+   * The `<pre>` branch took `element.textContent`, which includes the source of
+   * a `<script>` or `<style>` sitting inside it -- markup every other branch
+   * drops. It is inert, since parsing happens in a detached template and this
+   * becomes text either way, but it is still somebody else's code arriving in
+   * the user's document as content.
+   */
+  test.each([
+    ['a script', '<pre>keep me<script>alert(1)</script></pre>', 'alert(1)'],
+    ['a style', '<pre>keep me<style>.x{color:red}</style></pre>', 'color:red'],
+  ])('%s inside a pre is dropped, not read as code', (_name, html, leaked) => {
+    const text = blocksFromHtml(document, html)
+      .flatMap((one) => one.content ?? [])
+      .map((run) => run.text)
+      .join('');
+
+    expect(text).toBe('keep me');
+    expect(text).not.toContain(leaked);
+  });
+
+  test('ordinary code is untouched', () => {
+    const text = blocksFromHtml(document, '<pre>a\nb</pre>')
+      .flatMap((one) => one.content ?? [])
+      .map((run) => run.text)
+      .join('');
+
+    expect(text).toBe('a\nb');
+  });
+});

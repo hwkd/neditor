@@ -1863,7 +1863,13 @@ function visitBlocksInner(
 
     if (tag === 'PRE') {
       flushInline();
-      out.push(createBlock('code', element.textContent ?? '', depthOf(element, depth)));
+      // `subtreeText`, not `textContent`: the latter includes the source of a
+      // <script> or <style> that happens to sit inside the <pre>, so pasted
+      // markup the sanitizer is supposed to drop arrived as document content
+      // instead. It is inert -- parsing happens in a detached template and this
+      // is text either way -- but it is still somebody else's code appearing in
+      // the user's document.
+      out.push(createBlock('code', subtreeText(element), depthOf(element, depth)));
       continue;
     }
 
