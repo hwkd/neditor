@@ -415,3 +415,39 @@ describe('our own Markdown is recognised even without the clipboard marker', () 
     expect(intoCode('<div>const a</div>', 'const   a   =   1;')).toBe('const   a   =   1;');
   });
 });
+
+describe('plain text with no HTML beside it is literal, whatever it looks like', () => {
+  /**
+   * The marker-less fallback compares `toMarkdown(parsed)` against the plain
+   * text -- but when there is no HTML, `parsed` came from parsing that same
+   * plain text as Markdown, so the comparison is a round trip against itself
+   * and is true for anything Markdown-shaped. It made the "is this ours" test
+   * vacuous in exactly the case where it is the only signal.
+   *
+   * A code block is the one place that is supposed to be literal, and this is
+   * the ordinary way into it: a terminal, `pbcopy`, a plain-text editor, most
+   * chat apps -- none of them put `text/html` on the clipboard.
+   */
+  const intoCode = (plain: string): string => {
+    const editor = mount([block({ id: 'k', type: 'code', content: [] })]);
+    const host = editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
+    host.focus();
+    paste(host, '', plain);
+
+    return blockText(editor.getDocument().blocks[0]!);
+  };
+
+  test.each([
+    ['a comment', '# TODO: fix'],
+    ['a glob and emphasis', 'a *b* c'],
+    ['a document separator', '---'],
+    ['an image reference', '![alt](https://a.test/x.png)'],
+    ['a bullet', '- item one'],
+    ['bold markers', '**bold**'],
+    ['an ordered item', '1. first'],
+    ['a quote marker', '> quoted'],
+    ['a pipe table', '| a | b |\n| --- | --- |\n| 1 | 2 |'],
+  ])('%s survives verbatim', (_name, plain) => {
+    expect(intoCode(plain)).toBe(plain);
+  });
+});

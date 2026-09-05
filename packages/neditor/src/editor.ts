@@ -251,43 +251,24 @@ function isApplePlatform(view: (Window & typeof globalThis) | null): boolean {
 /** One editable host: a block's own content, or a single table cell. */
 /** What an in-flight composition needs to remember; see `#composition`. */
 /**
- * Elements that carry an implicit ARIA role worth keeping.
+ * True when the element has no implicit ARIA role for a `group` to displace.
  *
- * The root needs a role because `generic` -- what a bare `<div>` has --
- * prohibits an accessible name. Listing the *generic* elements instead was the
- * wrong way round: it withheld the role from anything not on the list,
- * including a custom element, which is exactly the mount a web component uses
- * and which has no implicit role either.
+ * The root needs a role at all because `generic` -- what a bare `<div>` has --
+ * prohibits an accessible name. Getting the rule right took three attempts, and
+ * the shape of the mistake is worth keeping: listing the generic elements
+ * withheld the role from custom elements, which have none either; inverting
+ * that to a list of semantic elements to skip then stamped `group` onto
+ * everything absent from a hand-written set -- `<td>`, `<dd>`, `<p>`,
+ * `<summary>`, `<label>` -- destroying real semantics on each. The complement
+ * of a hand-written list is unbounded, so the rule names what it means instead.
+ *
+ * A custom element is included because its name must contain a hyphen and it
+ * has no implicit role by definition; everything else keeps whatever it has.
  */
-const SEMANTIC_ELEMENTS = new Set([
-  'MAIN',
-  'SECTION',
-  'ARTICLE',
-  'NAV',
-  'FORM',
-  'ASIDE',
-  'HEADER',
-  'FOOTER',
-  'DIALOG',
-  'FIGURE',
-  'TABLE',
-  'UL',
-  'OL',
-  'LI',
-  'BLOCKQUOTE',
-  'FIELDSET',
-  'SEARCH',
-  'H1',
-  'H2',
-  'H3',
-  'H4',
-  'H5',
-  'H6',
-]);
-
-/** True when the element has no implicit role that a `group` would displace. */
 function hasGenericRole(element: HTMLElement): boolean {
-  return !SEMANTIC_ELEMENTS.has(element.tagName);
+  const tag = element.tagName;
+
+  return tag === 'DIV' || tag === 'SPAN' || tag.includes('-');
 }
 
 /** Marks a clipboard this editor wrote; see `#handleCopy`. */
@@ -4242,7 +4223,7 @@ export class NEditor {
           // for *all* HTML, which is what the first version of this fix did,
           // took the second case away to fix the first.
           richFromPlainText(
-            own || this.#plainIsOurMarkdown(pasted, plain)
+            own || this.#plainIsOurMarkdown(html, pasted, plain)
               ? pasted.map(blockText).join('\n')
               : plain || pasted.map(blockText).join('\n'),
           )
@@ -4280,8 +4261,14 @@ export class NEditor {
    * blocks back out reproduces the plain text byte for byte, the plain text is
    * that Markdown. Another application's pairing does not survive that.
    */
-  #plainIsOurMarkdown(pasted: readonly Block[], plain: string): boolean {
-    if (plain.length === 0) {
+  #plainIsOurMarkdown(html: string, pasted: readonly Block[], plain: string): boolean {
+    // Only when the blocks came from the HTML. Without HTML `#parseClipboard`
+    // parses the *plain text* into them, so the comparison below becomes a
+    // Markdown round trip against itself -- true for anything Markdown-shaped,
+    // which made this vacuous in exactly the case where it is the only signal.
+    // `# TODO: fix` pasted from a terminal lost its `#`, and `---` inserted
+    // nothing at all.
+    if (html.length === 0 || plain.length === 0) {
       return false;
     }
 

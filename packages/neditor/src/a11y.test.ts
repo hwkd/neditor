@@ -720,7 +720,11 @@ describe('a mount with no implicit role gets one, whatever its tag', () => {
    * exactly the mount a web component uses, and which has no implicit role
    * either. The list names the elements that *have* a role worth keeping.
    */
-  test.each(['div', 'span', 'my-editor', 'label'])('a <%s> host is named', (tag) => {
+  // Not <label>: an earlier version of this test asserted it should be named,
+  // which was wrong -- a label has real semantics, and the describe below says
+  // so. It was on the list because the finding that prompted the change cited
+  // it as a custom-element-like mount, and I took that at face value.
+  test.each(['div', 'span', 'my-editor'])('a <%s> host is named', (tag) => {
     const host = document.createElement(tag);
     document.body.append(host);
     const editor = createEditor({ element: host, doc: { blocks: [block({})] } });
@@ -742,6 +746,69 @@ describe('a mount with no implicit role gets one, whatever its tag', () => {
 
       editor.destroy();
       host.remove();
+    },
+  );
+});
+
+describe('the role is added only where the element really has none', () => {
+  /**
+   * Listing the generic elements withheld the role from custom elements, which
+   * have none either. Inverting the list -- naming the semantic tags to skip --
+   * then stamped `role="group"` onto everything absent from a hand-written set,
+   * including a `<td>`, which is a legal mount and whose cell semantics the
+   * role destroys. The complement of a hand-written list is unbounded; the
+   * rule has to name what it means.
+   */
+  const roleOf = (element: HTMLElement): string | null => {
+    document.body.append(element);
+    const editor = createEditor({ element, doc: { blocks: [block({})] } });
+    const role = element.getAttribute('role');
+    editor.destroy();
+    element.remove();
+
+    return role;
+  };
+
+  test.each(['div', 'span'])('a <%s> gets one', (tag) => {
+    expect(roleOf(document.createElement(tag))).toBe('group');
+  });
+
+  test('so does a custom element, which has no implicit role either', () => {
+    expect(roleOf(document.createElement('my-editor'))).toBe('group');
+  });
+
+  /** A `<td>` is only a cell inside a table, so it is given one. */
+  const roleInContext = (tag: string): string | null => {
+    const element = document.createElement(tag);
+
+    if (tag !== 'td' && tag !== 'th') {
+      return roleOf(element);
+    }
+
+    const table = document.createElement('table');
+    const row = document.createElement('tr');
+    row.append(element);
+    table.append(row);
+    document.body.append(table);
+    const editor = createEditor({ element, doc: { blocks: [block({})] } });
+    const role = element.getAttribute('role');
+    editor.destroy();
+    table.remove();
+
+    return role;
+  };
+
+  test.each(['td', 'th', 'dd', 'dt', 'dl', 'p', 'summary', 'details', 'output', 'label'])(
+    'a <%s> keeps its own semantics',
+    (tag) => {
+      expect(roleInContext(tag)).toBeNull();
+    },
+  );
+
+  test.each(['main', 'section', 'article', 'nav', 'form', 'aside', 'blockquote'])(
+    'and so does a <%s>',
+    (tag) => {
+      expect(roleOf(document.createElement(tag))).toBeNull();
     },
   );
 });
