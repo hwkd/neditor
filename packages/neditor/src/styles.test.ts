@@ -217,6 +217,60 @@ describe('published declarations', () => {
     },
   );
 
+  /**
+   * And the DOM-free entry does not, which is the whole reason it exists. A
+   * triple-slash reference inside a dependency injects `lib.dom` into the
+   * consumer's entire program with nothing on their side able to suppress it,
+   * so on a runtime whose globals conflict with the DOM's -- a Cloudflare
+   * Worker being the clear case -- one import broke the build, reported against
+   * the consumer's own lines and naming nothing from this package.
+   *
+   * Reachability, not just the entry file: a shared chunk carries its own copy
+   * of the banner, so an entry that merely *reaches* one is infected while
+   * still compiling. Both mutations of the build gate passed until it asked
+   * this question instead.
+   */
+  test.skipIf(!existsSync(new URL('../dist/model.d.mts', import.meta.url)))(
+    'the model entry reaches no declaration that asks for the DOM',
+    () => {
+      const dist = new URL('../dist/', import.meta.url);
+      const seen = new Set<string>();
+      const pending = ['model.d.mts', 'model.d.cts'];
+
+      while (pending.length > 0) {
+        const name = pending.pop() as string;
+
+        if (seen.has(name)) {
+          continue;
+        }
+
+        seen.add(name);
+        const source = readFileSync(new URL(name, dist), 'utf8');
+
+        expect(source.includes(DTS_LIB_REFERENCE), `${name} asks for the DOM`).toBe(false);
+        expect(
+          /\b(HTMLElement|ShadowRoot|DocumentFragment)\b/.test(source),
+          `${name} names a DOM type`,
+        ).toBe(false);
+
+        for (const [, specifier] of source.matchAll(/from\s*"(\.[^"]+)"/g)) {
+          pending.push((specifier as string).replace(/^\.\//, '').replace(/\.(m|c)js$/, '.d.$1ts'));
+        }
+      }
+
+      expect(seen.size).toBeGreaterThan(0);
+    },
+  );
+
+  test('the package offers the DOM-free entry under its own export', () => {
+    const exports = manifest.exports as Record<string, Record<string, Record<string, string>>>;
+
+    expect(exports['./model']?.import?.types).toBe('./dist/model.d.mts');
+    expect(exports['./model']?.import?.default).toBe('./dist/model.mjs');
+    expect(exports['./model']?.require?.types).toBe('./dist/model.d.cts');
+    expect(exports['./model']?.require?.default).toBe('./dist/model.cjs');
+  });
+
   test('the build config still asks for that reference', () => {
     const config = readFileSync(new URL('../vite.config.ts', import.meta.url), 'utf8');
 

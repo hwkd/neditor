@@ -32,11 +32,41 @@ understands neither the extensions nor the map, so it reports the package as
 untyped rather than as mistyped. This is the same kind of floor as the one
 above — there is no compatibility copy of the declarations.
 
-The declarations open with `/// <reference lib="dom" />`, because the public
-types name `HTMLElement`, `ShadowRoot`, `Document`, `Node` and
-`DocumentFragment`. A `tsconfig` without `"dom"` in `lib` — the server-side case
-the headless serializers exist for — therefore typechecks the package without
-having to add it.
+The main entry's declarations open with `/// <reference lib="dom" />`, because
+its public types name `HTMLElement`, `ShadowRoot`, `Document`, `Node` and
+`DocumentFragment`. A `tsconfig` without `"dom"` in `lib` therefore typechecks
+the package without having to add it.
+
+That directive is infectious, and deliberately so: it pulls `lib.dom` into the
+importing program, and nothing on the consumer's side can suppress it —
+`skipLibCheck` hides errors inside the declarations but does not stop the lib
+from being injected. On a runtime whose own globals conflict with the DOM's,
+a Cloudflare Worker being the clear case, importing the main entry breaks the
+build, and the errors are reported against your own lines while naming nothing
+from this package.
+
+So the DOM-free half is a separate entry:
+
+```ts
+import { blocksFromMarkdown, normalizeDocument, toMarkdown } from '@neditor/core/model';
+
+const doc = normalizeDocument({ blocks: blocksFromMarkdown('# Title\n\nBody') });
+const markdown = toMarkdown(doc);
+```
+
+`@neditor/core/model` is the document without the editor: the block model, rich
+text, tables, history types, the Markdown reader and writer, the input rules and
+the URL sanitisers. Its declarations name no DOM type and reach no declaration
+that asks for one — `scripts/check-dts.mjs` compiles a consumer against the
+packed tarball with `lib: ["es2022"]`, no `dom`, and `skipLibCheck` off, and
+then walks everything those declarations import to prove none of them requests
+it. Use it from a worker, an edge function, a server rendering stored documents,
+or a build step; use the main entry wherever there is a DOM to mount into.
+
+It does not export `NEDITOR_STYLES`. That constant lives beside `injectStyles`,
+whose signature names `Document | ShadowRoot | Element`, and re-exporting its
+neighbour dragged that declaration into the entry's shared chunk. A server that
+wants the stylesheet reads the `dist/styles.css` the package already ships.
 
 ## Usage
 

@@ -11,12 +11,26 @@ import { defineConfig } from 'vite-plus';
  * The directive lives on the declaration output rather than in `src`, because
  * the bundler rewrites the entry and would not carry a triple-slash comment
  * through from there.
+ *
+ * It is also infectious: a triple-slash reference inside a dependency pulls
+ * `lib.dom` into the consumer's entire program, and nothing on their side can
+ * suppress it — `skipLibCheck` does not stop lib injection. On a runtime whose
+ * own globals conflict with the DOM's, a Cloudflare Worker being the clear
+ * case, one import of this package breaks the build, and the errors are
+ * reported against the consumer's own lines naming nothing from here. That is
+ * why the DOM-free surface is a separate entry rather than a subset of this
+ * one: `emit-css.mjs` strips this banner from `model.d.*`, and the check script
+ * proves what is left compiles with `lib: ["es2022"]` and no `dom`.
  */
 const DTS_LIB_REFERENCE = '/// <reference lib="dom" />';
 
 export default defineConfig({
   pack: {
-    entry: ['src/index.ts'],
+    // Two entries. `src/model.ts` is the DOM-free half, and it exists so the
+    // banner below does not have to reach the consumers who cannot take it --
+    // see the note there. `scripts/check-dts.mjs` compiles a consumer against
+    // each, the model one with no `dom` lib at all.
+    entry: ['src/index.ts', 'src/model.ts'],
     format: ['esm', 'cjs'],
     dts: true,
     // Off deliberately: tsdown embeds every source file in the map, so shipping
