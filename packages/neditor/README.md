@@ -30,7 +30,16 @@ cutting an emoji in half.
 `.d.cts` and points at them through `exports`; a compiler older than that
 understands neither the extensions nor the map, so it reports the package as
 untyped rather than as mistyped. This is the same kind of floor as the one
-above — there is no compatibility copy of the declarations.
+above — there is no compatibility copy of the declarations, and no
+`typesVersions` fallback for the `./model` subpath either.
+
+If you run [`arethetypeswrong`](https://arethetypeswrong.github.io) over this
+package you will see two expected failures rather than none. `./model` does not
+resolve under `node10`, which is the floor above stated as a matrix cell — the
+main entry only resolves there because its `main` and `types` fields happen to
+predate the map. And `./styles.css` does not resolve as types under any setting,
+because it is a stylesheet: import it through a bundler that understands CSS, or
+read the file.
 
 The main entry's declarations open with `/// <reference lib="dom" />`, because
 its public types name `HTMLElement`, `ShadowRoot`, `Document`, `Node` and
