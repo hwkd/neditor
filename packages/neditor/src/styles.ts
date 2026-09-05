@@ -29,8 +29,8 @@ export const NEDITOR_STYLES = `
   --neditor-danger: rgb(212 76 71);
   --neditor-shadow: 0 0 0 1px rgb(15 15 15 / 0.05), 0 3px 6px rgb(15 15 15 / 0.1),
     0 9px 24px rgb(15 15 15 / 0.2);
-  --neditor-indent: 1.5rem;
-  --neditor-gutter-width: 2.75rem;
+  --neditor-indent: 1.5em;
+  --neditor-gutter-width: 2.75em;
   --neditor-selection: rgb(35 131 226 / 0.16);
   --neditor-callout-bg: rgb(241 241 239);
   --neditor-table-border: rgb(55 53 47 / 0.16);
@@ -42,6 +42,11 @@ export const NEDITOR_STYLES = `
   /* Positioning context for the gutter and the drop indicator. */
   position: relative;
   font-family: var(--neditor-font);
+  /* Pinned, so the editor is the same size on every host -- and every size
+     below is therefore in em, which resolves against this. They used to be
+     rem, which resolves against the host's root instead: on the common
+     62.5% root-font-size reset that made h2 and h3 render smaller than body
+     text, and collapsed quotes to 10px and code to 8.5px. */
   font-size: 16px;
   line-height: 1.5;
   caret-color: var(--neditor-text);
@@ -127,13 +132,24 @@ export const NEDITOR_STYLES = `
   /* The gutter reservation lives on the block, not the root: a host stylesheet
      with higher specificity would otherwise win and the controls would hang
      outside the editor. Set --neditor-gutter-width to 0 to reclaim the space. */
-  /* Logical, not physical: this single rule carries both the gutter
-     reservation and the whole nesting model, and under dir="rtl" the flex row
-     already mirrors while a left padding would not. */
-  padding-inline-start: calc(
-    var(--neditor-gutter-width) + var(--neditor-depth, 0) * var(--neditor-indent)
-  );
-  transition: padding-inline-start 120ms ease;
+  /* Logical, not physical: these carry the gutter reservation and the whole
+     nesting model, and under dir="rtl" the flex row already mirrors while a
+     left padding would not.
+
+     Two declarations rather than one calc adding them together. Summed, a
+     host setting --neditor-gutter-width to 0 -- unitless, exactly as the README
+     said to -- made the calc add a number to a length. That is invalid, and
+     because it only becomes invalid after var() substitution it is
+     invalid-at-computed-value-time, so the whole declaration was dropped and
+     every level of nesting went flush. Apart, a bare 0 is a perfectly good
+     padding and the indent is unaffected by it. */
+  padding-inline-start: var(--neditor-gutter-width);
+  margin-inline-start: calc(var(--neditor-depth, 0) * var(--neditor-indent));
+  /* Both, now that the indent moved: the animation on indent and outdent is
+     the margin's, and naming only the padding would have left it snapping. */
+  transition:
+    padding-inline-start 120ms ease,
+    margin-inline-start 120ms ease;
 }
 
 .neditor-block__content {
@@ -187,15 +203,15 @@ export const NEDITOR_STYLES = `
 }
 
 .neditor-block__content:is(h1) {
-  font-size: 1.875rem;
+  font-size: 1.875em;
 }
 
 .neditor-block__content:is(h2) {
-  font-size: 1.5rem;
+  font-size: 1.5em;
 }
 
 .neditor-block__content:is(h3) {
-  font-size: 1.25rem;
+  font-size: 1.25em;
 }
 
 /* ---------------------------------------------------------------- lists -- */
@@ -263,7 +279,7 @@ export const NEDITOR_STYLES = `
 .neditor-block__content:is(blockquote) {
   padding-inline-start: 0.875rem;
   border-inline-start: 3px solid currentColor;
-  font-size: 1rem;
+  font-size: 1em;
 }
 
 .neditor-block__pre {
@@ -286,7 +302,7 @@ export const NEDITOR_STYLES = `
   top: 0.5rem;
   inset-inline-start: 1rem;
   font-family: var(--neditor-font);
-  font-size: 0.75rem;
+  font-size: 0.75em;
   color: var(--neditor-text-muted);
 }
 
@@ -294,7 +310,7 @@ export const NEDITOR_STYLES = `
   display: block;
   padding: 0;
   font-family: var(--neditor-font-mono);
-  font-size: 0.85rem;
+  font-size: 0.85em;
   line-height: 1.5;
   tab-size: 2;
 }
@@ -319,7 +335,7 @@ export const NEDITOR_STYLES = `
   border-radius: 4px;
   background: transparent;
   font-family: var(--neditor-font);
-  font-size: 1.125rem;
+  font-size: 1.125em;
   line-height: 1.35;
   cursor: pointer;
   -webkit-user-select: none;
@@ -405,7 +421,7 @@ export const NEDITOR_STYLES = `
   background: var(--neditor-callout-bg);
   color: var(--neditor-text-muted);
   font: inherit;
-  font-size: 0.875rem;
+  font-size: 0.875em;
   cursor: pointer;
 }
 
@@ -415,7 +431,7 @@ export const NEDITOR_STYLES = `
 
 .neditor-block[data-block-type='image'] .neditor-block__content {
   padding-top: 0.375rem;
-  font-size: 0.8125rem;
+  font-size: 0.8125em;
   color: var(--neditor-text-muted);
 }
 
@@ -483,7 +499,7 @@ export const NEDITOR_STYLES = `
 }
 
 .neditor-slash-menu {
-  width: 20rem;
+  width: 20em;
   max-height: 20rem;
   overflow: hidden;
 }
@@ -516,7 +532,7 @@ export const NEDITOR_STYLES = `
   height: 2.5rem;
   border: 1px solid var(--neditor-border);
   border-radius: 4px;
-  font-size: 0.8rem;
+  font-size: 0.8em;
   font-weight: 500;
 }
 
@@ -525,12 +541,12 @@ export const NEDITOR_STYLES = `
 }
 
 .neditor-slash-menu__label {
-  font-size: 0.875rem;
+  font-size: 0.875em;
   font-weight: 500;
 }
 
 .neditor-slash-menu__description {
-  font-size: 0.75rem;
+  font-size: 0.75em;
   color: var(--neditor-text-muted);
   white-space: nowrap;
   overflow: hidden;
@@ -606,8 +622,14 @@ export const NEDITOR_STYLES = `
   pointer-events: none;
 }
 
-/* translateX is physical, so the direction has to be mirrored explicitly. */
-[dir='rtl'] .neditor-gutter {
+/* translateX is physical, so the direction has to be mirrored explicitly --
+   and against the editor's own direction, not an ancestor's. Keyed off a bare
+   [dir='rtl'] this matched an LTR editor sitting anywhere inside an RTL page,
+   where inset-inline-start had already resolved to the left: the mirroring was
+   applied to something unmirrored and dropped the drag handle on top of the
+   first characters of every line. */
+.neditor[dir='rtl'] .neditor-gutter,
+[dir='rtl'] .neditor:not([dir]) .neditor-gutter {
   transform: translateX(100%);
 }
 
@@ -680,7 +702,7 @@ export const NEDITOR_STYLES = `
   padding: 0;
   background: none;
   color: inherit;
-  font-size: 0.85rem;
+  font-size: 0.85em;
 }
 
 .neditor-link {
@@ -716,7 +738,7 @@ export const NEDITOR_STYLES = `
   background: transparent;
   color: var(--neditor-text);
   font-family: inherit;
-  font-size: 0.875rem;
+  font-size: 0.875em;
   cursor: pointer;
   transition: background-color 80ms ease, color 80ms ease;
 }
@@ -749,7 +771,7 @@ export const NEDITOR_STYLES = `
 
 .neditor-toolbar__button[data-mark='code'] {
   font-family: var(--neditor-font-mono);
-  font-size: 0.7rem;
+  font-size: 0.7em;
 }
 
 .neditor-toolbar__separator {
@@ -781,7 +803,7 @@ export const NEDITOR_STYLES = `
   border: 0;
   border-radius: 4px;
   background: transparent;
-  font-size: 1rem;
+  font-size: 1em;
   line-height: 1;
   cursor: pointer;
 }
@@ -799,7 +821,7 @@ export const NEDITOR_STYLES = `
   background: transparent;
   color: var(--neditor-text);
   font: inherit;
-  font-size: 0.8125rem;
+  font-size: 0.8125em;
   outline: none;
 }
 
@@ -827,7 +849,7 @@ export const NEDITOR_STYLES = `
   background: transparent;
   color: var(--neditor-text);
   font-family: inherit;
-  font-size: 0.75rem;
+  font-size: 0.75em;
   white-space: nowrap;
   cursor: pointer;
   transition: background-color 80ms ease;
@@ -857,7 +879,7 @@ export const NEDITOR_STYLES = `
   background: transparent;
   color: var(--neditor-text);
   font: inherit;
-  font-size: 0.8125rem;
+  font-size: 0.8125em;
   outline: none;
 }
 
@@ -895,7 +917,7 @@ export const NEDITOR_STYLES = `
   background: transparent;
   color: var(--neditor-text);
   font: inherit;
-  font-size: 0.8125rem;
+  font-size: 0.8125em;
   outline: none;
 }
 
@@ -916,7 +938,7 @@ export const NEDITOR_STYLES = `
   background: var(--neditor-accent);
   color: var(--neditor-on-accent);
   font: inherit;
-  font-size: 0.8125rem;
+  font-size: 0.8125em;
   cursor: pointer;
 }
 

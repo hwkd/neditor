@@ -350,3 +350,67 @@ describe('the stylesheet works on the engines the package says it supports', () 
     }
   });
 });
+
+describe("sizes and directions that hold on somebody else's page", () => {
+  /**
+   * The editor pins its own base font-size so it looks the same everywhere.
+   * Every size below it was then given in `rem`, which resolves against the
+   * *host's* root instead -- so on the ubiquitous `html { font-size: 62.5% }`
+   * reset, h2 and h3 rendered smaller than body text (15px and 12.5px against
+   * 16px) and quotes and code collapsed to 10px and 8.5px. Measured in Chrome
+   * after the change: 30 / 24 / 20 / 16px, in the order the scale intends.
+   */
+  test('every font-size resolves against the editor, not the host root', () => {
+    expect(NEDITOR_STYLES).not.toMatch(/font-size:\s*[\d.]+rem/);
+    expect(NEDITOR_STYLES).toMatch(/font-size:\s*[\d.]+em/);
+  });
+
+  test('so do the tokens the layout is built from', () => {
+    expect(NEDITOR_STYLES).toContain('--neditor-indent: 1.5em');
+    expect(NEDITOR_STYLES).toContain('--neditor-gutter-width: 2.75em');
+  });
+
+  /**
+   * `calc(var(--neditor-gutter-width) + var(--neditor-depth) * var(--neditor-indent))`
+   * looks reasonable and is a trap: a host setting the gutter to `0` -- unitless,
+   * exactly as the README told them to -- makes it add a number to a length.
+   * That is invalid only after `var()` substitution, which makes it
+   * invalid-at-computed-value-time, so the whole declaration is dropped and
+   * every level of nesting goes flush. Kept apart, a bare `0` is a fine padding.
+   */
+  test('the gutter and the indent are separate declarations', () => {
+    expect(NEDITOR_STYLES).toContain('padding-inline-start: var(--neditor-gutter-width);');
+    expect(NEDITOR_STYLES).toContain(
+      'margin-inline-start: calc(var(--neditor-depth, 0) * var(--neditor-indent));',
+    );
+    expect(NEDITOR_STYLES, 'summing them is what a unitless gutter width breaks').not.toMatch(
+      /calc\(\s*var\(--neditor-gutter-width\)\s*\+/,
+    );
+  });
+
+  test('and both are animated, now that the indent is the margin', () => {
+    expect(NEDITOR_STYLES).toContain('margin-inline-start 120ms ease');
+  });
+
+  /**
+   * `translateX` is physical, so the RTL mirroring has to be applied against
+   * the editor's own direction. Keyed off a bare `[dir='rtl']` it matched an
+   * LTR editor anywhere inside an RTL page, where `inset-inline-start` had
+   * already resolved to the left -- mirroring something unmirrored and dropping
+   * the drag handle on top of the first characters of every line.
+   */
+  test('the RTL gutter mirroring is scoped to the editor own direction', () => {
+    expect(NEDITOR_STYLES).toContain(".neditor[dir='rtl'] .neditor-gutter");
+    expect(NEDITOR_STYLES).toContain("[dir='rtl'] .neditor:not([dir]) .neditor-gutter");
+    expect(NEDITOR_STYLES).not.toMatch(/\n\[dir='rtl'\] \.neditor-gutter \{/);
+  });
+
+  /**
+   * The stylesheet is a template literal, so a backtick inside a CSS comment
+   * ends the string and the file stops parsing. That has now happened three
+   * times while writing comments into it, each time caught only by the build.
+   */
+  test('no comment in the stylesheet carries a backtick', () => {
+    expect(NEDITOR_STYLES).not.toContain('`');
+  });
+});
