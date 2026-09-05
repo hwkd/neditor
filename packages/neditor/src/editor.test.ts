@@ -1133,3 +1133,71 @@ describe('undo of a composed word returns the caret to that word', () => {
     expect(state?.blockId, 'the caret belongs to the word that was undone').toBe('b');
   });
 });
+
+describe('a composed word is one entry, and survives a render that keeps its host', () => {
+  const caretAt = (host: HTMLElement, offset: number): void => {
+    const range = document.createRange();
+    range.setStart(host.firstChild ?? host, offset);
+    range.collapse(true);
+    const selection = getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+
+  /**
+   * `#applyArmedMarks` committed the marks on top of the entry
+   * `#handleCompositionEnd` had already recorded, so a bolded IME word took two
+   * undo steps -- the first of which showed the word with the bold stripped off.
+   */
+  test('armed formatting does not add a second undo step', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'ab' }] })]);
+    const host = hosts(editor)[0]!;
+    host.focus();
+    caretAt(host, 2);
+    editor.toggleMark('bold');
+
+    host.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    host.textContent = 'ab太字';
+    caretAt(host, 4);
+    host.dispatchEvent(
+      new InputEvent('input', { inputType: 'insertCompositionText', bubbles: true }),
+    );
+    host.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '太字' }));
+
+    expect(editor.getMarkdown().trim()).toBe('ab**太字**');
+
+    editor.undo();
+
+    expect(blockText(editor.getDocument().blocks[0]!), 'one undo takes the whole word').toBe('ab');
+  });
+
+  /**
+   * `#endComposition` cleared the flag whether or not the host had gone away, so
+   * a render that reuses the element -- the same block id, which is the common
+   * case for a revision reload -- left the browser still composing while the
+   * editor had stopped listening for it.
+   */
+  test('a render that reuses the host leaves the composition running', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'abc' }] })]);
+    const host = hosts(editor)[0]!;
+    host.focus();
+    host.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+
+    // Same id, so the renderer keeps the element the composition lives in.
+    editor.setDocument({ blocks: [block({ id: 'a', content: [{ text: 'abc' }] })] });
+
+    expect(hosts(editor)[0], 'precondition: the host really was reused').toBe(host);
+
+    // A candidate rewrite must still be treated as composition, not as input.
+    host.textContent = '# ';
+    caretAt(host, 2);
+    host.dispatchEvent(
+      new InputEvent('input', { inputType: 'insertCompositionText', bubbles: true }),
+    );
+
+    expect(
+      editor.getDocument().blocks[0]?.type,
+      'half-composed text must not run the markdown rules',
+    ).toBe('paragraph');
+  });
+});

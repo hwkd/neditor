@@ -250,10 +250,20 @@ function isApplePlatform(view: (Window & typeof globalThis) | null): boolean {
 
 /** One editable host: a block's own content, or a single table cell. */
 /** What an in-flight composition needs to remember; see `#composition`. */
+/**
+ * Elements whose implicit ARIA role is `generic`, and so is safe to replace.
+ *
+ * `generic` prohibits an accessible name, which is why the root needs a role at
+ * all; anything else the host mounts into has a role worth keeping.
+ */
+const GENERIC_ELEMENTS = new Set(['DIV', 'SPAN']);
+
 /** Marks a clipboard this editor wrote; see `#handleCopy`. */
 const OWN_CLIPBOARD_TYPE = 'application/x-neditor';
 
 interface CompositionState {
+  /** The editing host it started in, so a reset can ask whether it survived. */
+  readonly host: HTMLElement;
   readonly content: RichText;
   readonly selection: SelectionSnapshot | null;
   readonly offset: number;
@@ -743,7 +753,13 @@ export class NEditor {
       // is the lightest role that permits naming and does not displace the
       // heading, list and table semantics the blocks inside carry -- the same
       // reason `role="textbox"` is refused on the block hosts.
-      this.#ownsRole = !this.#root.hasAttribute('role');
+      // Only where there is no role to override. A bare <div> or <span> has
+      // the `generic` role, which prohibits a name -- that is what this is for.
+      // Everything else a host might mount into (<main>, <section>, <article>,
+      // <nav>, <form>, <aside>) already has an implicit role that both permits
+      // a name and means something, and replacing it with `group` threw that
+      // away.
+      this.#ownsRole = !this.#root.hasAttribute('role') && GENERIC_ELEMENTS.has(this.#root.tagName);
 
       if (this.#ownsRole) {
         this.#root.setAttribute('role', 'group');
@@ -989,7 +1005,6 @@ export class NEditor {
     // integration -- applied the user's URL to the NEW document at the OLD
     // offsets, linking whatever text now sat there and emitting `change` for a
     // persistence layer to write back.
-    this.#endComposition();
     this.#readerExpanded.clear();
     this.#closeSlashMenu();
     this.#linkContext = null;
@@ -1002,6 +1017,10 @@ export class NEditor {
     this.#clearBlockSelection();
     this.#history.clear();
     this.#render();
+    // After the render, which is what decides it: the check asks whether the
+    // host the composition lives in survived, and before the render it always
+    // has.
+    this.#endComposition();
 
     // `silent` exists for the case where the caller already knows: piping a
     // remote document in and echoing `change` back out is an unbounded loop.
@@ -1223,14 +1242,20 @@ export class NEditor {
     // could no longer see were selected.
     this.#clearBlockSelection();
 
+    // `focus()` dispatches `focusin` synchronously, and `#handleFocusIn` turns
+    // that into the event -- so emitting unconditionally here as well delivered
+    // every focus move twice. But the browser fires nothing when the element
+    // already holds focus, which is the ordinary case for moving the caret
+    // within one block, and dropping the emit outright made those silent.
+    const alreadyFocused = this.#activeElement() === view.content;
+
     view.content.focus({ preventScroll: true });
     this.#reveal(view.root);
     setCaretOffset(view.content, offset);
-    // Deliberately no explicit emit. `focus()` above dispatches `focusin`
-    // synchronously, which `#handleFocusIn` already turns into this exact
-    // event -- so emitting here as well delivered every focus move twice,
-    // while `focusRange` delivered one. A listener that persists on focus was
-    // doing it twice per caret move between blocks.
+
+    if (alreadyFocused) {
+      this.#emitter.emit('focus', { blockId: target });
+    }
 
     return true;
   }
@@ -1676,7 +1701,6 @@ export class NEditor {
     }
 
     // Transient UI describes the pre-undo document; none of it survives.
-    this.#endComposition();
     this.#pending = null;
     this.#closeSlashMenu();
     this.#linkContext = null;
@@ -1687,6 +1711,8 @@ export class NEditor {
     this.#clearBlockSelection();
 
     this.#applyBlocks(entry.blocks);
+    // After the blocks are applied, for the reason given in `setDocument`.
+    this.#endComposition();
 
     // An edit made in block-selection mode has no caret to record, so there is
     // nothing here to restore -- and the block selection was just cleared. That
@@ -3320,6 +3346,17 @@ export class NEditor {
    * Escape and every shortcut did nothing.
    */
   #endComposition(): void {
+    // Only if the host it lives in is really gone. A render that reuses the
+    // element -- the same block id, the common case for a revision reload --
+    // leaves the composition running and its `compositionend` still able to
+    // reach the listener on the root; clearing regardless meant the browser's
+    // later candidate rewrites arrived looking like committed input.
+    const host = this.#composition?.host;
+
+    if (host && this.#root.contains(host)) {
+      return;
+    }
+
     this.#composing = false;
     this.#composition = null;
   }
@@ -3385,6 +3422,7 @@ export class NEditor {
 
     this.#composition = resolved
       ? {
+          host: resolved.content,
           content: this.#contentOf(resolved),
           // The live selection, not `#selectionBeforeInput`. That field holds
           // the selection as it stood before the *previous* input event, so
@@ -3473,7 +3511,11 @@ export class NEditor {
     }
 
     this.#pending = null;
-    this.#commitResolved(resolved, next, null, composition.selection);
+    // Written, not committed. `#handleCompositionEnd` has already recorded the
+    // one entry this word gets; committing again banked a second, whose first
+    // undo showed the word with the formatting stripped off it.
+    this.#writeContent(resolved, next);
+    this.#render();
     this.#focusResolved(resolved, end);
   }
 

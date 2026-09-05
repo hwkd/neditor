@@ -677,3 +677,38 @@ describe('a to-do says what it just became', () => {
     expect(live.textContent).not.toBe(checked);
   });
 });
+
+describe('the root takes a role only where there is none to take', () => {
+  /**
+   * A bare `<div>` has the `generic` role, which prohibits an accessible name
+   * -- that is why the root needs one at all. Writing `role="group"`
+   * unconditionally threw away the implicit role of any semantic element a host
+   * mounted into.
+   */
+  test.each(['main', 'section', 'article', 'nav', 'form', 'aside'])(
+    'a <%s> host keeps its own role',
+    (tag) => {
+      const host = document.createElement(tag);
+      document.body.append(host);
+      const editor = createEditor({ element: host, doc: { blocks: [block({})] } });
+
+      expect(host.hasAttribute('role')).toBe(false);
+
+      editor.destroy();
+      host.remove();
+    },
+  );
+
+  test.each(['div', 'span'])('a <%s> host gets one, because it has none', (tag) => {
+    const host = document.createElement(tag);
+    document.body.append(host);
+    const editor = createEditor({ element: host, doc: { blocks: [block({})] } });
+
+    expect(host.getAttribute('role')).toBe('group');
+
+    editor.destroy();
+
+    expect(host.hasAttribute('role')).toBe(false);
+    host.remove();
+  });
+});

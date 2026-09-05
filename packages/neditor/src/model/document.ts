@@ -975,9 +975,17 @@ const MARK_DELIMITERS: ReadonlyArray<readonly [Mark, string, string]> = [
  */
 const SAFE_SPAN = Math.floor(INLINE_SPAN_LIMIT * 0.75);
 
-/** Splits at the last space at or before `SAFE_SPAN`, or nowhere if there is none. */
-function splitLongSpan(text: string): [string, string] | null {
-  if (text.length <= SAFE_SPAN) {
+/**
+ * Splits at the last space at or before `SAFE_SPAN`, or nowhere if there is none.
+ *
+ * `emitted` is what the span will actually cost the reader -- the escaped text
+ * plus its delimiters -- and it is what the limit applies to. Testing the raw
+ * text against `SAFE_SPAN` instead split runs between 1501 and 1996 characters
+ * that the reader would have read whole, putting an unmarked space into text
+ * that had none.
+ */
+function splitLongSpan(text: string, emitted: number): [string, string] | null {
+  if (emitted <= INLINE_SPAN_LIMIT) {
     return null;
   }
 
@@ -1002,16 +1010,6 @@ function runToMarkdown(run: TextRun): string {
       .join('\\\n');
   }
 
-  // And one span per readable length, for the same reason: a span the reader
-  // cannot reach the start of is a span it leaves as literal delimiters.
-  if (run.marks?.length || run.link) {
-    const split = splitLongSpan(run.text);
-
-    if (split) {
-      return split.map((part) => runToMarkdown({ ...run, text: part })).join('');
-    }
-  }
-
   const escaped = escapeMarkdownText(run.text);
   const leading = /^[^\S\n]*/.exec(escaped)?.[0] ?? '';
   const trailing = /[^\S\n]*$/.exec(escaped)?.[0] ?? '';
@@ -1031,6 +1029,19 @@ function runToMarkdown(run: TextRun): string {
 
   if (run.link) {
     core = `[${core}](${destinationToMarkdown(run.link)})`;
+  }
+
+  // And one span per readable length, for the same reason as the line split
+  // above: a span whose opening delimiter the reader cannot reach is one it
+  // leaves in the prose as literal characters. Measured on what was actually
+  // emitted rather than on the raw text, so a run only splits when it really
+  // is too long for the reader.
+  if ((run.marks?.length || run.link) && core.length > INLINE_SPAN_LIMIT) {
+    const split = splitLongSpan(run.text, core.length);
+
+    if (split) {
+      return split.map((part) => runToMarkdown({ ...run, text: part })).join('');
+    }
   }
 
   return `${leading}${core}${trailing}`;

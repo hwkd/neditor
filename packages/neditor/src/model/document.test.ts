@@ -739,3 +739,56 @@ describe('withHiddenDescendants scales with the selection, not with the document
     expect([...withHiddenDescendants(blocks, ['t'])]).toEqual(['t']);
   });
 });
+
+describe('a span is split only when it is really too long to read back', () => {
+  /**
+   * The split tested the raw text against three quarters of the reader's limit,
+   * so runs between about 1500 and 2000 characters were split -- and their
+   * round trip gained an unmarked space -- when the reader would have read them
+   * whole. It measures what is actually emitted now.
+   */
+  const words = (count: number): string =>
+    Array.from({ length: count }, (_, index) => `w${index}`).join(' ');
+
+  const runsAfterRoundTrip = (text: string): TextRun[] =>
+    normalizeDocument({
+      blocks: blocksFromMarkdown(
+        toMarkdown(
+          normalizeDocument({
+            blocks: [
+              {
+                id: 'p',
+                type: 'paragraph',
+                depth: 0,
+                content: [{ text, marks: ['bold'] }],
+              } as Block,
+            ],
+          }),
+        ),
+      ),
+    }).blocks[0]!.content;
+
+  test.each([300, 400])('a run of about %i words stays one span', (count) => {
+    const text = words(count);
+
+    expect(text.length).toBeGreaterThan(1300);
+    expect(text.length).toBeLessThan(2000);
+
+    const back = runsAfterRoundTrip(text);
+
+    expect(back).toHaveLength(1);
+    expect(back[0]?.text).toBe(text);
+    expect(back[0]?.marks).toEqual(['bold']);
+  });
+
+  test('and one past the limit still splits', () => {
+    const text = words(700);
+
+    expect(text.length).toBeGreaterThan(2000);
+
+    const back = runsAfterRoundTrip(text);
+
+    expect(back.length).toBeGreaterThan(1);
+    expect(back.map((run) => run.text).join('')).toBe(text);
+  });
+});

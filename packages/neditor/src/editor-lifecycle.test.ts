@@ -608,3 +608,35 @@ describe('one focus move is one focus event', () => {
     expect(seen).toEqual(['a']);
   });
 });
+
+describe('focus() reports every move, including the ones within a block', () => {
+  /**
+   * The browser fires no `focusin` when the element already holds focus, so
+   * removing the explicit emit -- which was there because it doubled every
+   * cross-block move -- made moving the caret within one block silent.
+   */
+  test('a second focus on the same block still emits', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'hello world' }] })]);
+    const seen: string[] = [];
+    editor.on('focus', (event) => seen.push(event.blockId));
+
+    editor.focus('a', 0);
+    editor.focus('a', 5);
+
+    expect(seen).toEqual(['a', 'a']);
+  });
+
+  test('and moving between blocks still emits exactly once each', () => {
+    const editor = mount([
+      block({ id: 'a', content: [{ text: 'one' }] }),
+      block({ id: 'b', content: [{ text: 'two' }] }),
+    ]);
+    const seen: string[] = [];
+    editor.on('focus', (event) => seen.push(event.blockId));
+
+    editor.focus('a', 0);
+    editor.focus('b', 0);
+
+    expect(seen).toEqual(['a', 'b']);
+  });
+});
