@@ -414,3 +414,34 @@ describe("sizes and directions that hold on somebody else's page", () => {
     expect(NEDITOR_STYLES).not.toContain('`');
   });
 });
+
+describe('sizes that matter on a phone and for a broken image', () => {
+  /**
+   * iOS Safari zooms the page in whenever a focused input computes under 16px,
+   * and does not zoom back out when it blurs -- so opening the link dialog on
+   * an iPhone left the whole page magnified with no way back.
+   */
+  test.each([
+    '.neditor-link-editor__input',
+    '.neditor-image-editor__input',
+    '.neditor-icon-picker__input',
+  ])('%s is not smaller than the portal it sits in', (selector) => {
+    const rule = NEDITOR_STYLES.slice(NEDITOR_STYLES.indexOf(`${selector} {`));
+    const size = /font-size:\s*([\d.]+)em/.exec(rule.slice(0, rule.indexOf('}')));
+
+    expect(size, `${selector} sets no font-size`).not.toBeNull();
+    expect(Number(size![1]), `${selector} would make iOS zoom`).toBeGreaterThanOrEqual(1);
+  });
+
+  /**
+   * The frame's only in-flow child is the `<img>`, and a src that fails to load
+   * has no intrinsic size -- so the frame collapsed to nothing and took the
+   * absolutely positioned edit button with it. A broken image could then not be
+   * fixed or removed with a mouse at all.
+   */
+  test('the image frame keeps a height when the image has none', () => {
+    const rule = NEDITOR_STYLES.slice(NEDITOR_STYLES.indexOf('.neditor-image__frame {'));
+
+    expect(rule.slice(0, rule.indexOf('}'))).toMatch(/min-height:\s*[\d.]+em/);
+  });
+});

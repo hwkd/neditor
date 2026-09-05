@@ -18,6 +18,7 @@ import {
   toMarkdown,
   typeAfterSplit,
   updateBlock,
+  withHiddenDescendants,
 } from './document.ts';
 import { richFromPlainText, richSetLink, richSetMark } from './rich-text.ts';
 
@@ -680,5 +681,61 @@ describe('a span longer than the reader will look back', () => {
     const back = roundTrip([{ text: 'x'.repeat(2500), marks: ['bold'] }]);
 
     expect(back.every((run) => (run.marks ?? []).length === 0)).toBe(true);
+  });
+});
+
+describe('withHiddenDescendants scales with the selection, not with the document', () => {
+  /**
+   * It called `findBlock` -- a linear scan -- once per selected id, so every
+   * select-all gesture (copy, cut, delete, duplicate, indent, paste-over,
+   * drag-drop, Cmd+Shift+Arrow) cost selection x document. Indexed once now.
+   *
+   * A ratio against a document ten times smaller, rather than a stopwatch: the
+   * quadratic term is what this measures, and it does not move with the machine.
+   */
+  const documentOf = (count: number): Block[] =>
+    Array.from(
+      { length: count },
+      (_, index) => ({ id: `b${index}`, type: 'paragraph', depth: 0, content: [] }) as Block,
+    );
+
+  const timeFor = (count: number): number => {
+    const blocks = documentOf(count);
+    const ids = blocks.map((one) => one.id);
+    const started = performance.now();
+
+    withHiddenDescendants(blocks, ids);
+
+    return Math.max(performance.now() - started, 0.05);
+  };
+
+  // Measured both ways rather than guessed: ten times the document costs about
+  // 5.8x indexed and about 31x with the linear find. A threshold between them
+  // leaves margin on each side without being sensitive to the machine.
+  test('ten times the document is not a hundred times the work', () => {
+    const small = timeFor(500);
+    const large = timeFor(5000);
+
+    expect(large / small, `${small.toFixed(2)}ms vs ${large.toFixed(2)}ms`).toBeLessThan(15);
+  });
+
+  test('a collapsed toggle still hides everything under it', () => {
+    const blocks = [
+      { id: 't', type: 'toggle', depth: 0, collapsed: true, content: [] },
+      { id: 'k', type: 'paragraph', depth: 1, content: [] },
+      { id: 'j', type: 'paragraph', depth: 2, content: [] },
+      { id: 'after', type: 'paragraph', depth: 0, content: [] },
+    ] as Block[];
+
+    expect([...withHiddenDescendants(blocks, ['t'])].sort()).toEqual(['j', 'k', 't']);
+  });
+
+  test('an expanded one hides nothing', () => {
+    const blocks = [
+      { id: 't', type: 'toggle', depth: 0, collapsed: false, content: [] },
+      { id: 'k', type: 'paragraph', depth: 1, content: [] },
+    ] as Block[];
+
+    expect([...withHiddenDescendants(blocks, ['t'])]).toEqual(['t']);
   });
 });

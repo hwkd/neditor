@@ -241,9 +241,13 @@ export function withHiddenDescendants(
   ids: Iterable<string>,
 ): Set<string> {
   const out = new Set(ids);
+  // Indexed once. `findBlock` is a linear scan, and calling it per selected id
+  // made every select-all gesture -- copy, cut, delete, duplicate, indent,
+  // paste-over, drag-drop, Cmd+Shift+Arrow -- cost selection x document.
+  const byId = new Map(blocks.map((block) => [block.id, block]));
 
   for (const id of [...out]) {
-    const block = findBlock(blocks, id);
+    const block = byId.get(id);
 
     if (block?.type !== 'toggle' || block.collapsed !== true) {
       continue;

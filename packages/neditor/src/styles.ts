@@ -386,6 +386,11 @@ export const NEDITOR_STYLES = `
 .neditor-image__frame {
   position: relative;
   display: block;
+  /* The only in-flow child is the img, and a src that fails to load has no
+     intrinsic size -- so the frame collapsed to nothing and took the
+     absolutely positioned edit button with it. A broken image then could not
+     be fixed or removed with a mouse at all. */
+  min-height: 2.5em;
 }
 
 .neditor-image__trigger {
@@ -821,7 +826,9 @@ export const NEDITOR_STYLES = `
   background: transparent;
   color: var(--neditor-text);
   font: inherit;
-  font-size: 0.8125em;
+  /* 16px, not 13. iOS Safari zooms the page in when a focused input
+     computes under 16px, and does not zoom back out when it blurs. */
+  font-size: 1em;
   outline: none;
 }
 
@@ -879,7 +886,9 @@ export const NEDITOR_STYLES = `
   background: transparent;
   color: var(--neditor-text);
   font: inherit;
-  font-size: 0.8125em;
+  /* 16px, not 13. iOS Safari zooms the page in when a focused input
+     computes under 16px, and does not zoom back out when it blurs. */
+  font-size: 1em;
   outline: none;
 }
 
@@ -917,7 +926,9 @@ export const NEDITOR_STYLES = `
   background: transparent;
   color: var(--neditor-text);
   font: inherit;
-  font-size: 0.8125em;
+  /* 16px, not 13. iOS Safari zooms the page in when a focused input
+     computes under 16px, and does not zoom back out when it blurs. */
+  font-size: 1em;
   outline: none;
 }
 

@@ -557,3 +557,54 @@ describe('setBlockType refuses a type that is not one', () => {
     expect(editor.getDocument().blocks[0]?.type).toBe('heading1');
   });
 });
+
+describe('block selection is a mutator, and answers to destroy() like one', () => {
+  test('selectBlocks after destroy does not touch the page selection', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'one' }] })]);
+    editor.destroy();
+
+    const other = document.createElement('div');
+    other.contentEditable = 'true';
+    other.textContent = 'somewhere else';
+    document.body.append(other);
+    other.focus();
+    const range = document.createRange();
+    range.selectNodeContents(other);
+    const selection = getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    editor.selectBlocks(['a']);
+    editor.clearBlockSelection();
+
+    expect(selection.rangeCount, 'a destroyed editor must not wipe the page caret').toBe(1);
+    expect(document.activeElement).toBe(other);
+    other.remove();
+  });
+});
+
+describe('one focus move is one focus event', () => {
+  /**
+   * `focus()` dispatches `focusin` synchronously, which `#handleFocusIn`
+   * already turns into a `focus` event -- and then it emitted the same payload
+   * again, so every caret move between blocks delivered two while `focusRange`
+   * delivered one.
+   */
+  test('focus() emits once, like focusRange()', () => {
+    const editor = mount([
+      block({ id: 'a', content: [{ text: 'hello' }] }),
+      block({ id: 'b', content: [{ text: 'world' }] }),
+    ]);
+    const seen: string[] = [];
+    editor.on('focus', (event) => seen.push(event.blockId));
+
+    editor.focus('b');
+
+    expect(seen).toEqual(['b']);
+
+    seen.length = 0;
+    editor.focusRange('a', 0, 2);
+
+    expect(seen).toEqual(['a']);
+  });
+});

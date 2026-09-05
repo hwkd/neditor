@@ -1195,7 +1195,11 @@ export class NEditor {
     view.content.focus({ preventScroll: true });
     this.#reveal(view.root);
     setCaretOffset(view.content, offset);
-    this.#emitter.emit('focus', { blockId: target });
+    // Deliberately no explicit emit. `focus()` above dispatches `focusin`
+    // synchronously, which `#handleFocusIn` already turns into this exact
+    // event -- so emitting here as well delivered every focus move twice,
+    // while `focusRange` delivered one. A listener that persists on focus was
+    // doing it twice per caret move between blocks.
 
     return true;
   }
@@ -1629,11 +1633,23 @@ export class NEditor {
 
   /** Selects whole blocks. Pass an empty list to return to text editing. */
   selectBlocks(ids: readonly string[]): void {
+    // The guard every other public mutator has. Without it a stale call after
+    // `destroy()` still ran `removeAllRanges()` and focused the root -- wiping
+    // the caret out of whatever the page had moved on to, from an editor that
+    // no longer exists.
+    if (this.#destroyed) {
+      return;
+    }
+
     this.#setBlockSelection(ids);
   }
 
   /** Leaves block selection, handing the caret back to the text. */
   clearBlockSelection(): void {
+    if (this.#destroyed) {
+      return;
+    }
+
     this.#setBlockSelection([]);
   }
 
