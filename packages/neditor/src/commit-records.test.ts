@@ -418,3 +418,33 @@ describe('an edit that sets a field to the value it already holds is not an edit
     expect(editor.getDocument().blocks[0]?.type).toBe('heading1');
   });
 });
+
+describe('an event describes the document as it is when the event fires', () => {
+  /**
+   * `#commit` recorded history and emitted `history` before applying the edit,
+   * so a listener reading `getDocument()` from the `history` event saw the
+   * pre-edit document -- and one writing through `setDocument()` had its
+   * document overwritten a line later by the assignment that followed.
+   */
+  test('a history listener sees the edit that caused it', () => {
+    const editor = mount([block({ id: 'b', content: [{ text: 'text' }] })]);
+    const seen: (string | undefined)[] = [];
+    editor.on('history', () => seen.push(editor.getDocument().blocks[0]?.type));
+
+    editor.setBlockType('b', 'heading1');
+
+    expect(seen).toEqual(['heading1']);
+  });
+
+  test('and agrees with what the change listener sees', () => {
+    const editor = mount([block({ id: 'b', content: [{ text: 'text' }] })]);
+    const fromHistory: (string | undefined)[] = [];
+    const fromChange: (string | undefined)[] = [];
+    editor.on('history', () => fromHistory.push(editor.getDocument().blocks[0]?.type));
+    editor.on('change', () => fromChange.push(editor.getDocument().blocks[0]?.type));
+
+    editor.setBlockType('b', 'quote');
+
+    expect(fromHistory).toEqual(fromChange);
+  });
+});

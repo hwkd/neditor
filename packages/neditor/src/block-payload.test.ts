@@ -299,3 +299,42 @@ describe('pasting into a code block inserts what was copied, not its Markdown', 
     expect(intoCode('', 'rm -rf *.log && echo _done_')).toBe('rm -rf *.log && echo _done_');
   });
 });
+
+describe('an image pasted where an image cannot go still leaves something', () => {
+  /**
+   * A cell holds text, not blocks, so a pasted image had no runs to contribute
+   * and the paste did nothing at all -- no content, no `change`, and no sign
+   * that anything had been refused.
+   */
+  test('into a table cell it arrives as its caption, linked to itself', () => {
+    const editor = mount([
+      block({
+        id: 'tbl',
+        type: 'table',
+        rows: [
+          [[{ text: 'h0' }], [{ text: 'h1' }]],
+          [[{ text: 'a' }], [{ text: 'b' }]],
+        ],
+      }),
+    ]);
+    const cell = editor.element.querySelector<HTMLElement>('[data-cell="1:0"]')!;
+    cell.focus();
+    const range = document.createRange();
+    range.selectNodeContents(cell);
+    range.collapse(false);
+    const selection = getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    paste(
+      cell,
+      '<figure><img src="https://a.test/x.png" alt="A diagram"></figure>',
+      '![A diagram](https://a.test/x.png)',
+    );
+
+    const text = (editor.getDocument().blocks[0]!.rows ?? [])[1]?.[0] ?? [];
+
+    expect(text.map((run) => run.text).join('')).toContain('A diagram');
+    expect(text.some((run) => run.link === 'https://a.test/x.png')).toBe(true);
+  });
+});

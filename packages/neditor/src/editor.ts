@@ -376,8 +376,23 @@ function richFromBlocks(blocks: readonly Block[]): RichText {
       parts.push(richFromPlainText('\n'));
     }
 
-    // A table keeps its text in `rows`, so it has no runs of its own to carry.
-    parts.push(block.type === 'table' ? richFromPlainText(blockText(block)) : block.content);
+    if (block.type === 'table') {
+      // A table keeps its text in `rows`, so it has no runs of its own.
+      parts.push(richFromPlainText(blockText(block)));
+    } else if (block.type === 'image') {
+      // Nor does an image, and a cell cannot hold one -- but dropping it left
+      // the paste doing nothing at all, with no change event and no sign that
+      // anything had been refused. Its caption, then its alt text, then its
+      // source, linked to itself: the information survives in the form a cell
+      // can take, and in the order that describes the image best.
+      const label = blockText(block) || block.alt || block.src || '';
+
+      if (label.length > 0) {
+        parts.push(richFromPlainText(label, undefined, block.src));
+      }
+    } else {
+      parts.push(block.content);
+    }
   }
 
   return richConcat(...parts);
@@ -538,6 +553,14 @@ export class NEditor {
 
   /** Whether the `role` that makes that name legal is ours to take away. */
   #ownsRole = false;
+
+  /**
+   * Toggles a read-only reader has opened, which is a view state and not an edit.
+   *
+   * Cleared whenever the document is replaced: these ids describe the document
+   * being replaced, and a new one may not have them at all.
+   */
+  readonly #readerExpanded = new Set<string>();
 
   /** Whether the `tabindex` is ours to remove, and what it was if it is not. */
   #ownsTabIndex = false;
@@ -964,6 +987,7 @@ export class NEditor {
     // offsets, linking whatever text now sat there and emitting `change` for a
     // persistence layer to write back.
     this.#endComposition();
+    this.#readerExpanded.clear();
     this.#closeSlashMenu();
     this.#linkContext = null;
     this.#linkEditor.close();
@@ -1272,7 +1296,28 @@ export class NEditor {
   toggleCollapsed(id: string): void {
     const block = findBlock(this.#blocks, id);
 
-    if (!block || block.type !== 'toggle' || !this.#canEdit()) {
+    if (!block || block.type !== 'toggle' || this.#destroyed) {
+      return;
+    }
+
+    // A read-only reader opens a toggle to read what is inside it, which is not
+    // an edit -- and refusing outright left that content unreachable behind a
+    // chevron the renderer still draws as an enabled, tabbable control. So it
+    // is remembered as a view state instead: the document is untouched,
+    // `getDocument()` still reports the toggle collapsed, and no `change` is
+    // emitted for a persistence layer to write back as the author's revision.
+    if (!this.#editable) {
+      if (this.#readerExpanded.has(id)) {
+        this.#readerExpanded.delete(id);
+      } else {
+        this.#readerExpanded.add(id);
+      }
+
+      this.#render();
+      this.#announce(
+        this.#readerExpanded.has(id) ? this.#labels.toggleExpanded : this.#labels.toggleCollapsed,
+      );
+
       return;
     }
 
@@ -1450,7 +1495,18 @@ export class NEditor {
   /** Applies a new block array, re-renders, and notifies listeners. */
   /** The blocks a reader can see: everything not inside a collapsed toggle. */
   #visible(): Block[] {
-    return visibleBlocks(this.#blocks);
+    if (this.#readerExpanded.size === 0) {
+      return visibleBlocks(this.#blocks);
+    }
+
+    // The reader's own expansions, applied for display only -- see
+    // `toggleCollapsed`. Spread rather than mutated, so `#blocks` stays exactly
+    // the document the host handed over.
+    return visibleBlocks(
+      this.#blocks.map((block) =>
+        this.#readerExpanded.has(block.id) ? { ...block, collapsed: false } : block,
+      ),
+    );
   }
 
   #applyBlocks(blocks: Block[]): void {
@@ -1532,8 +1588,15 @@ export class NEditor {
       return;
     }
 
-    this.#recordHistory(runKey, selection);
+    // Recorded first -- the entry is the document as it stood *before* the edit
+    // -- but announced after, once `#applyBlocks` has made the edit true. Doing
+    // both in `#recordHistory` emitted `history` while `#blocks` was still the
+    // old array, so a listener that read `getDocument()` saw the pre-edit
+    // document, and one that wrote through `setDocument()` had its document
+    // overwritten by the assignment that followed.
+    this.#recordHistory(runKey, selection, { silent: true });
     this.#applyBlocks(blocks);
+    this.#emitHistory();
   }
 
   /**
@@ -1542,12 +1605,21 @@ export class NEditor {
    * `runKey` folds a burst of related edits — a run of typing in one block —
    * into one undo step; null forces the edit to stand alone.
    */
-  #recordHistory(runKey: string | null = null, selection?: SelectionSnapshot | null): void {
+  #recordHistory(
+    runKey: string | null = null,
+    selection?: SelectionSnapshot | null,
+    options: { silent?: boolean } = {},
+  ): void {
     this.#history.record(
       { blocks: this.#blocks, selection: selection ?? this.#selectionSnapshot() },
       runKey,
     );
-    this.#emitHistory();
+
+    // `silent` is for callers that have not applied their edit yet: announcing
+    // here would describe a document that does not exist for another line.
+    if (!options.silent) {
+      this.#emitHistory();
+    }
   }
 
   #emitHistory(): void {
@@ -2633,6 +2705,24 @@ export class NEditor {
         contains: (node) => this.#imageEditor.contains(node),
         close: (restoreFocus) => {
           this.#closeImageEditor(restoreFocus);
+        },
+      });
+    }
+
+    // The slash menu belongs in this list too. Left out of it, it was the one
+    // popover an outside pointer never dismissed -- so clicking away from the
+    // editor left it sitting `position: fixed` over the page at z-index 1000,
+    // outliving the caret that opened it.
+    if (this.#slashMenu.isOpen) {
+      const context = this.#slashContext;
+
+      popovers.push({
+        // The menu only ever opens outside a table cell, so a caret in one
+        // never owns it.
+        ownedBy: (blockId, cell) => context?.blockId === blockId && cell === undefined,
+        contains: (node) => node !== null && this.#slashMenu.element.contains(node),
+        close: () => {
+          this.#closeSlashMenu();
         },
       });
     }

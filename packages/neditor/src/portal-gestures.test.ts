@@ -685,3 +685,46 @@ describe('the portal measures the viewport the user can actually see', () => {
     element.remove();
   });
 });
+
+describe('the slash menu is dismissed like every other popover', () => {
+  /**
+   * It was left out of `#openPopovers()`, so it was the one popover an outside
+   * pointer never closed -- clicking away left it `position: fixed` at z-index
+   * 1000 over the page, outliving the caret that opened it.
+   */
+  const openSlashMenu = (): { editor: NEditor; menu: HTMLElement } => {
+    const editor = mount([block({ id: 'a', content: [] })]);
+    const host = hosts(editor)[0]!;
+    host.focus();
+    host.textContent = '/';
+    const range = document.createRange();
+    range.setStart(host.firstChild!, 1);
+    range.collapse(true);
+    const selection = getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    host.dispatchEvent(
+      new InputEvent('input', { inputType: 'insertText', data: '/', bubbles: true }),
+    );
+
+    return { editor, menu: portal('neditor-slash-menu') };
+  };
+
+  test('a pointer elsewhere in the page closes it', () => {
+    const { menu } = openSlashMenu();
+
+    expect(menu.hidden).toBe(false);
+
+    pointer('pointerdown', document.body);
+
+    expect(menu.hidden).toBe(true);
+  });
+
+  test('a pointer inside it does not', () => {
+    const { menu } = openSlashMenu();
+
+    pointer('pointerdown', menu);
+
+    expect(menu.hidden).toBe(false);
+  });
+});

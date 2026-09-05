@@ -673,3 +673,65 @@ describe('focusing a block brings it into view', () => {
     expect(calls.length).toBeGreaterThan(0);
   });
 });
+
+describe('a read-only reader can open a toggle without editing the document', () => {
+  /**
+   * `editable: false` correctly refuses to mutate, and the chevron is drawn as
+   * an enabled, tabbable control -- so a collapsed toggle in a read-only editor
+   * simply could not be opened, and everything inside it was unreachable. That
+   * is a reading problem, not an editing one: expansion is remembered as a view
+   * state, so the content becomes reachable while the document stays exactly
+   * what the host handed over.
+   */
+  const readOnly = () =>
+    mount(
+      [
+        block({ id: 't', type: 'toggle', collapsed: true, content: [{ text: 'Summary' }] }),
+        block({ id: 'k', depth: 1, content: [{ text: 'Hidden detail' }] }),
+      ],
+      { editable: false },
+    );
+
+  test('the chevron reveals the children', () => {
+    const editor = readOnly();
+
+    expect(editor.element.textContent).not.toContain('Hidden detail');
+
+    editor.element.querySelector<HTMLElement>('.neditor-block__chevron')!.click();
+
+    expect(editor.element.textContent).toContain('Hidden detail');
+  });
+
+  test('and the document is not touched by it', () => {
+    const editor = readOnly();
+    const changes: unknown[] = [];
+    editor.on('change', (doc) => changes.push(doc));
+
+    editor.element.querySelector<HTMLElement>('.neditor-block__chevron')!.click();
+
+    expect(changes, 'a reader opening a toggle is not a revision').toHaveLength(0);
+    expect(editor.getDocument().blocks[0]?.collapsed).toBe(true);
+    expect(editor.canUndo).toBe(false);
+  });
+
+  test('clicking it again closes it', () => {
+    const editor = readOnly();
+    const chevron = editor.element.querySelector<HTMLElement>('.neditor-block__chevron')!;
+
+    chevron.click();
+    editor.element.querySelector<HTMLElement>('.neditor-block__chevron')!.click();
+
+    expect(editor.element.textContent).not.toContain('Hidden detail');
+  });
+
+  test('an editable editor still edits the document', () => {
+    const editor = mount([
+      block({ id: 't', type: 'toggle', collapsed: true, content: [{ text: 'Summary' }] }),
+    ]);
+
+    editor.toggleCollapsed('t');
+
+    expect(editor.getDocument().blocks[0]?.collapsed).toBe(false);
+    expect(editor.canUndo).toBe(true);
+  });
+});
