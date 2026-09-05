@@ -255,3 +255,30 @@ var(--indent))` is dropped entirely when a host sets the gutter to a unitless
   `#travel` asked `#editable` without `!#destroyed`, and `setDocument` closed the
   block selection but none of the popovers that `#travel` and `setEditable` both
   close. Each was one path in a family that had agreed on the answer everywhere else.
+
+- **A fix generalised past its evidence takes away the case that was already
+  right.** "text/plain is Markdown when we wrote it" became "prefer the parsed
+  text wherever there is HTML", which broke pasting from every other
+  application. The same shape appears in the emit removed because it fired
+  twice, in the composition flag cleared whether or not its host had gone, and
+  in `role="group"` written wherever there was no role attribute. Fix the case
+  you measured; check what the wider rule costs before taking it.
+
+- **The change nobody asked for is the one to review hardest.** The read-only
+  toggle expansion came from a finding one of its two verifiers called "not a
+  defect at any severity". It was built anyway, on the strength of the
+  underlying complaint, and it produced three of the sixteen regressions in a
+  23-commit range — more than any other single change.
+
+- **A test written from a paraphrase measures the paraphrase.** The undo-after-
+  composition test placed no caret, so it measured a composition that began in
+  the block it was comparing against; the caret-after-undo test used a delete
+  where the finding used a move, and the delete restores a caret of its own.
+  Both passed with their fix reverted. Take the literal scenario from the
+  finding, then mutate the fix and watch the test fail.
+
+- **Ask whether the environment can even observe the thing.** happy-dom does not
+  implement the newline-after-`<pre>` rule, keeps a selection in an element
+  regardless of focus, and computes no layout. Where the test environment cannot
+  see the defect, pin the artifact — the emitted markup, the declaration file,
+  the stylesheet text — and say in the test why that is what is being asserted.
