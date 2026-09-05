@@ -19,6 +19,7 @@ import {
   indentBlocks,
   insertBlockAfter,
   insertBlockAt,
+  isBlockType,
   isContinuingType,
   isRichEmpty,
   isVoidType,
@@ -524,6 +525,10 @@ export class NEditor {
   /** Whether the `role` that makes that name legal is ours to take away. */
   #ownsRole = false;
 
+  /** Whether the `tabindex` is ours to remove, and what it was if it is not. */
+  #ownsTabIndex = false;
+  #priorTabIndex = -1;
+
   #blocks: Block[];
   #editable: boolean;
   #destroyed = false;
@@ -691,7 +696,10 @@ export class NEditor {
       }
     }
     // Block selection has no caret, so the root itself must hold focus for
-    // keystrokes to reach the editor.
+    // keystrokes to reach the editor -- but `destroy()` has to put back what
+    // was there, which for most hosts is no attribute at all.
+    this.#ownsTabIndex = !this.#root.hasAttribute('tabindex');
+    this.#priorTabIndex = this.#root.tabIndex;
     this.#root.tabIndex = -1;
 
     this.#renderer = new Renderer(
@@ -916,6 +924,21 @@ export class NEditor {
 
     this.#blocks = normalizeDocument(doc).blocks;
     this.#pending = null;
+    // Every open popover describes the document being replaced. `#travel`
+    // closes them all for exactly this reason and `setEditable` does too; this,
+    // a strictly larger reset, closed only the block selection. So a link
+    // editor left open across a socket or autosave restore -- a supported
+    // integration -- applied the user's URL to the NEW document at the OLD
+    // offsets, linking whatever text now sat there and emitting `change` for a
+    // persistence layer to write back.
+    this.#closeSlashMenu();
+    this.#linkContext = null;
+    this.#linkEditor.close();
+    this.#closeImageEditor();
+    this.#closeIconPicker();
+    this.#toolbar.hide();
+    this.#hideTableToolbar();
+    this.#activeCell = null;
     this.#clearBlockSelection();
     this.#history.clear();
     this.#render();
@@ -1177,6 +1200,16 @@ export class NEditor {
       return;
     }
 
+    // The argument is typed, which stops nothing at runtime: JavaScript callers
+    // and a stale string from a host's own menu both reach here. An unknown
+    // type was written into the model, where `normalizeDocument` silently
+    // degrades it to a paragraph on the next load -- so the block quietly
+    // changed type between sessions with nothing reported at the point of the
+    // mistake.
+    if (!isBlockType(type)) {
+      return;
+    }
+
     this.#commit(setBlockType(this.#blocks, id, type));
     this.focus(id, CARET_END);
     this.#announce(formatLabel(this.#labels.changedTo, { type: this.#typeName(type) }));
@@ -1296,6 +1329,16 @@ export class NEditor {
 
     if (this.#ownsRole) {
       this.#root.removeAttribute('role');
+    }
+
+    // `destroy()` is documented as giving the element back the way it was
+    // found, and `tabIndex = -1` was the one change it kept. A host that
+    // unmounts the editor and reuses the element was left with a node that
+    // silently takes focus and answers no keys.
+    if (this.#ownsTabIndex) {
+      this.#root.removeAttribute('tabindex');
+    } else {
+      this.#root.tabIndex = this.#priorTabIndex;
     }
   }
 
@@ -1464,7 +1507,13 @@ export class NEditor {
   }
 
   #travel(direction: 'undo' | 'redo'): boolean {
-    if (!this.#editable) {
+    // `#canEdit()`, not `#editable`: the other half of the question is whether
+    // the editor still exists. Asking only the first let `undo()` rewrite the
+    // document of a destroyed editor and return true, while `canUndo` -- which
+    // does ask both -- said false. Nothing rendered it, so an application
+    // holding the reference to serialize later wrote out a document one edit
+    // behind the one its user last saw.
+    if (!this.#canEdit()) {
       return false;
     }
 

@@ -455,3 +455,105 @@ describe('announcements name the block type in the reader’s language', () => {
     expect(live(editor)).toBe('Changé en Liste à puces');
   });
 });
+
+describe('a reset closes what described the document it replaced', () => {
+  /**
+   * `#travel` closes every popover before undoing, under the note that
+   * transient UI describes the pre-undo document. `setEditable` closes them
+   * too. `setDocument` -- a strictly larger reset -- closed only the block
+   * selection, so a link editor open across a socket or autosave restore
+   * applied the user's URL to the NEW document at the OLD offsets.
+   */
+  test('setDocument closes the link editor rather than retargeting it', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'hello world' }] })]);
+    editor.focusRange('a', 0, 5);
+    editor.openLinkEditor();
+
+    const popover = document.querySelector<HTMLElement>('.neditor-link-editor')!;
+
+    expect(popover.hidden).toBe(false);
+
+    // Block ids survive a revision reload by design, which is what made this
+    // land on real text rather than failing to resolve.
+    editor.setDocument({
+      blocks: [block({ id: 'a', content: [{ text: 'ACCOUNT NUMBER 1234' }] })],
+    });
+
+    expect(popover.hidden, 'the popover describes a document that is gone').toBe(true);
+
+    const input = popover.querySelector<HTMLInputElement>('input')!;
+    input.value = 'https://example.com';
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+    expect(editor.getMarkdown()).toBe('ACCOUNT NUMBER 1234');
+    expect(editor.getDocument().blocks[0]?.content.some((run) => run.link)).toBe(false);
+  });
+});
+
+describe('destroy() gives the element back the way it found it', () => {
+  test('a tabindex the editor added is removed again', () => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const editor = createEditor({ element: host, doc: { blocks: [block({})] } });
+
+    expect(host.getAttribute('tabindex')).toBe('-1');
+
+    editor.destroy();
+
+    expect(host.hasAttribute('tabindex'), 'the host takes focus and answers nothing').toBe(false);
+    host.remove();
+  });
+
+  test('a tabindex the page already had is put back, not removed', () => {
+    const host = document.createElement('div');
+    host.tabIndex = 3;
+    document.body.append(host);
+    const editor = createEditor({ element: host, doc: { blocks: [block({})] } });
+    editor.destroy();
+
+    expect(host.tabIndex).toBe(3);
+    host.remove();
+  });
+});
+
+describe('a destroyed editor is done changing', () => {
+  /**
+   * `#travel` asked `#editable` where every other mutator asks `#canEdit()`,
+   * which is `#editable && !#destroyed`. So `undo()` rewrote the document of a
+   * destroyed editor and returned true while `canUndo` said false -- and
+   * nothing rendered it, so an application holding the reference to serialize
+   * later wrote out a document one edit behind what its user last saw.
+   */
+  test('undo() and redo() stop, and agree with canUndo and canRedo', () => {
+    const editor = mount([block({ id: 'b', content: [{ text: 'hi' }] })]);
+    editor.setBlockType('b', 'heading1');
+    const before = editor.getMarkdown();
+    editor.destroy();
+
+    expect(editor.canUndo).toBe(false);
+    expect(editor.undo(), 'undo() must not claim it did something').toBe(false);
+    expect(editor.canRedo).toBe(false);
+    expect(editor.redo()).toBe(false);
+    expect(editor.getMarkdown()).toBe(before);
+  });
+});
+
+describe('setBlockType refuses a type that is not one', () => {
+  test('an unknown type is rejected rather than stored', () => {
+    const editor = mount([block({ id: 'b', content: [{ text: 'text' }] })]);
+    const changes: unknown[] = [];
+    editor.on('change', (doc) => changes.push(doc));
+
+    editor.setBlockType('b', 'heading_1' as never);
+
+    expect(editor.getDocument().blocks[0]?.type).toBe('paragraph');
+    expect(changes).toHaveLength(0);
+  });
+
+  test('a real type still converts', () => {
+    const editor = mount([block({ id: 'b', content: [{ text: 'text' }] })]);
+    editor.setBlockType('b', 'heading1');
+
+    expect(editor.getDocument().blocks[0]?.type).toBe('heading1');
+  });
+});
