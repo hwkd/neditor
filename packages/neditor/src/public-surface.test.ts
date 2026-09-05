@@ -804,3 +804,35 @@ describe("a reader's expansion is view state, and behaves like it", () => {
     expect(first).not.toBe(live.textContent);
   });
 });
+
+describe('a reader closing a toggle does not leave its children selected', () => {
+  /**
+   * Every path that can hide a block prunes the selection behind the render.
+   * The read-only branch could only ever *reveal* until its override became
+   * two-directional; once it could hide a run of blocks, a reader closing a
+   * toggle left its children selected and off screen, where Cmd+C copied them.
+   */
+  test('the hidden children leave the selection', () => {
+    const editor = mount(
+      [
+        block({ id: 'intro', content: [{ text: 'Intro' }] }),
+        block({ id: 't', type: 'toggle', collapsed: false, content: [{ text: 'Summary' }] }),
+        block({ id: 'c1', depth: 1, content: [{ text: 'SECRET one' }] }),
+        block({ id: 'c2', depth: 1, content: [{ text: 'SECRET two' }] }),
+      ],
+      { editable: false },
+    );
+
+    editor.selectBlocks(['c1', 'c2']);
+
+    expect(editor.getSelectedBlocks()).toEqual(['c1', 'c2']);
+
+    editor.element.querySelector<HTMLElement>('.neditor-block__chevron')!.click();
+
+    expect(editor.element.textContent).not.toContain('SECRET');
+    expect(
+      editor.getSelectedBlocks(),
+      'nothing off screen may stay selected, or copy takes it',
+    ).toEqual([]);
+  });
+});

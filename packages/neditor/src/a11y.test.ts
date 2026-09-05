@@ -712,3 +712,36 @@ describe('the root takes a role only where there is none to take', () => {
     host.remove();
   });
 });
+
+describe('a mount with no implicit role gets one, whatever its tag', () => {
+  /**
+   * Listing the generic elements was the wrong way round: it withheld the role
+   * from anything not on the list, including a custom element -- which is
+   * exactly the mount a web component uses, and which has no implicit role
+   * either. The list names the elements that *have* a role worth keeping.
+   */
+  test.each(['div', 'span', 'my-editor', 'label'])('a <%s> host is named', (tag) => {
+    const host = document.createElement(tag);
+    document.body.append(host);
+    const editor = createEditor({ element: host, doc: { blocks: [block({})] } });
+
+    expect(host.getAttribute('role'), `<${tag}> has no implicit role to lose`).toBe('group');
+
+    editor.destroy();
+    host.remove();
+  });
+
+  test.each(['main', 'section', 'article', 'nav', 'form', 'aside', 'blockquote'])(
+    'a <%s> host keeps the role it already has',
+    (tag) => {
+      const host = document.createElement(tag);
+      document.body.append(host);
+      const editor = createEditor({ element: host, doc: { blocks: [block({})] } });
+
+      expect(host.hasAttribute('role')).toBe(false);
+
+      editor.destroy();
+      host.remove();
+    },
+  );
+});

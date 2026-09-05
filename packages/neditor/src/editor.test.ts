@@ -1201,3 +1201,103 @@ describe('a composed word is one entry, and survives a render that keeps its hos
     ).toBe('paragraph');
   });
 });
+
+describe('armed marks after a composition are painted, not just recorded', () => {
+  /**
+   * `#writeContent` exists for the paths where the browser has already edited
+   * the DOM, and it says so by setting the renderer's content key -- which made
+   * the `#render()` on the next line skip the block entirely. The marks went
+   * into the model and were painted nowhere, and the next keystroke, syncing
+   * from a DOM that never had them, deleted them.
+   */
+  test('the DOM shows the formatting the model holds', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'ab' }] })]);
+    const host = hosts(editor)[0]!;
+    host.focus();
+    const range = document.createRange();
+    range.setStart(host.firstChild ?? host, 2);
+    range.collapse(true);
+    const selection = getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    editor.toggleMark('bold');
+
+    host.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    host.textContent = 'ab太字';
+    const after = document.createRange();
+    after.setStart(host.firstChild!, 4);
+    after.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(after);
+    host.dispatchEvent(
+      new InputEvent('input', { inputType: 'insertCompositionText', bubbles: true }),
+    );
+    host.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '太字' }));
+
+    const live = hosts(editor)[0]!;
+
+    expect(editor.getMarkdown().trim()).toBe('ab**太字**');
+    expect(live.querySelector('strong, b'), 'the mark has to be in the DOM too').not.toBeNull();
+  });
+
+  test('and the next keystroke does not take them away again', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'ab' }] })]);
+    const host = hosts(editor)[0]!;
+    host.focus();
+    const range = document.createRange();
+    range.setStart(host.firstChild ?? host, 2);
+    range.collapse(true);
+    const selection = getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    editor.toggleMark('bold');
+
+    host.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    host.textContent = 'ab太字';
+    const after = document.createRange();
+    after.setStart(host.firstChild!, 4);
+    after.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(after);
+    host.dispatchEvent(
+      new InputEvent('input', { inputType: 'insertCompositionText', bubbles: true }),
+    );
+    host.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '太字' }));
+
+    // An ordinary keystroke, which syncs the model from the DOM.
+    const live = hosts(editor)[0]!;
+    live.dispatchEvent(
+      new InputEvent('input', { inputType: 'insertText', data: '!', bubbles: true }),
+    );
+
+    expect(editor.getMarkdown()).toContain('**');
+  });
+});
+
+describe('a composition that outlives a render is re-anchored to what replaced it', () => {
+  /**
+   * `#endComposition` returns early when the host survived, because the browser
+   * is still composing into it -- but the state it kept held `content` and
+   * `selection` describing the document that was just replaced, and
+   * `#handleCompositionEnd` turns those into a history entry. That restored
+   * blocks the user had never seen, in a method whose own contract says history
+   * is cleared so they cannot.
+   */
+  test('setDocument leaves no way to undo into the replaced document', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'before' }] })]);
+    const host = hosts(editor)[0]!;
+    host.focus();
+    host.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+
+    editor.setDocument({ blocks: [block({ id: 'a', content: [{ text: 'after' }] })] });
+
+    expect(hosts(editor)[0], 'precondition: the host was reused').toBe(host);
+
+    host.textContent = 'afterX';
+    host.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: 'X' }));
+
+    editor.undo();
+
+    expect(blockText(editor.getDocument().blocks[0]!)).not.toBe('before');
+  });
+});

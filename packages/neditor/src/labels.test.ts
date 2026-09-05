@@ -220,3 +220,24 @@ describe('a translation made before a label existed is not lost to English', () 
     expect(resolveLabels().blockSelectedNamed).toBe(DEFAULT_LABELS.blockSelectedNamed);
   });
 });
+
+describe('a one-form carrying a count is not announced with the placeholder bare', () => {
+  /**
+   * `blockSelected` commonly reads `{count} block selected`, and substituting
+   * it for the named form put those literal characters into the live region --
+   * the named forms are only ever used for a single block, and the call site
+   * fills in `{type}` and `{text}`, not `{count}`.
+   */
+  test('the stand-in has its count filled in', () => {
+    const labels = resolveLabels({ blockSelected: '{count} блок выделен' });
+
+    expect(labels.blockSelectedNamed).toBe('1 блок выделен');
+    expect(labels.emptyBlockSelectedNamed).toBe('1 блок выделен');
+  });
+
+  test('a one-form without a count is used as it stands', () => {
+    expect(resolveLabels({ blockSelected: 'Ein Block ausgewählt' }).blockSelectedNamed).toBe(
+      'Ein Block ausgewählt',
+    );
+  });
+});

@@ -370,3 +370,48 @@ describe('an image pasted where an image cannot go still leaves something', () =
     expect(text.some((run) => run.link === 'https://a.test/x.png')).toBe(true);
   });
 });
+
+describe('our own Markdown is recognised even without the clipboard marker', () => {
+  /**
+   * A custom clipboard type is the primary signal but is not guaranteed to
+   * survive every system clipboard, and without it the code-block paste fell
+   * back to `text/plain` -- which for our own payload is `toMarkdown` output,
+   * fence lines and escapes and all. The fallback is exact rather than a guess:
+   * if writing the parsed blocks back out reproduces the plain text, the plain
+   * text is that Markdown.
+   */
+  const intoCode = (html: string, plain: string, own = false): string => {
+    const editor = mount([block({ id: 'k', type: 'code', content: [] })]);
+    const host = editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
+    host.focus();
+    paste(host, html, plain, own);
+
+    return blockText(editor.getDocument().blocks[0]!);
+  };
+
+  const ourPayload = (): { html: string; plain: string } => {
+    const blocks = [block({ id: 'c', type: 'code', content: [{ text: 'const a = 1;' }] })];
+
+    return {
+      html: blocksToHtml(document, blocks),
+      plain: toMarkdown(normalizeDocument({ blocks })),
+    };
+  };
+
+  test('with the marker', () => {
+    const { html, plain } = ourPayload();
+
+    expect(intoCode(html, plain, true)).toBe('const a = 1;');
+  });
+
+  test('and with the marker dropped', () => {
+    const { html, plain } = ourPayload();
+
+    expect(plain).toContain('```');
+    expect(intoCode(html, plain, false), 'the fence must not reach the code').toBe('const a = 1;');
+  });
+
+  test("but another application's plain text is still taken literally", () => {
+    expect(intoCode('<div>const a</div>', 'const   a   =   1;')).toBe('const   a   =   1;');
+  });
+});

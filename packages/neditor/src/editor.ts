@@ -251,12 +251,44 @@ function isApplePlatform(view: (Window & typeof globalThis) | null): boolean {
 /** One editable host: a block's own content, or a single table cell. */
 /** What an in-flight composition needs to remember; see `#composition`. */
 /**
- * Elements whose implicit ARIA role is `generic`, and so is safe to replace.
+ * Elements that carry an implicit ARIA role worth keeping.
  *
- * `generic` prohibits an accessible name, which is why the root needs a role at
- * all; anything else the host mounts into has a role worth keeping.
+ * The root needs a role because `generic` -- what a bare `<div>` has --
+ * prohibits an accessible name. Listing the *generic* elements instead was the
+ * wrong way round: it withheld the role from anything not on the list,
+ * including a custom element, which is exactly the mount a web component uses
+ * and which has no implicit role either.
  */
-const GENERIC_ELEMENTS = new Set(['DIV', 'SPAN']);
+const SEMANTIC_ELEMENTS = new Set([
+  'MAIN',
+  'SECTION',
+  'ARTICLE',
+  'NAV',
+  'FORM',
+  'ASIDE',
+  'HEADER',
+  'FOOTER',
+  'DIALOG',
+  'FIGURE',
+  'TABLE',
+  'UL',
+  'OL',
+  'LI',
+  'BLOCKQUOTE',
+  'FIELDSET',
+  'SEARCH',
+  'H1',
+  'H2',
+  'H3',
+  'H4',
+  'H5',
+  'H6',
+]);
+
+/** True when the element has no implicit role that a `group` would displace. */
+function hasGenericRole(element: HTMLElement): boolean {
+  return !SEMANTIC_ELEMENTS.has(element.tagName);
+}
 
 /** Marks a clipboard this editor wrote; see `#handleCopy`. */
 const OWN_CLIPBOARD_TYPE = 'application/x-neditor';
@@ -759,7 +791,7 @@ export class NEditor {
       // <nav>, <form>, <aside>) already has an implicit role that both permits
       // a name and means something, and replacing it with `group` threw that
       // away.
-      this.#ownsRole = !this.#root.hasAttribute('role') && GENERIC_ELEMENTS.has(this.#root.tagName);
+      this.#ownsRole = !this.#root.hasAttribute('role') && hasGenericRole(this.#root);
 
       if (this.#ownsRole) {
         this.#root.setAttribute('role', 'group');
@@ -1348,6 +1380,12 @@ export class NEditor {
       this.#readerExpanded.set(id, expanded);
 
       this.#render();
+      // Every other path that can hide a block prunes the selection behind the
+      // render. This branch could only ever *reveal* until the override became
+      // two-directional; now that it can hide a run of blocks, a reader closing
+      // a toggle left its children selected and off screen, where Cmd+C copied
+      // them.
+      this.#pruneBlockSelection();
       this.#announce(expanded ? this.#labels.toggleExpanded : this.#labels.toggleCollapsed);
 
       return;
@@ -3351,9 +3389,27 @@ export class NEditor {
     // leaves the composition running and its `compositionend` still able to
     // reach the listener on the root; clearing regardless meant the browser's
     // later candidate rewrites arrived looking like committed input.
-    const host = this.#composition?.host;
+    const composition = this.#composition;
 
-    if (host && this.#root.contains(host)) {
+    if (composition && this.#root.contains(composition.host)) {
+      // The browser is still composing into an element that survived, so the
+      // flag has to stay -- but `content` and `selection` describe the document
+      // that was just replaced. Kept, they became the history entry
+      // `#handleCompositionEnd` records, restoring blocks the user never saw.
+      // Re-anchored to what is there now instead.
+      const target = this.#resolve(composition.host);
+
+      this.#composition = target
+        ? {
+            host: composition.host,
+            content: this.#contentOf(target),
+            selection: this.#selectionSnapshot(),
+            offset: getSelectionRange(target.content)?.start ?? 0,
+            pending: null,
+          }
+        : null;
+      this.#composing = this.#composition !== null;
+
       return;
     }
 
@@ -3511,10 +3567,23 @@ export class NEditor {
     }
 
     this.#pending = null;
-    // Written, not committed. `#handleCompositionEnd` has already recorded the
-    // one entry this word gets; committing again banked a second, whose first
-    // undo showed the word with the formatting stripped off it.
-    this.#writeContent(resolved, next);
+    // Into the model only, then a real render. Not `#writeContent`: that exists
+    // for the paths where the browser has already edited the DOM, and it tells
+    // the renderer so by setting the content key -- which made the very next
+    // `#render()` skip the block and leave the marks painted nowhere. And not
+    // `#commitResolved` either: `#handleCompositionEnd` has already recorded
+    // the one history entry this word gets, and committing again banked a
+    // second whose first undo showed the word with its formatting stripped.
+    this.#blocks = resolved.cell
+      ? updateBlock(this.#blocks, resolved.block.id, {
+          rows: tableSetCell(
+            findBlock(this.#blocks, resolved.block.id)?.rows ?? [],
+            resolved.cell.row,
+            resolved.cell.column,
+            next,
+          ),
+        })
+      : updateBlock(this.#blocks, resolved.block.id, { content: next });
     this.#render();
     this.#focusResolved(resolved, end);
   }
@@ -4165,7 +4234,9 @@ export class NEditor {
           // for *all* HTML, which is what the first version of this fix did,
           // took the second case away to fix the first.
           richFromPlainText(
-            own ? pasted.map(blockText).join('\n') : plain || pasted.map(blockText).join('\n'),
+            own || this.#plainIsOurMarkdown(pasted, plain)
+              ? pasted.map(blockText).join('\n')
+              : plain || pasted.map(blockText).join('\n'),
           )
         : // A lone paragraph is a phrase, not a document: keep it in this block
           // so pasting mid-sentence still works.
@@ -4190,6 +4261,25 @@ export class NEditor {
   }
 
   /** HTML first, since it carries structure; Markdown is the fallback. */
+  /**
+   * Whether `plain` is this package's own Markdown for the HTML beside it.
+   *
+   * The `application/x-neditor` type is the primary signal, but a custom
+   * clipboard type is not guaranteed to survive every system clipboard, and
+   * when it does not the code-block paste falls back to `text/plain` -- which
+   * for our own payload is `toMarkdown` output, fence lines and escapes and
+   * all. This is an exact test rather than a guess: if writing the parsed
+   * blocks back out reproduces the plain text byte for byte, the plain text is
+   * that Markdown. Another application's pairing does not survive that.
+   */
+  #plainIsOurMarkdown(pasted: readonly Block[], plain: string): boolean {
+    if (plain.length === 0) {
+      return false;
+    }
+
+    return toMarkdown({ blocks: pasted as Block[] }).trim() === plain.trim();
+  }
+
   #parseClipboard(html: string, plain: string): Block[] {
     const fromHtml = html.length > 0 ? blocksFromHtml(this.#document, html) : [];
 

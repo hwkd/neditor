@@ -315,12 +315,13 @@ export function resolveLabels(overrides?: Partial<NEditorLabels>): NEditorLabels
   // closest thing they gave us, so it stands in until they translate the new
   // one. The named form takes `{type}` and `{text}`, which `formatLabel`
   // leaves alone when the string does not use them.
-  const named =
-    overrides?.blockSelectedNamed ??
-    (overrides?.blockSelected === undefined ? undefined : overrides.blockSelected);
-  const emptyNamed =
-    overrides?.emptyBlockSelectedNamed ??
-    (overrides?.blockSelected === undefined ? undefined : overrides.blockSelected);
+  // `{count}` is substituted here rather than left for the caller: the named
+  // forms are only ever used for a single block, and the call site fills in
+  // `{type}` and `{text}` -- so a host whose one-form reads `{count} блок
+  // выделен` had the placeholder announced as the literal characters.
+  const standIn = overrides?.blockSelected?.replaceAll('{count}', '1');
+  const named = overrides?.blockSelectedNamed ?? standIn;
+  const emptyNamed = overrides?.emptyBlockSelectedNamed ?? standIn;
 
   return {
     ...DEFAULT_LABELS,
