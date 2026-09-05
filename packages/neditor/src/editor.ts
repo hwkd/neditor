@@ -250,6 +250,9 @@ function isApplePlatform(view: (Window & typeof globalThis) | null): boolean {
 
 /** One editable host: a block's own content, or a single table cell. */
 /** What an in-flight composition needs to remember; see `#composition`. */
+/** Marks a clipboard this editor wrote; see `#handleCopy`. */
+const OWN_CLIPBOARD_TYPE = 'application/x-neditor';
+
 interface CompositionState {
   readonly content: RichText;
   readonly selection: SelectionSnapshot | null;
@@ -2499,6 +2502,13 @@ export class NEditor {
     const doc = sliceDocument(this.#blocks, this.#selectionForEdit());
     event.clipboardData.setData('text/plain', toMarkdown(doc));
     event.clipboardData.setData('text/html', blocksToHtml(this.#document, doc.blocks));
+    // A type of our own, alongside rather than inside the payload: it marks the
+    // clipboard as ours without changing a byte of what any other application
+    // receives. `text/plain` beside our HTML is `toMarkdown` output, which is
+    // not the literal characters -- a code block's fence lines and a
+    // paragraph's escapes are in it -- and a paste into a code block has to
+    // know which of the two it is holding.
+    event.clipboardData.setData(OWN_CLIPBOARD_TYPE, '1');
 
     if (event.type === 'cut' && this.#editable) {
       this.#deleteSelectedBlocks();
@@ -3343,8 +3353,21 @@ export class NEditor {
     element?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   }
 
-  #handleViewportChange = (): void => {
+  #handleViewportChange = (event: Event): void => {
     if (this.#destroyed) {
+      return;
+    }
+
+    // A scroll *inside* one of these is the popover doing its own work -- the
+    // slash menu scrolls its option list to keep the active item in view, and
+    // dismissing on that closed the menu as soon as the user arrowed past the
+    // fold. Only a scroll of the ground underneath counts.
+    // The portal element, not the container it was appended to: that container
+    // defaults to the mount's root node, which for an ordinary mount is
+    // `document.body` -- so testing it swallowed every scroll on the page.
+    const target = event.target;
+
+    if (target instanceof Element && target.closest('.neditor-portal')) {
       return;
     }
 
@@ -3363,7 +3386,12 @@ export class NEditor {
     this.#composition = resolved
       ? {
           content: this.#contentOf(resolved),
-          selection: this.#selectionBeforeInput ?? this.#selectionSnapshot(),
+          // The live selection, not `#selectionBeforeInput`. That field holds
+          // the selection as it stood before the *previous* input event, so
+          // undoing a composed word put the caret back in whatever block or
+          // cell had been edited before it -- and the next keystrokes landed
+          // there.
+          selection: this.#selectionSnapshot(),
           offset: getSelectionRange(resolved.content)?.start ?? 0,
           pending: this.#pending,
         }
@@ -3933,7 +3961,13 @@ export class NEditor {
       return;
     }
 
-    this.#insertForeignContent(resolved, html, plain);
+    this.#insertForeignContent(
+      resolved,
+      html,
+      plain,
+      undefined,
+      event.clipboardData.getData(OWN_CLIPBOARD_TYPE).length > 0,
+    );
   };
 
   /**
@@ -4061,6 +4095,7 @@ export class NEditor {
     html: string,
     plain: string,
     prepare?: () => void,
+    own = false,
   ): void {
     const pasted = this.#parseClipboard(html, plain);
 
@@ -4079,19 +4114,16 @@ export class NEditor {
       : resolved.block.type === 'code'
         ? // A code block is literal: pasted structure becomes text, never blocks.
           //
-          // The parsed text wins wherever there was HTML to parse. `text/plain`
-          // is only the same characters when it came from somewhere that has no
-          // richer form -- a terminal, a textarea. When this editor wrote the
-          // clipboard, `text/plain` is `toMarkdown` output, so preferring it put
-          // the ``` fence lines of a copied code block into the code as literal
-          // lines, and turned a copied `snake_case` into `snake\_case`:
-          // characters the user never typed. Where there is no HTML the raw
-          // plain text is right, since parsing it as Markdown would eat its
-          // punctuation instead.
+          // Whose clipboard it is decides which half to read. Ours pairs the
+          // HTML with `toMarkdown` output, so `text/plain` there carries a code
+          // block's fence lines and a paragraph's escapes -- characters the
+          // user never typed. Everyone else pairs it with the literal text,
+          // which is exactly what a code block wants and is more faithful than
+          // anything recoverable from their HTML. Preferring the parsed text
+          // for *all* HTML, which is what the first version of this fix did,
+          // took the second case away to fix the first.
           richFromPlainText(
-            html.length > 0
-              ? pasted.map(blockText).join('\n')
-              : plain || pasted.map(blockText).join('\n'),
+            own ? pasted.map(blockText).join('\n') : plain || pasted.map(blockText).join('\n'),
           )
         : // A lone paragraph is a phrase, not a document: keep it in this block
           // so pasting mid-sentence still works.

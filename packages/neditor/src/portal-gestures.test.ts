@@ -777,3 +777,56 @@ describe('the gutter follows the block it belongs to', () => {
     ).toBe(92);
   });
 });
+
+describe('a popover scrolling its own contents is not the ground moving', () => {
+  /**
+   * The dismissal listener captures scrolls from anywhere, and the slash menu
+   * scrolls its own option list to keep the active item in view -- so arrowing
+   * past the fold closed the menu. Only a scroll outside the portals counts.
+   */
+  test('the slash menu survives scrolling its own list', () => {
+    const editor = mount([block({ id: 'a', content: [] })]);
+    const host = hosts(editor)[0]!;
+    host.focus();
+    host.textContent = '/';
+    const range = document.createRange();
+    range.setStart(host.firstChild!, 1);
+    range.collapse(true);
+    const selection = getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    host.dispatchEvent(
+      new InputEvent('input', { inputType: 'insertText', data: '/', bubbles: true }),
+    );
+
+    const menu = portal('neditor-slash-menu');
+
+    expect(menu.hidden).toBe(false);
+
+    const list = menu.querySelector('.neditor-slash-menu__list') ?? menu;
+    list.dispatchEvent(new Event('scroll', { bubbles: false }));
+
+    expect(menu.hidden, 'the menu scrolling itself must not dismiss it').toBe(false);
+  });
+
+  test('but a scroll of the page still dismisses it', () => {
+    const editor = mount([block({ id: 'a', content: [] })]);
+    const host = hosts(editor)[0]!;
+    host.focus();
+    host.textContent = '/';
+    const range = document.createRange();
+    range.setStart(host.firstChild!, 1);
+    range.collapse(true);
+    const selection = getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    host.dispatchEvent(
+      new InputEvent('input', { inputType: 'insertText', data: '/', bubbles: true }),
+    );
+
+    const menu = portal('neditor-slash-menu');
+    editor.element.dispatchEvent(new Event('scroll', { bubbles: false }));
+
+    expect(menu.hidden).toBe(true);
+  });
+});

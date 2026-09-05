@@ -1065,3 +1065,71 @@ describe('a composition is one edit, and it ends when its host does', () => {
     expect(blockText(editor.getDocument().blocks[0]!)).toBe('abc');
   });
 });
+
+describe('undo of a composed word returns the caret to that word', () => {
+  /**
+   * `#handleCompositionStart` recorded `#selectionBeforeInput`, which holds the
+   * selection as it stood before the *previous* input event -- so undoing an
+   * IME word put the caret back in whatever block had been edited before it,
+   * and the next keystrokes landed there.
+   */
+  test('not to the block edited before it', () => {
+    const editor = mount([
+      block({ id: 'a', content: [{ text: 'first' }] }),
+      block({ id: 'b', content: [{ text: 'abc' }] }),
+    ]);
+
+    // An edit in the first block, so `#selectionBeforeInput` points at it.
+    const first = hosts(editor)[0]!;
+    first.focus();
+    first.textContent = 'firstX';
+    const toEnd = document.createRange();
+    toEnd.setStart(first.firstChild!, 6);
+    toEnd.collapse(true);
+    const selection = getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(toEnd);
+    // `beforeinput` is where `#selectionBeforeInput` is captured, so it has to
+    // be dispatched for the stale value this test is about to exist at all.
+    first.dispatchEvent(
+      new InputEvent('beforeinput', {
+        inputType: 'insertText',
+        data: 'X',
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    first.dispatchEvent(
+      new InputEvent('input', { inputType: 'insertText', data: 'X', bubbles: true }),
+    );
+
+    // Then a composed word in the second. The caret has to be placed there
+    // first -- a composition starts where the caret is, and without this the
+    // test measures a composition that began in the block it is comparing
+    // against.
+    const second = hosts(editor)[1]!;
+    second.focus();
+    const caret = document.createRange();
+    caret.setStart(second.firstChild!, 3);
+    caret.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(caret);
+    second.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    second.textContent = 'abcにほん';
+    const composed = document.createRange();
+    composed.setStart(second.firstChild!, 'abcにほん'.length);
+    composed.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(composed);
+    second.dispatchEvent(
+      new InputEvent('input', { inputType: 'insertCompositionText', bubbles: true }),
+    );
+    second.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: 'にほん' }));
+
+    editor.undo();
+
+    const state = editor.getSelectionState();
+
+    expect(state?.blockId, 'the caret belongs to the word that was undone').toBe('b');
+  });
+});

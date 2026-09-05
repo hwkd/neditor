@@ -78,10 +78,17 @@ function press(host: HTMLElement, key: string): boolean {
   return event.defaultPrevented;
 }
 
-function paste(host: HTMLElement, html: string, plain = ''): void {
+function paste(host: HTMLElement, html: string, plain = '', own = false): void {
   const data = new DataTransfer();
   data.setData('text/html', html);
   data.setData('text/plain', plain);
+
+  // What `#handleCopy` writes alongside its own payload. Without it the editor
+  // reads the clipboard as another application's, which is the whole point of
+  // the distinction being tested below.
+  if (own) {
+    data.setData('application/x-neditor', '1');
+  }
   host.dispatchEvent(
     new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }),
   );
@@ -266,27 +273,52 @@ describe('pasting into a code block inserts what was copied, not its Markdown', 
    * literal lines, and turned a copied `snake_case` into `snake\_case`:
    * characters the user never typed, in the one block type that shows them.
    */
-  const intoCode = (html: string, plain: string): string => {
+  const intoCode = (html: string, plain: string, own = false): string => {
     const editor = mount([block({ id: 'k', type: 'code', content: [] })]);
     const host = editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
     host.focus();
-    paste(host, html, plain);
+    paste(host, html, plain, own);
 
     return blockText(editor.getDocument().blocks[0]!);
   };
 
-  test('a copied code block arrives without its fence', () => {
+  test('a code block copied from this editor arrives without its fence', () => {
     expect(
       intoCode(
         '<pre><code>const a = 1;\nconst b = 2;</code></pre>',
         '```\nconst a = 1;\nconst b = 2;\n```',
+        true,
       ),
     ).toBe('const a = 1;\nconst b = 2;');
   });
 
-  test('a copied paragraph arrives without its escapes', () => {
-    expect(intoCode('<p>use snake_case and 2 * 3</p>', 'use snake\\_case and 2 \\* 3')).toBe(
+  test('a paragraph copied from this editor arrives without its escapes', () => {
+    expect(intoCode('<p>use snake_case and 2 * 3</p>', 'use snake\\_case and 2 \\* 3', true)).toBe(
       'use snake_case and 2 * 3',
+    );
+  });
+
+  /**
+   * The other half, and the one the first version of this fix broke. Another
+   * application pairs its HTML with the literal text, which is exactly what a
+   * code block wants -- more faithful than anything recoverable from markup
+   * built for display. Preferring the parsed text for all HTML took this away
+   * in order to fix the case above.
+   */
+  test("another application's HTML does not override its own plain text", () => {
+    expect(
+      intoCode(
+        '<div style="font-family:monospace"><span>const</span> <span>a</span></div>',
+        'const   a   =   1;   // spacing the source meant',
+      ),
+    ).toBe('const   a   =   1;   // spacing the source meant');
+  });
+
+  test('and neither does a rich-text editor rewriting the characters', () => {
+    // Word and Docs write curly quotes into their HTML while text/plain keeps
+    // what was typed. A code block wants what was typed.
+    expect(intoCode('<p>const s = \u201Chello\u201D;</p>', 'const s = "hello";')).toBe(
+      'const s = "hello";',
     );
   });
 

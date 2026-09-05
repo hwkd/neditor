@@ -308,9 +308,25 @@ export const DEFAULT_LABELS: NEditorLabels = {
 
 /** Fills in whatever the caller did not override. */
 export function resolveLabels(overrides?: Partial<NEditorLabels>): NEditorLabels {
+  // A host that translated the whole interface before `blockSelectedNamed`
+  // existed has no entry for it, and falling through to the English default
+  // put one English sentence back into an otherwise translated live region --
+  // on the commonest announcement there is. Their own `blockSelected` is the
+  // closest thing they gave us, so it stands in until they translate the new
+  // one. The named form takes `{type}` and `{text}`, which `formatLabel`
+  // leaves alone when the string does not use them.
+  const named =
+    overrides?.blockSelectedNamed ??
+    (overrides?.blockSelected === undefined ? undefined : overrides.blockSelected);
+  const emptyNamed =
+    overrides?.emptyBlockSelectedNamed ??
+    (overrides?.blockSelected === undefined ? undefined : overrides.blockSelected);
+
   return {
     ...DEFAULT_LABELS,
     ...overrides,
+    ...(named === undefined ? {} : { blockSelectedNamed: named }),
+    ...(emptyNamed === undefined ? {} : { emptyBlockSelectedNamed: emptyNamed }),
     placeholders: { ...DEFAULT_LABELS.placeholders, ...overrides?.placeholders },
     // Per entry, like placeholders: translating one command must not blank the
     // other thirteen.

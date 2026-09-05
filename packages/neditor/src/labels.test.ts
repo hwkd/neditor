@@ -192,3 +192,31 @@ describe('the code block label is drawn from the element, not the stylesheet', (
     expect(DEFAULT_LABELS.codeBlockLabel).toBe('code');
   });
 });
+
+describe('a translation made before a label existed is not lost to English', () => {
+  /**
+   * `blockSelectedNamed` replaced `blockSelected` on the single-block path, so
+   * a host that had translated the whole interface before it existed suddenly
+   * heard one English sentence in an otherwise translated live region -- on the
+   * commonest announcement there is.
+   */
+  test('their blockSelected stands in for the named form they never saw', () => {
+    const labels = resolveLabels({ blockSelected: '1 Block ausgewählt' });
+
+    expect(labels.blockSelectedNamed).toBe('1 Block ausgewählt');
+    expect(labels.emptyBlockSelectedNamed).toBe('1 Block ausgewählt');
+  });
+
+  test('a host that translates the named form gets exactly that', () => {
+    const labels = resolveLabels({
+      blockSelected: '1 Block ausgewählt',
+      blockSelectedNamed: '{type} ausgewählt, {text}',
+    });
+
+    expect(labels.blockSelectedNamed).toBe('{type} ausgewählt, {text}');
+  });
+
+  test('and a host that overrides nothing keeps the defaults', () => {
+    expect(resolveLabels().blockSelectedNamed).toBe(DEFAULT_LABELS.blockSelectedNamed);
+  });
+});
