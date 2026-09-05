@@ -960,6 +960,18 @@ const MARK_DELIMITERS: ReadonlyArray<readonly [Mark, string, string]> = [
  * does not parse as emphasis in any Markdown dialect.
  */
 function runToMarkdown(run: TextRun): string {
+  // One span per line. A mark or a link is line-bounded in the reader -- every
+  // inline pattern excludes `\n`, so no rule can match a span that crosses one
+  // -- and writing `**one\<break>two**` whole therefore came back as literal
+  // asterisks sitting in the prose with the formatting gone. Reachable from
+  // Shift+Enter inside bold text, and from pasting `<b>one<br>two</b>`.
+  if (run.text.includes('\n')) {
+    return run.text
+      .split('\n')
+      .map((line) => runToMarkdown({ ...run, text: line }))
+      .join('\\\n');
+  }
+
   const escaped = escapeMarkdownText(run.text);
   const leading = /^[^\S\n]*/.exec(escaped)?.[0] ?? '';
   const trailing = /[^\S\n]*$/.exec(escaped)?.[0] ?? '';

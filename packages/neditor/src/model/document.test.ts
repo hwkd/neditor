@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest';
 import { blocksFromMarkdown } from '../input/markdown.ts';
 import { matchInputRule } from '../input/input-rules.ts';
 import type { Block } from './document.ts';
+import type { Mark, TextRun } from './rich-text.ts';
 import {
   blockText,
   computeListNumbers,
@@ -544,5 +545,76 @@ describe('a code block holds what its serializers can carry, and no more', () =>
     });
 
     expect(doc.blocks[0]?.content[0]?.link).toBe('https://a.test/x');
+  });
+});
+
+describe('a mark or link that spans a soft break', () => {
+  /**
+   * Every inline pattern in the reader excludes `\n`, so no rule can match a
+   * span crossing one. The writer wrapped the whole run anyway, so
+   * `**one\<break>two**` came back as literal asterisks sitting in the prose
+   * with the bold gone -- not a dropped mark but visible corruption. Reachable
+   * with Shift+Enter inside bold text, and by pasting `<b>one<br>two</b>`.
+   *
+   * The writer emits one span per line now. What that does not restore is the
+   * newline's own marks: it comes back as a bare run between two marked ones
+   * rather than inside a single marked run. That is invisible -- a newline has
+   * no formatting to see -- but it is not a byte-identical round trip, and the
+   * assertions below say so rather than implying otherwise.
+   */
+  const roundTrip = (content: TextRun[]): TextRun[] =>
+    normalizeDocument({
+      blocks: blocksFromMarkdown(
+        toMarkdown(
+          normalizeDocument({
+            blocks: [{ id: 'p', type: 'paragraph', depth: 0, content } as Block],
+          }),
+        ),
+      ),
+    }).blocks[0]!.content;
+
+  test.each([
+    ['bold', ['bold'] as Mark[], undefined],
+    ['italic', ['italic'] as Mark[], undefined],
+    ['strikethrough', ['strikethrough'] as Mark[], undefined],
+    ['code', ['code'] as Mark[], undefined],
+    ['underline', ['underline'] as Mark[], undefined],
+  ])('%s survives the break, on both sides of it', (_name, marks) => {
+    const back = roundTrip([{ text: 'one\ntwo', marks }]);
+
+    expect(back.map((run) => run.text).join('')).toBe('one\ntwo');
+    expect(back.filter((run) => run.text === 'one' || run.text === 'two')).toHaveLength(2);
+
+    expect(
+      back.filter((run) => run.text !== '\n').map((run) => run.marks),
+      'every run but the break itself keeps the mark',
+    ).toEqual(back.filter((run) => run.text !== '\n').map(() => marks));
+  });
+
+  test('a link survives it too, and keeps its destination', () => {
+    const back = roundTrip([{ text: 'line one\nline two', link: 'https://example.com/docs' }]);
+
+    expect(back.map((run) => run.text).join('')).toBe('line one\nline two');
+    expect(back.filter((run) => run.link === 'https://example.com/docs')).toHaveLength(2);
+  });
+
+  test('no raw delimiter is left in the text', () => {
+    for (const marks of [
+      ['bold'],
+      ['italic'],
+      ['strikethrough'],
+      ['code'],
+      ['underline'],
+    ] as Mark[][]) {
+      const text = roundTrip([{ text: 'one\ntwo', marks }])
+        .map((run) => run.text)
+        .join('');
+
+      expect(text, `marks: ${marks.join()}`).toBe('one\ntwo');
+    }
+  });
+
+  test('an unmarked break is unaffected', () => {
+    expect(roundTrip([{ text: 'one\ntwo' }])).toEqual([{ text: 'one\ntwo' }]);
   });
 });

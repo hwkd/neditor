@@ -1496,3 +1496,52 @@ describe('nesting deeper than the model can express is bounded, not followed', (
     expect(blocksFromHtml(document, html)).toHaveLength(20);
   });
 });
+
+describe('a code block keeps its first line through the clipboard', () => {
+  /**
+   * HTML tree construction ignores a single newline immediately after a `<pre>`
+   * start tag, so a code block whose first line was blank lost it on every
+   * copy-paste -- `blocksToHtml` writes `text/html` and the paste handler
+   * prefers it. Measured in Chrome: `<pre>\nX` reads back as "X", while
+   * `<pre><code>\nX` reads back as "\nX", which is also the conventional markup
+   * for a code block.
+   *
+   * Doubling the newline would have worked too, and only in a real browser:
+   * happy-dom does not implement that rule, so the fix would have been correct
+   * in production and wrong in this suite. The `<code>` wrapper needs no rule
+   * at all, and was checked in both.
+   */
+  const roundTrip = (text: string): string => {
+    const html = blocksToHtml(document, [{ id: 'c', type: 'code', depth: 0, content: [{ text }] }]);
+
+    return blocksFromHtml(document, html)
+      .flatMap((block) => block.content ?? [])
+      .map((run) => run.text)
+      .join('');
+  };
+
+  test.each([
+    ['a blank first line', '\nconst a = 1;'],
+    ['two blank first lines', '\n\nx'],
+    ['a newline in the middle', 'a\nb'],
+    ['no newline at all', 'plain'],
+    ['nothing but a newline', '\n'],
+  ])('%s survives', (_name, text) => {
+    expect(roundTrip(text)).toBe(text);
+  });
+
+  /**
+   * This is the assertion that actually guards the fix. The five above cannot:
+   * happy-dom does not drop the newline after `<pre>`, so they pass either way
+   * -- mutation-checked, and reverting to a bare `<pre>` fails only this one.
+   * Pinning the markup is the closest a suite running on this DOM can get to
+   * pinning a browser rule it does not implement.
+   */
+  test('the markup is the conventional pre > code', () => {
+    const html = blocksToHtml(document, [
+      { id: 'c', type: 'code', depth: 0, content: [{ text: 'x' }] },
+    ]);
+
+    expect(html).toContain('<pre><code>');
+  });
+});

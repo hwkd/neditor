@@ -678,7 +678,22 @@ export function blocksToHtml(doc: Document, blocks: readonly Block[]): string {
         summary.append(renderRichText(doc, block.content));
         element.append(summary);
       } else if (block.type !== 'divider') {
-        element.append(renderRichText(doc, block.content));
+        if (block.type === 'code') {
+          // Inside a `<code>`, which is both the conventional markup for a code
+          // block and the thing that makes it survive a round trip. HTML tree
+          // construction drops a single newline straight after a `<pre>` start
+          // tag, so a code block whose first line was blank came back one line
+          // shorter every time it was copied and pasted. Measured in Chrome:
+          // `<pre>\nX` reads back as "X", `<pre><code>\nX` as "\nX". Doubling
+          // the newline instead would have worked in a browser and been wrong
+          // under the DOM this package is tested against, which does not
+          // implement that rule.
+          const code = doc.createElement('code');
+          code.append(renderRichText(doc, block.content));
+          element.append(code);
+        } else {
+          element.append(renderRichText(doc, block.content));
+        }
       }
 
       host.append(element);
