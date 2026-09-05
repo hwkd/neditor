@@ -62,6 +62,7 @@ import {
   richLength,
   richMarksAt,
   richSetLink,
+  richSetMark,
   richSlice,
   richSplit,
   richToPlainText,
@@ -248,6 +249,19 @@ function isApplePlatform(view: (Window & typeof globalThis) | null): boolean {
 }
 
 /** One editable host: a block's own content, or a single table cell. */
+/** What an in-flight composition needs to remember; see `#composition`. */
+interface CompositionState {
+  readonly content: RichText;
+  readonly selection: SelectionSnapshot | null;
+  readonly offset: number;
+  readonly pending: {
+    readonly blockId: string;
+    readonly offset: number;
+    readonly marks: readonly Mark[];
+    readonly cell?: CellCoords;
+  } | null;
+}
+
 interface ResolvedTarget {
   readonly block: Block;
   readonly content: HTMLElement;
@@ -614,6 +628,20 @@ export class NEditor {
   #composing = false;
 
   /**
+   * Where the composition began, and what was armed when it did.
+   *
+   * A composition is one edit, not one per candidate keystroke: the browser
+   * rewrites the text several times before the user commits, and each rewrite
+   * reaches `#handleInput`. Recording history per rewrite banked a dead undo
+   * step for a cancelled candidate and fired a `change` for every intermediate
+   * state. Formatting armed with Cmd+B is held here too, because a composition
+   * arrives as `insertCompositionText` and the armed-marks path only ever
+   * handled `insertText` -- so bolding and then typing in an IME produced plain
+   * text.
+   */
+  #composition: CompositionState | null = null;
+
+  /**
    * A text drag that may grow into a block selection.
    *
    * Each block is its own contenteditable, and a browser will not extend a
@@ -931,6 +959,7 @@ export class NEditor {
     // integration -- applied the user's URL to the NEW document at the OLD
     // offsets, linking whatever text now sat there and emitting `change` for a
     // persistence layer to write back.
+    this.#endComposition();
     this.#closeSlashMenu();
     this.#linkContext = null;
     this.#linkEditor.close();
@@ -1535,6 +1564,7 @@ export class NEditor {
     }
 
     // Transient UI describes the pre-undo document; none of it survives.
+    this.#endComposition();
     this.#pending = null;
     this.#closeSlashMenu();
     this.#linkContext = null;
@@ -3082,24 +3112,72 @@ export class NEditor {
     // path writes `#blocks` itself rather than going through `#commit` — the
     // DOM is already ahead, and re-rendering it would drop the caret — so it
     // carries its own copy of that test.
-    if (event && !richEquals(this.#contentOf(resolved), parsed)) {
+    // Not while composing: the entry belongs to the finished candidate, and
+    // `#handleCompositionEnd` records it once against the state the
+    // composition started from.
+    if (event && !this.#composing && !richEquals(this.#contentOf(resolved), parsed)) {
       this.#recordHistory(inputRunKey(event, hostScope(id, cell)), this.#selectionBeforeInput);
     }
 
-    if (cell) {
-      const rows = tableSetCell(resolved.block.rows ?? [], cell.row, cell.column, parsed);
-      this.#blocks = updateBlock(this.#blocks, id, { rows });
-      this.#renderer.syncCellFromDom(id, cell.row, cell.column, parsed);
-    } else {
-      this.#blocks = updateBlock(this.#blocks, id, { content: parsed });
-      this.#renderer.syncFromDom(id, parsed);
-    }
+    this.#writeContent(resolved, parsed);
 
     return parsed;
   }
 
-  #handleCompositionStart = (): void => {
+  /**
+   * Writes content into the model and tells the renderer the DOM already has it.
+   *
+   * Deliberately not `#commit`: the DOM is ahead on these paths, so re-rendering
+   * would drop the caret the browser just placed.
+   */
+  #writeContent(resolved: ResolvedTarget, content: RichText): void {
+    const { cell } = resolved;
+    const id = resolved.block.id;
+
+    if (cell) {
+      const rows = tableSetCell(
+        findBlock(this.#blocks, id)?.rows ?? resolved.block.rows ?? [],
+        cell.row,
+        cell.column,
+        content,
+      );
+      this.#blocks = updateBlock(this.#blocks, id, { rows });
+      this.#renderer.syncCellFromDom(id, cell.row, cell.column, content);
+    } else {
+      this.#blocks = updateBlock(this.#blocks, id, { content });
+      this.#renderer.syncFromDom(id, content);
+    }
+  }
+
+  /**
+   * Forgets an in-flight composition, because its host is about to go away.
+   *
+   * `#composing` had exactly one clearing site: the `compositionend` listener
+   * on the root. Anything that re-renders detaches the host the composition
+   * lived in, so that event never arrives -- and the flag gates `#handleInput`
+   * and `#handleKeyDown`, so the editor went keyboard-inert for good. Plain
+   * characters still appeared, because the browser writes them itself and the
+   * DOM is read back, so the document kept saving while Enter, Backspace, Tab,
+   * Escape and every shortcut did nothing.
+   */
+  #endComposition(): void {
+    this.#composing = false;
+    this.#composition = null;
+  }
+
+  #handleCompositionStart = (event: CompositionEvent): void => {
     this.#composing = true;
+
+    const resolved = this.#resolve(event.target);
+
+    this.#composition = resolved
+      ? {
+          content: this.#contentOf(resolved),
+          selection: this.#selectionBeforeInput ?? this.#selectionSnapshot(),
+          offset: getSelectionRange(resolved.content)?.start ?? 0,
+          pending: this.#pending,
+        }
+      : null;
   };
 
   /**
@@ -3112,16 +3190,74 @@ export class NEditor {
   #handleCompositionEnd = (event: CompositionEvent): void => {
     this.#composing = false;
 
+    const composition = this.#composition;
+    this.#composition = null;
     const resolved = this.#resolve(event.target);
 
     if (!resolved || !this.#editable) {
       return;
     }
 
-    // A committed candidate is one undoable edit, keyed like ordinary typing.
-    this.#syncFromDom(resolved, new InputEvent('input', { inputType: 'insertText' }));
+    // One undoable edit for the whole candidate, recorded against the content
+    // as it stood before any of it was typed -- so undo takes back the word,
+    // and a cancelled candidate, which ends where it began, records nothing.
+    //
+    // `#blocks` already holds the last intermediate candidate, written by the
+    // per-rewrite syncs that deliberately recorded nothing. It is put back to
+    // where the composition started first, or the entry would record the
+    // half-composed text as the state to return to.
+    if (composition && !richEquals(composition.content, parseRichText(resolved.content))) {
+      this.#writeContent(resolved, composition.content);
+      this.#recordHistory(
+        `insert:${hostScope(resolved.block.id, resolved.cell)}`,
+        composition.selection,
+      );
+    }
+
+    const parsed = this.#syncFromDom(resolved);
+    this.#applyArmedMarks(resolved, composition, parsed);
     this.#emitChange();
   };
+
+  /**
+   * Gives a composed word the formatting that was armed before it was typed.
+   *
+   * `#handleBeforeInput` applies armed marks for `insertText` and prevents the
+   * default; a composition cannot be handled that way -- cancelling it would
+   * break the IME -- so the marks are applied afterwards, over the range the
+   * composition actually filled.
+   */
+  #applyArmedMarks(
+    resolved: ResolvedTarget,
+    composition: CompositionState | null,
+    parsed: RichText,
+  ): void {
+    const pending = composition?.pending;
+
+    if (
+      !pending ||
+      pending.blockId !== resolved.block.id ||
+      !sameCell(resolved.cell, pending.cell)
+    ) {
+      return;
+    }
+
+    const end = getSelectionRange(resolved.content)?.end ?? composition.offset;
+
+    if (end <= composition.offset) {
+      return;
+    }
+
+    let next = parsed;
+
+    for (const mark of pending.marks) {
+      next = richSetMark(next, composition.offset, end, mark, true);
+    }
+
+    this.#pending = null;
+    this.#commitResolved(resolved, next, null, composition.selection);
+    this.#focusResolved(resolved, end);
+  }
 
   #handleBeforeInput = (event: InputEvent): void => {
     if (!this.#editable) {

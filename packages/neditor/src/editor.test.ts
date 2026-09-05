@@ -953,3 +953,115 @@ describe('a table at its row cap refuses instead of pretending', () => {
     expect(announcement(editor)).toBe('Row deleted');
   });
 });
+
+describe('a composition is one edit, and it ends when its host does', () => {
+  /**
+   * Every CJK, Korean and Vietnamese user types through an IME, and so does
+   * anyone dictating or using an on-screen keyboard. The browser rewrites the
+   * text several times before the user commits, which is why input rules are
+   * suppressed while `#composing` -- and that flag had exactly one clearing
+   * site, the `compositionend` listener on the root.
+   */
+  const caretAt = (host: HTMLElement, offset: number): void => {
+    const range = document.createRange();
+    range.setStart(host.firstChild ?? host, offset);
+    range.collapse(true);
+    const selection = getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+
+  const compose = (host: HTMLElement, steps: string[], data: string): void => {
+    host.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+
+    for (const step of steps) {
+      host.textContent = step;
+      caretAt(host, step.length);
+      host.dispatchEvent(
+        new InputEvent('input', { inputType: 'insertCompositionText', bubbles: true }),
+      );
+    }
+
+    host.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data }));
+  };
+
+  test('setDocument mid-composition does not leave the editor keyboard-inert', () => {
+    const editor = mount([block({ id: 'a', content: [] })]);
+    const stale = hosts(editor)[0]!;
+    stale.focus();
+    stale.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+
+    // A remote or autosave document lands while the candidate window is open.
+    // The re-render detaches the host the composition lived in, so its
+    // compositionend can never reach the listener on the root.
+    editor.setDocument({ blocks: [block({ id: 'b', content: [] })] });
+
+    const host = hosts(editor)[0]!;
+    host.focus();
+    host.textContent = '# ';
+    caretAt(host, 2);
+    host.dispatchEvent(new InputEvent('input', { inputType: 'insertText', bubbles: true }));
+
+    expect(editor.getDocument().blocks[0]?.type, 'input rules must still run').toBe('heading1');
+  });
+
+  test('undo mid-composition does not either', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'x' }] })]);
+    editor.setBlockType('a', 'heading2');
+
+    // Queried *after* the conversion re-rendered. Dispatching on the host from
+    // before it sends the event at a detached node, which never reaches the
+    // listener on the root -- the first version of this test did that, and so
+    // never started a composition at all.
+    const host = hosts(editor)[0]!;
+    host.focus();
+    host.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    editor.undo();
+
+    const live = hosts(editor)[0]!;
+    live.focus();
+    live.textContent = '# ';
+    caretAt(live, 2);
+    live.dispatchEvent(new InputEvent('input', { inputType: 'insertText', bubbles: true }));
+
+    expect(editor.getDocument().blocks[0]?.type).toBe('heading1');
+  });
+
+  test('formatting armed before an IME word is applied to it', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'ab' }] })]);
+    const host = hosts(editor)[0]!;
+    host.focus();
+    caretAt(host, 2);
+    editor.toggleMark('bold');
+
+    compose(host, ['ab太字'], '太字');
+
+    expect(editor.getMarkdown().trim()).toBe('ab**太字**');
+  });
+
+  test('a cancelled candidate banks no undo step and changes nothing', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'abc' }] })]);
+    const host = hosts(editor)[0]!;
+    host.focus();
+
+    compose(host, ['abcに', 'abcにほ', 'abc'], '');
+
+    expect(blockText(editor.getDocument().blocks[0]!)).toBe('abc');
+    expect(editor.canUndo, 'nothing changed, so there is nothing to undo').toBe(false);
+  });
+
+  test('a committed candidate is one undo step, not one per keystroke', () => {
+    const editor = mount([block({ id: 'a', content: [{ text: 'abc' }] })]);
+    const host = hosts(editor)[0]!;
+    host.focus();
+
+    compose(host, ['abcに', 'abcにほ', 'abcにほん'], 'にほん');
+
+    expect(blockText(editor.getDocument().blocks[0]!)).toBe('abcにほん');
+    expect(editor.canUndo).toBe(true);
+
+    editor.undo();
+
+    expect(blockText(editor.getDocument().blocks[0]!)).toBe('abc');
+  });
+});
