@@ -562,3 +562,40 @@ describe('a table command hands the caret back to the cell it was invoked from',
     expect(focused?.textContent).toBe(expected);
   });
 });
+
+describe('focus is read from the tree the editor is mounted in', () => {
+  /**
+   * `document.activeElement` retargets to the shadow *host* for anything inside
+   * a shadow tree, so inside one it never matched a block -- and
+   * `toggleCollapsed`'s "catch the caret before it is lost" branch fired every
+   * time, yanking the caret out of whatever the user was editing and into the
+   * toggle they clicked.
+   */
+  test.each([
+    ['the light DOM', false],
+    ['a shadow root', true],
+  ])('collapsing a toggle in %s leaves the caret where it was', (_name, useShadow) => {
+    const blocks = [
+      block({ id: 'p0', content: [{ text: 'above' }] }),
+      block({ id: 't', type: 'toggle', collapsed: false, content: [{ text: 'toggle' }] }),
+      block({ id: 'k', depth: 1, content: [{ text: 'child' }] }),
+    ];
+    const { editor } = useShadow ? mountInShadow(blocks) : { editor: mount(blocks) };
+
+    const element = editor.element;
+    const above = element.querySelector<HTMLElement>('.neditor-block__content')!;
+    above.focus();
+
+    const treeRoot = element.getRootNode() as Document | ShadowRoot;
+    const idOf = (): string | undefined =>
+      (treeRoot.activeElement as HTMLElement | null)
+        ?.closest?.('[data-block-id]')
+        ?.getAttribute('data-block-id') ?? undefined;
+
+    expect(idOf()).toBe('p0');
+
+    element.querySelector<HTMLElement>('.neditor-block__chevron')!.click();
+
+    expect(idOf(), 'the caret belongs to the block the user was editing').toBe('p0');
+  });
+});

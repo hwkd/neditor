@@ -1266,7 +1266,11 @@ export class NEditor {
       return;
     }
 
-    const focused = this.#renderer.blockIdFromNode(this.#document.activeElement);
+    // The mount's own root, not the document: `document.activeElement`
+    // retargets to the shadow *host* for anything inside a shadow tree, so
+    // inside one this never matched a block and the branch below yanked the
+    // caret into the toggle on every expand or collapse.
+    const focused = this.#renderer.blockIdFromNode(this.#activeElement());
     const collapsed = block.collapsed !== true;
     this.#commit(updateBlock(this.#blocks, id, { collapsed }));
     this.#announce(collapsed ? this.#labels.toggleCollapsed : this.#labels.toggleExpanded);
@@ -1275,6 +1279,21 @@ export class NEditor {
     if (!focused || !this.#renderer.getView(focused)) {
       this.focus(id, CARET_END);
     }
+  }
+
+  /**
+   * What holds focus, asked of the tree the editor is actually mounted in.
+   *
+   * A `ShadowRoot` has its own `activeElement`; the document's retargets to the
+   * host, so reading it from there answers "the custom element" for everything
+   * inside one.
+   */
+  #activeElement(): Element | null {
+    const root = this.#root.getRootNode();
+
+    return 'activeElement' in root
+      ? ((root as Document | ShadowRoot).activeElement ?? null)
+      : this.#document.activeElement;
   }
 
   /** Sets a callout's icon. Only the first character a reader sees is kept. */
@@ -3593,7 +3612,14 @@ export class NEditor {
     }
 
     // Strip the `/query` the user typed to summon the menu.
-    const stripped = richDelete(block.content, context.start, getCaretOffset(content));
+    //
+    // Clamped to the start. `getCaretOffset` answers 0 when the caret is not in
+    // this host at all -- which it documents -- and the user can also simply
+    // click earlier in the same block with the menu still open. Either way the
+    // range ran backwards, and `richDelete` took it as [0, start): the command
+    // applied and silently ate the head of the block instead of the query.
+    const end = Math.max(context.start, getCaretOffset(content));
+    const stripped = richDelete(block.content, context.start, end);
     let blocks = updateBlock(this.#blocks, block.id, { content: stripped });
     blocks = setBlockType(blocks, block.id, command.type);
 

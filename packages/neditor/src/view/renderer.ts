@@ -254,7 +254,21 @@ export class Renderer {
 
   render(blocks: readonly Block[]): void {
     const numbers = computeListNumbers(blocks);
-    const live = new Set<string>();
+    const live = new Set(blocks.map((block) => block.id));
+
+    // Pruned first. Positioning compares each view against
+    // `root.children.item(index)`, and while a removed block's element is still
+    // sitting in the DOM those indices are shifted -- so every block after the
+    // removal failed the comparison and was re-inserted. `insertBefore` moves a
+    // node, and moving the node a caret is in blurs it. Deleting one block
+    // therefore dropped the caret out of a block that had not changed at all,
+    // in the one method written to protect it.
+    for (const [id, view] of this.#views) {
+      if (!live.has(id)) {
+        view.root.remove();
+        this.#views.delete(id);
+      }
+    }
 
     blocks.forEach((block, index) => {
       let view = this.#views.get(block.id);
@@ -275,16 +289,7 @@ export class Renderer {
       if (current !== view.root) {
         this.#root.insertBefore(view.root, current);
       }
-
-      live.add(block.id);
     });
-
-    for (const [id, view] of this.#views) {
-      if (!live.has(id)) {
-        view.root.remove();
-        this.#views.delete(id);
-      }
-    }
   }
 
   destroy(): void {

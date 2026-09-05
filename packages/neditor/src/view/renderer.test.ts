@@ -316,3 +316,65 @@ describe('block selection is not announced through a prohibited attribute', () =
     expect(renderer.getView('a')!.root.dataset.selected).toBe('true');
   });
 });
+
+describe('removing a block leaves the others where they are', () => {
+  /**
+   * Positioning compares each view against `root.children.item(index)`, and the
+   * prune loop that removes dead views used to run *after* it. So while a
+   * removed block's element was still sitting in the DOM, every index after it
+   * was shifted, every later view failed the comparison, and every one was
+   * re-inserted. `insertBefore` moves a node, and moving the node a caret is in
+   * blurs it -- so deleting one block dropped the caret out of a block that had
+   * not changed at all, in the one method written to protect it.
+   */
+  const moved = (before: () => void, blocks: Block[]): string[] => {
+    const seen: string[] = [];
+    const original = root.insertBefore.bind(root);
+    before();
+    root.insertBefore = ((node: Node, ref: Node | null) => {
+      const id = (node as HTMLElement).dataset?.blockId;
+
+      if (id) {
+        seen.push(id);
+      }
+
+      return original(node, ref);
+    }) as typeof root.insertBefore;
+    renderer.render(blocks);
+    root.insertBefore = original;
+
+    return seen;
+  };
+
+  const three = [
+    block({ id: 'a', content: [{ text: 'one' }] }),
+    block({ id: 'b', content: [{ text: 'two' }] }),
+    block({ id: 'c', content: [{ text: 'three' }] }),
+  ];
+
+  test('a survivor after the removal is not re-inserted', () => {
+    const touched = moved(() => renderer.render(three), [three[0]!, three[2]!]);
+
+    expect(touched, 'c did not move relative to a, so it must not be touched').toEqual([]);
+    expect(rendered()).toEqual(['a', 'c']);
+  });
+
+  test('and it keeps the caret', () => {
+    renderer.render(three);
+    const host = renderer.getView('c')!.content!;
+    host.focus();
+
+    expect(document.activeElement).toBe(host);
+
+    renderer.render([three[0]!, three[2]!]);
+
+    expect(document.activeElement, 'the caret must survive a removal above it').toBe(host);
+  });
+
+  test('a genuine reorder does still move the block', () => {
+    const touched = moved(() => renderer.render(three), [three[2]!, three[0]!, three[1]!]);
+
+    expect(touched).toContain('c');
+    expect(rendered()).toEqual(['c', 'a', 'b']);
+  });
+});
