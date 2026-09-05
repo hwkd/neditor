@@ -1537,6 +1537,24 @@ function visitDetails(doc: Document, element: Element, depth: number, out: Block
   // The summary is skipped by identity rather than removed from a copy: a
   // <details> holds every nested <details> below it, so cloning one per level
   // was quadratic in the nesting depth exactly as the list case was.
+  //
+  // Identity only reaches a direct child, though: `visitBlocksInner` tests it
+  // against its own children, and the descents into lists, quotes and blocks
+  // do not carry it. A `<summary>` wrapped in anything -- which is malformed,
+  // since the element must be a details' first child, but is what a stray
+  // `<span>` or `<li>` around it produces -- was therefore read as the title
+  // *and* again as body content, in the list case concatenated into that
+  // item's own text. Those shapes take the copy, where removing it works at
+  // any depth; the cost is one clone for markup nobody generates, and the
+  // common case never reaches it.
+  if (summary && summary.parentElement !== element) {
+    const body = element.cloneNode(true) as Element;
+    body.querySelector('summary')?.remove();
+    visitBlocks(doc, body, block.depth + 1, out);
+
+    return;
+  }
+
   visitBlocks(doc, element, block.depth + 1, out, summary ?? undefined);
 }
 

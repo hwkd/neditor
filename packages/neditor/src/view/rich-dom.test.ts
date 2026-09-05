@@ -1576,3 +1576,55 @@ describe('a code block reads the text the sanitizer left, not everything under i
     expect(text).toBe('a\nb');
   });
 });
+
+describe('a summary is the toggle title once, wherever it sits', () => {
+  /**
+   * Skipping it by node identity only reaches a direct child:
+   * `visitBlocksInner` tests the exclusion against its own children, and the
+   * descents into lists, quotes and blocks do not carry it. So a `<summary>`
+   * wrapped in anything was read as the title *and* again as body content --
+   * in the list and quote cases concatenated into that block's own text, which
+   * is wrong text with no visible cause. Those shapes take a copy instead,
+   * where removing it works at any depth.
+   */
+  const read = (html: string): [string, string][] =>
+    blocksFromHtml(document, html).map((one) => [one.type, blockText(one)]);
+
+  test.each([
+    [
+      'wrapped in a span',
+      '<details open><span><summary>Title</summary><p>Body</p></span></details>',
+    ],
+    [
+      'inside a list item',
+      '<details open><ul><li><summary>Title</summary>item</li></ul></details>',
+    ],
+    ['inside a heading', '<details open><h2><summary>Title</summary></h2><p>Body</p></details>'],
+    [
+      'inside a quote',
+      '<details open><blockquote><summary>Title</summary>quoted</blockquote></details>',
+    ],
+  ])('%s is not repeated into the body', (_name, html) => {
+    const blocks = read(html);
+
+    expect(blocks[0]).toEqual(['toggle', 'Title']);
+    expect(
+      blocks.slice(1).some(([, text]) => text.includes('Title')),
+      'the title must appear once, as the toggle',
+    ).toBe(false);
+  });
+
+  test('the ordinary shape is unchanged and takes no copy', () => {
+    expect(read('<details open><summary>Title</summary><p>Body</p></details>')).toEqual([
+      ['toggle', 'Title'],
+      ['paragraph', 'Body'],
+    ]);
+  });
+
+  test('and so is a summary inside a plain container', () => {
+    expect(read('<details open><div><summary>Title</summary><p>Body</p></div></details>')).toEqual([
+      ['toggle', 'Title'],
+      ['paragraph', 'Body'],
+    ]);
+  });
+});
