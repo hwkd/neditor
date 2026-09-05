@@ -671,8 +671,17 @@ somewhere else (a modal `<dialog>` is promoted to the top layer and paints above
 any z-index, so pass the dialog itself); the stylesheet is injected into that
 tree as well as the editor's.
 
-The layout uses logical properties throughout, so `dir="rtl"` mirrors
-indentation, list markers, the quote bar and the drag handle correctly.
+The layout uses logical properties throughout, so `dir="rtl"` on the editor
+mirrors indentation, list markers, the quote bar and the drag handle correctly.
+The drag handle's mirroring keys off the editor's own direction, so an LTR
+editor inside an RTL page is left alone rather than mirrored twice.
+
+The direction is the container's, though — the renderer writes no `dir` on
+individual blocks, so a document mixing Hebrew and English paragraphs renders
+every one of them in the editor's direction. A paragraph whose text runs the
+other way will have its punctuation placed at the wrong end. Set `dir` on the
+editor to match the document you are showing; per-block direction is not
+implemented.
 
 Under a strict `style-src` policy an injected `<style>` is blocked, so either
 pass `styleNonce`, or skip injection and use the stylesheet the package ships:

@@ -224,3 +224,34 @@ places at once, so they are stated as rules rather than as notes about one call 
   sets likewise still claimed to hold the toggle triangles that had been taken
   out of them. Behaviour was right in all three; the executable guards held. When
   a fix moves an invariant, move the sentence that explains it.
+
+- **A widget that flips its own ink has to own the ground it flips it onto.** The
+  dark theme redefined every foreground and left `--neditor-surface` transparent,
+  so on an ordinary light-only host page the whole document rendered at 1.00:1.
+  The same rule in reverse governs the library stylesheet's position: it goes
+  _first_ in the container, because it is a default and the page overrides it.
+
+- **A test that runs on happy-dom cannot pin a browser rule happy-dom does not
+  implement.** HTML tree construction drops one newline after `<pre>`; happy-dom
+  does not, so four of five behavioural tests passed with the fix reverted and
+  only the assertion on the emitted markup caught it. Where the environments
+  differ, check the real browser and pin the artifact, not the behaviour.
+
+- **A bound on the reader is a bound on the writer.** `INLINE_SPAN_LIMIT` caps how
+  far back a rule reaches; the writer had no matching cap, so it emitted spans
+  its own reader could never close and left the raw delimiters in the prose. Any
+  limit on one half of a round trip is a limit on both.
+
+- **`text/plain` is only the same characters when nothing richer exists.** This
+  editor writes it as `toMarkdown` output, so preferring it on paste into a code
+  block inserted fence lines and escape backslashes the user never typed.
+
+- **CSS custom properties fail whole, not in part.** `calc(var(--gutter) + depth *
+var(--indent))` is dropped entirely when a host sets the gutter to a unitless
+  `0` -- the invalidity appears only after substitution, so the whole declaration
+  goes, not the term. Keep separately-settable tokens in separate declarations.
+
+- **Ask the whole question every sibling asks.** `setBlockType` omitted `#canEdit()`,
+  `#travel` asked `#editable` without `!#destroyed`, and `setDocument` closed the
+  block selection but none of the popovers that `#travel` and `setEditable` both
+  close. Each was one path in a family that had agreed on the answer everywhere else.
