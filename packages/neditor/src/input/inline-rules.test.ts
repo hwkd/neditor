@@ -197,3 +197,67 @@ describe('a stray "](" before a real link', () => {
     expect(runs.find((run) => run.link)?.link).toBe('https://a.test/d');
   });
 });
+
+describe('emphasis needs a delimiter that can actually open or close', () => {
+  /**
+   * CommonMark's flanking rule, in the part that matters: an opening delimiter
+   * may not be followed by whitespace, and a closing one may not be preceded by
+   * it. Without it these matched, and since the rule fires on every keystroke
+   * the characters vanished as the user typed them -- in exactly the prose a
+   * developer writes.
+   */
+  const literal = (source: string): string =>
+    (blocksFromMarkdown(source)[0]?.content ?? []).map((run) => run.text).join('');
+
+  test.each([
+    ['a MongoDB field list', 'use _id and _rev fields'],
+    ['a shell glob', 'rm -rf *.log and *.tmp'],
+    ['two SQL wildcards', 'SELECT * FROM a; SELECT * FROM b'],
+    ['multiplication', '3 * 4 * 5 = 60'],
+    ['approximate ranges', 'ranges are ~~ 5 to ~~ 9'],
+    ['a lone asterisk', 'a * b'],
+    ['spaced double asterisks', 'x ** y ** z'],
+  ])('%s survives verbatim', (_name, source) => {
+    expect(literal(source)).toBe(source);
+  });
+
+  test('and nothing in them is marked', () => {
+    for (const source of ['3 * 4 * 5 = 60', 'use _id and _rev fields']) {
+      const runs = blocksFromMarkdown(source)[0]?.content ?? [];
+
+      expect(runs.every((run) => (run.marks ?? []).length === 0)).toBe(true);
+    }
+  });
+
+  test.each([
+    ['**bold**', 'bold', 'bold'],
+    ['*italic*', 'italic', 'italic'],
+    ['_italic_', 'italic', 'italic'],
+    ['~~struck~~', 'struck', 'strikethrough'],
+    ['*a b*', 'a b', 'italic'],
+  ])('%s still works', (source, text, mark) => {
+    const runs = blocksFromMarkdown(source)[0]?.content ?? [];
+
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.text).toBe(text);
+    expect(runs[0]?.marks).toEqual([mark]);
+  });
+
+  test('intra-word emphasis with an asterisk is still allowed', () => {
+    const runs = blocksFromMarkdown('Chapter*One*')[0]?.content ?? [];
+
+    expect(runs.at(-1)?.marks).toEqual(['italic']);
+  });
+
+  /**
+   * Deliberately unchanged. A code span is delimited by backtick runs, not by
+   * flanking, so `` ` a ` `` really is code in CommonMark -- the rule being
+   * added here is emphasis's, and applying it to backticks would be a second
+   * bug rather than a fix.
+   */
+  test('a code span keeps its spaces', () => {
+    const runs = blocksFromMarkdown('press ` then ` again')[0]?.content ?? [];
+
+    expect(runs.some((run) => (run.marks ?? []).includes('code'))).toBe(true);
+  });
+});

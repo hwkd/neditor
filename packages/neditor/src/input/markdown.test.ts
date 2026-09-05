@@ -702,17 +702,26 @@ describe('a span that reaches back is bounded work, not unbounded', () => {
     // refused any span past it outright, dropping the mark and leaving the raw
     // delimiters in the text. Neither bought anything measurable. What limits
     // the reach is INLINE_SPAN_LIMIT, which counts characters.
-    const runs = blocksFromMarkdown(`~~${'*ab* '.repeat(n)}~~`)[0]!.content;
+    //
+    // Trimmed so the closing `~~` is not preceded by a space, which GFM's
+    // flanking rule makes a non-closer. Untrimmed, this measured flanking
+    // rather than reach, and would have passed whatever the reach was.
+    const runs = blocksFromMarkdown(`~~${'*ab* '.repeat(n).trim()}~~`)[0]!.content;
 
-    expect(runs.filter((run) => (run.marks ?? []).includes('strikethrough')).length).toBe(n * 2);
+    expect(runs.filter((run) => (run.marks ?? []).includes('strikethrough')).length).toBe(
+      n * 2 - 1,
+    );
     expect(runs.map((run) => run.text).join('')).not.toContain('~~');
   });
 
   test('the limit that does apply is characters, not runs', () => {
     // 1320 runs inside the character limit closes; one single run past it does
     // not. A run-count ceiling would have had these the other way round.
-    const many = blocksFromMarkdown(`~~${'*ab* '.repeat(660)}~~`)[0]!.content;
-    const long = blocksFromMarkdown(`~~${'x '.repeat(1100)}~~`)[0]!.content;
+    // Trimmed for the same reason as above: a trailing space would stop both
+    // of these closing regardless of length, so the character limit -- the
+    // thing under test -- would not be what decided either one.
+    const many = blocksFromMarkdown(`~~${'*ab* '.repeat(660).trim()}~~`)[0]!.content;
+    const long = blocksFromMarkdown(`~~${'x '.repeat(1100).trim()}~~`)[0]!.content;
 
     expect(many.some((run) => (run.marks ?? []).includes('strikethrough'))).toBe(true);
     expect(long.some((run) => (run.marks ?? []).includes('strikethrough'))).toBe(false);

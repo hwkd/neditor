@@ -31,18 +31,38 @@ interface InlineRule {
   readonly angled?: boolean;
 }
 
+/**
+ * An emphasis body: at least one character, and neither end whitespace.
+ *
+ * This is the part of CommonMark's flanking rule that matters here. Without it
+ * an opening delimiter followed by a space, or a closing one preceded by a
+ * space, still matched -- so ordinary prose lost the characters the user typed.
+ * `3 * 4 * 5` became `3  4  5` with " 4 " in italics, `SELECT * FROM a; SELECT
+ * * FROM b` lost both asterisks, and `use _id and _rev fields` came out as
+ * `use id and rev fields`. Every one of those is literal text in every
+ * Markdown reader, and this fires on each keystroke, so the characters
+ * disappeared as they were typed.
+ *
+ * Written per delimiter because the class has to exclude that delimiter too.
+ */
+const body = (delimiter: string): string =>
+  `([^${delimiter}\\s\\n](?:[^${delimiter}\\n]*[^${delimiter}\\s\\n])?)`;
+
 const INLINE_RULES: readonly InlineRule[] = [
   // Bold before italic: `**x**` must not be read as an italic `*x*`.
-  { closer: '*', pattern: /\*\*([^*\n]+)\*\*$/, mark: 'bold' },
-  { closer: '_', pattern: /__([^_\n]+)__$/, mark: 'bold' },
+  { closer: '*', pattern: new RegExp(`\\*\\*${body('*')}\\*\\*$`), mark: 'bold' },
+  { closer: '_', pattern: new RegExp(`__${body('_')}__$`), mark: 'bold' },
   // Only the opening `*` of a longer run is refused, so `***x***` closes as
   // bold and then as italic. A word character before it is not a reason to
   // refuse: CommonMark restricts intra-word emphasis to `_`, and `toMarkdown`
   // writes `*x*` whatever precedes it, so refusing left `Chapter*One*` sitting
   // in the text as literal asterisks.
-  { closer: '*', pattern: /(?<!\*)\*([^*\n]+)\*$/, mark: 'italic' },
-  { closer: '_', pattern: /(?<![_\w])_([^_\n]+)_$/, mark: 'italic' },
-  { closer: '~', pattern: /~~([^~\n]+)~~$/, mark: 'strikethrough' },
+  { closer: '*', pattern: new RegExp(`(?<!\\*)\\*${body('*')}\\*$`), mark: 'italic' },
+  { closer: '_', pattern: new RegExp(`(?<![_\\w])_${body('_')}_$`), mark: 'italic' },
+  { closer: '~', pattern: new RegExp(`~~${body('~')}~~$`), mark: 'strikethrough' },
+  // Backticks deliberately keep their spaces: a code span is delimited by
+  // backtick runs rather than by flanking, so `` ` a ` `` really is code in
+  // CommonMark. Emphasis is the construct with the flanking rule.
   { closer: '`', pattern: /`([^`\n]+)`$/, mark: 'code' },
   // Markdown has no underline, so `toMarkdown` writes the HTML tag; this is
   // what reads it back rather than leaving seven junk characters in the text.
