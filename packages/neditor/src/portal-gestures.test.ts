@@ -728,3 +728,52 @@ describe('the slash menu is dismissed like every other popover', () => {
     expect(menu.hidden).toBe(false);
   });
 });
+
+describe('the gutter follows the block it belongs to', () => {
+  /**
+   * The block reserves the gutter with `padding-inline-start` and carries its
+   * nesting depth in `margin-inline-start` -- they were one summed `calc` until
+   * that broke on a unitless gutter width. `#positionGutter` still read only
+   * the padding, so the controls stopped following a nested block and sat at
+   * the left edge for every one of them.
+   */
+  test('it is offset by the block indent as well as the gutter reservation', () => {
+    const editor = mount([
+      block({ id: 'flat', type: 'bulleted_list', content: [{ text: 'top' }] }),
+      block({ id: 'deep', type: 'bulleted_list', depth: 2, content: [{ text: 'nested' }] }),
+    ]);
+
+    // happy-dom computes no layout, so the two contributions are stubbed
+    // directly; the point under test is that both are read, not either alone.
+    const views = [...editor.element.querySelectorAll<HTMLElement>('.neditor-block')];
+    const offsets = new Map<HTMLElement, string>([
+      [views[0]!, '0px'],
+      [views[1]!, '48px'],
+    ]);
+    const original = Object.getOwnPropertyDescriptor(window, 'getComputedStyle');
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: HTMLElement) =>
+        offsets.has(element)
+          ? { paddingInlineStart: '44px', marginInlineStart: offsets.get(element) }
+          : { paddingInlineStart: '0px', marginInlineStart: '0px' },
+    });
+
+    const gutter = gutterOf(editor);
+    pointer('pointerover', views[1]!.querySelector<HTMLElement>('.neditor-block__content')!);
+    const nested = gutter.style.insetInlineStart;
+
+    pointer('pointerover', views[0]!.querySelector<HTMLElement>('.neditor-block__content')!);
+    const flat = gutter.style.insetInlineStart;
+
+    if (original) {
+      Object.defineProperty(window, 'getComputedStyle', original);
+    }
+
+    expect(Number.parseFloat(flat)).toBe(44);
+    expect(
+      Number.parseFloat(nested),
+      'a nested block puts its controls further in, not at the left edge',
+    ).toBe(92);
+  });
+});

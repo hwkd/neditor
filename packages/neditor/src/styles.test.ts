@@ -380,8 +380,8 @@ describe("sizes and directions that hold on somebody else's page", () => {
    */
   test('the gutter and the indent are separate declarations', () => {
     expect(NEDITOR_STYLES).toContain('padding-inline-start: var(--neditor-gutter-width);');
-    expect(NEDITOR_STYLES).toContain(
-      'margin-inline-start: calc(var(--neditor-depth, 0) * var(--neditor-indent));',
+    expect(NEDITOR_STYLES).toMatch(
+      /margin-inline-start: calc\(\s*var\(--neditor-depth, 0\) \* var\(--neditor-indent\)/,
     );
     expect(NEDITOR_STYLES, 'summing them is what a unitless gutter width breaks').not.toMatch(
       /calc\(\s*var\(--neditor-gutter-width\)\s*\+/,
@@ -443,5 +443,27 @@ describe('sizes that matter on a phone and for a broken image', () => {
     const rule = NEDITOR_STYLES.slice(NEDITOR_STYLES.indexOf('.neditor-image__frame {'));
 
     expect(rule.slice(0, rule.indexOf('}'))).toMatch(/min-height:\s*[\d.]+em/);
+  });
+});
+
+describe('the selection bar hangs outside the indent, it does not replace it', () => {
+  /**
+   * The depth indent moved into `margin-inline-start`, and the selected block's
+   * 2px outdent was already a `margin-inline-start` of its own -- so selecting a
+   * nested block flattened it to the left margin. The outdent is a variable the
+   * indent subtracts now, so the two compose instead of competing.
+   */
+  test('the selected rule sets no margin of its own', () => {
+    const rule = NEDITOR_STYLES.slice(
+      NEDITOR_STYLES.indexOf(".neditor-block[data-selected='true'] {"),
+    );
+    const body = rule.slice(0, rule.indexOf('}'));
+
+    expect(body).not.toMatch(/margin-inline-start:/);
+    expect(body).toContain('--neditor-selected-offset: 2px;');
+  });
+
+  test('and the indent subtracts it', () => {
+    expect(NEDITOR_STYLES).toContain('var(--neditor-selected-offset, 0px)');
   });
 });

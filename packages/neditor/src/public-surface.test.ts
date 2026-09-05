@@ -735,3 +735,72 @@ describe('a read-only reader can open a toggle without editing the document', ()
     expect(editor.canUndo).toBe(true);
   });
 });
+
+describe("a reader's expansion is view state, and behaves like it", () => {
+  /**
+   * Three regressions from the commit that introduced it, all found by hunting
+   * that commit rather than by the audit that asked for the feature.
+   */
+  const collapsed = () => [
+    block({ id: 't', type: 'toggle', collapsed: true, content: [{ text: 'Summary' }] }),
+    block({ id: 'c', depth: 1, content: [{ text: 'Child' }] }),
+  ];
+  const shows = (editor: NEditor): boolean =>
+    editor.element.querySelector('[data-block-id="c"]') !== null;
+  const chevron = (editor: NEditor): HTMLElement =>
+    editor.element.querySelector<HTMLElement>('.neditor-block__chevron')!;
+
+  test('it does not outlive read-only mode', () => {
+    const editor = mount(collapsed(), { editable: false });
+    chevron(editor).click();
+
+    expect(shows(editor)).toBe(true);
+
+    // The document still says collapsed, so an editable editor must show that.
+    editor.setEditable(true);
+
+    expect(shows(editor), 'a view override must not survive into editing').toBe(false);
+    expect(editor.getDocument().blocks[0]?.collapsed).toBe(true);
+  });
+
+  test('and the author then gets a chevron that agrees with the page', () => {
+    const editor = mount(collapsed(), { editable: false });
+    chevron(editor).click();
+    editor.setEditable(true);
+    chevron(editor).click();
+
+    expect(shows(editor)).toBe(true);
+    expect(editor.getDocument().blocks[0]?.collapsed).toBe(false);
+  });
+
+  test('a toggle the document has open can be closed by a reader', () => {
+    const editor = mount(
+      [
+        block({ id: 't', type: 'toggle', collapsed: false, content: [{ text: 'Summary' }] }),
+        block({ id: 'c', depth: 1, content: [{ text: 'Child' }] }),
+      ],
+      { editable: false },
+    );
+
+    expect(shows(editor)).toBe(true);
+
+    chevron(editor).click();
+
+    expect(shows(editor), 'the override has to work in both directions').toBe(false);
+
+    chevron(editor).click();
+
+    expect(shows(editor)).toBe(true);
+  });
+
+  test('and what is announced is what happened', () => {
+    const editor = mount(collapsed(), { editable: false });
+    const live = editor.element.querySelector('[aria-live]')!;
+
+    chevron(editor).click();
+    const first = live.textContent;
+    chevron(editor).click();
+
+    expect(first).not.toBe(live.textContent);
+  });
+});

@@ -144,7 +144,12 @@ export const NEDITOR_STYLES = `
      every level of nesting went flush. Apart, a bare 0 is a perfectly good
      padding and the indent is unaffected by it. */
   padding-inline-start: var(--neditor-gutter-width);
-  margin-inline-start: calc(var(--neditor-depth, 0) * var(--neditor-indent));
+  /* The selection's 2px outdent is subtracted here rather than set as its own
+     margin-inline-start: as a separate declaration it overrode this one
+     outright, and selecting a nested block flattened it to the left margin. */
+  margin-inline-start: calc(
+    var(--neditor-depth, 0) * var(--neditor-indent) - var(--neditor-selected-offset, 0px)
+  );
   /* Both, now that the indent moved: the animation on indent and outdent is
      the margin's, and naming only the padding would have left it snapping. */
   transition:
@@ -584,7 +589,9 @@ export const NEDITOR_STYLES = `
   border-radius: 3px;
   /* Logical, so the bar sits on the reading-start edge in both directions. */
   border-inline-start: 2px solid var(--neditor-accent);
-  margin-inline-start: -2px;
+  /* Read by the indent calc above, so the bar hangs outside the text without
+     replacing the block's depth. */
+  --neditor-selected-offset: 2px;
   /* Not colour alone (1.4.1): the bar survives high-contrast modes and reads
      for anyone who cannot distinguish the tint from the page. */
 }

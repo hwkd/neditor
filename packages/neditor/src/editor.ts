@@ -560,7 +560,7 @@ export class NEditor {
    * Cleared whenever the document is replaced: these ids describe the document
    * being replaced, and a new one may not have them at all.
    */
-  readonly #readerExpanded = new Set<string>();
+  readonly #readerExpanded = new Map<string, boolean>();
 
   /** Whether the `tabindex` is ours to remove, and what it was if it is not. */
   #ownsTabIndex = false;
@@ -1047,6 +1047,10 @@ export class NEditor {
 
   setEditable(editable: boolean): void {
     this.#editable = editable;
+    // A reader's view-only expansions describe a document nobody could edit.
+    // Kept across this, they went on overriding the model for an author whose
+    // chevron then reported the opposite of what the page showed.
+    this.#readerExpanded.clear();
     this.#renderer.setEditable(editable);
     // `canUndo` and `canRedo` both answer differently now, and a host that
     // renders its toolbar from the `history` event had no way to hear it.
@@ -1307,16 +1311,16 @@ export class NEditor {
     // `getDocument()` still reports the toggle collapsed, and no `change` is
     // emitted for a persistence layer to write back as the author's revision.
     if (!this.#editable) {
-      if (this.#readerExpanded.has(id)) {
-        this.#readerExpanded.delete(id);
-      } else {
-        this.#readerExpanded.add(id);
-      }
+      // An override in both directions, keyed off what is showing now rather
+      // than off whether an entry exists: a set of "expanded" ids could not
+      // close a toggle the document already had open, so clicking its chevron
+      // announced a state change that never happened.
+      const showing = this.#readerExpanded.get(id) ?? block.collapsed !== true;
+      const expanded = !showing;
+      this.#readerExpanded.set(id, expanded);
 
       this.#render();
-      this.#announce(
-        this.#readerExpanded.has(id) ? this.#labels.toggleExpanded : this.#labels.toggleCollapsed,
-      );
+      this.#announce(expanded ? this.#labels.toggleExpanded : this.#labels.toggleCollapsed);
 
       return;
     }
@@ -1499,13 +1503,15 @@ export class NEditor {
       return visibleBlocks(this.#blocks);
     }
 
-    // The reader's own expansions, applied for display only -- see
+    // The reader's own overrides, applied for display only -- see
     // `toggleCollapsed`. Spread rather than mutated, so `#blocks` stays exactly
     // the document the host handed over.
     return visibleBlocks(
-      this.#blocks.map((block) =>
-        this.#readerExpanded.has(block.id) ? { ...block, collapsed: false } : block,
-      ),
+      this.#blocks.map((block) => {
+        const expanded = this.#readerExpanded.get(block.id);
+
+        return expanded === undefined ? block : { ...block, collapsed: !expanded };
+      }),
     );
   }
 
@@ -2545,14 +2551,19 @@ export class NEditor {
       return;
     }
 
-    // The block's inline-start padding is exactly where its text begins, and an
-    // absolutely positioned child measures from the same edge — so this is
-    // correct in both writing directions without any mirroring here.
-    const indent = Number.parseFloat(
-      this.#document.defaultView?.getComputedStyle(view.root).paddingInlineStart ?? '0',
-    );
+    // Margin *and* padding. The block reserves the gutter with its padding and
+    // carries its nesting depth in its margin -- they were one summed `calc`
+    // until that broke on a unitless gutter width -- and the gutter is
+    // positioned against the editor root, so where the text begins is the sum
+    // of both. Reading only the padding left the controls at the left edge for
+    // every nested block. Logical properties in both cases, so this stays
+    // correct in both writing directions without mirroring here.
+    const style = this.#document.defaultView?.getComputedStyle(view.root);
+    const indent =
+      Number.parseFloat(style?.paddingInlineStart ?? '0') +
+      Number.parseFloat(style?.marginInlineStart ?? '0');
 
-    this.#gutter.showFor(id, view.root.offsetTop, indent || 0);
+    this.#gutter.showFor(id, view.root.offsetTop, Number.isFinite(indent) ? indent : 0);
   }
 
   #beginDrag(blockId: string, event: PointerEvent): void {
