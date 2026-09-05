@@ -282,3 +282,24 @@ var(--indent))` is dropped entirely when a host sets the gutter to a unitless
   regardless of focus, and computes no layout. Where the test environment cannot
   see the defect, pin the artifact — the emitted markup, the declaration file,
   the stylesheet text — and say in the test why that is what is being asserted.
+
+- **The complement of a hand-written list is unbounded.** Naming the elements
+  that _do_ have an implicit ARIA role, so as to skip them, stamped `role="group"`
+  onto every tag absent from the set — `<td>`, `<dd>`, `<p>`, `<summary>` —
+  destroying real semantics on each. Naming the generic ones instead had
+  withheld it from custom elements. A rule has to state its own predicate;
+  "everything except this list I thought of" is not one.
+
+- **Call a check exact only when it cannot be satisfied by accident.**
+  `toMarkdown(parsed) === plain` was described in its own commit message as
+  "exact rather than a guess". With no HTML in the payload, `parsed` comes from
+  parsing that same plain text, so the comparison is a round trip against itself
+  and true for anything Markdown-shaped. The test that should have caught it
+  asserted the right invariant with an input that happened not to exercise it.
+
+- **Write the test before the fix when the fix is a retry.** Three attempts on
+  the code-block paste rule and three on the mount role each shipped a new
+  defect. On the fourth the tests were written first from the findings' literal
+  inputs: nineteen failed, the fixes made them pass, and reverting each fix
+  failed them again. That is the order that would have stopped attempts two and
+  three.
