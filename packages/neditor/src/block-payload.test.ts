@@ -255,3 +255,47 @@ describe('the text after the caret lands where it can be read', () => {
     expect(texts(editor)).toEqual(['abone', 'twocd']);
   });
 });
+
+describe('pasting into a code block inserts what was copied, not its Markdown', () => {
+  /**
+   * A code block is literal, so the paste path took `text/plain` in preference
+   * to the parsed payload. That is only the same characters when the clipboard
+   * came from somewhere with no richer form -- a terminal, a textarea. This
+   * editor writes `text/plain` as `toMarkdown` output, so its own copy round
+   * trip put the ``` fence lines of a copied code block into the code as
+   * literal lines, and turned a copied `snake_case` into `snake\_case`:
+   * characters the user never typed, in the one block type that shows them.
+   */
+  const intoCode = (html: string, plain: string): string => {
+    const editor = mount([block({ id: 'k', type: 'code', content: [] })]);
+    const host = editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
+    host.focus();
+    paste(host, html, plain);
+
+    return blockText(editor.getDocument().blocks[0]!);
+  };
+
+  test('a copied code block arrives without its fence', () => {
+    expect(
+      intoCode(
+        '<pre><code>const a = 1;\nconst b = 2;</code></pre>',
+        '```\nconst a = 1;\nconst b = 2;\n```',
+      ),
+    ).toBe('const a = 1;\nconst b = 2;');
+  });
+
+  test('a copied paragraph arrives without its escapes', () => {
+    expect(intoCode('<p>use snake_case and 2 * 3</p>', 'use snake\\_case and 2 \\* 3')).toBe(
+      'use snake_case and 2 * 3',
+    );
+  });
+
+  /**
+   * And plain text with no HTML beside it is still taken raw: there is nothing
+   * better to use, and parsing it as Markdown would eat the punctuation this
+   * block type exists to preserve.
+   */
+  test('plain text from outside is taken literally', () => {
+    expect(intoCode('', 'rm -rf *.log && echo _done_')).toBe('rm -rf *.log && echo _done_');
+  });
+});

@@ -2148,10 +2148,21 @@ export class NEditor {
       this.#announce(this.#labels[TABLE_COMMAND_ANNOUNCEMENTS[command]]);
     }
 
-    // The grid may have shrunk under the caret, so clamp before restoring it.
+    // An insert lands *at* the active index for the "above" and "left"
+    // commands, which pushes the user's own cell one along -- so reusing the
+    // pre-edit indices put the caret in the new blank cell instead of the one
+    // they were editing. The other four commands do not move it. The grid may
+    // also have shrunk under the caret, so clamp after shifting.
+    const shift = command === 'insertRowAbove' || command === 'insertColumnLeft' ? 1 : 0;
     const size = tableSize(next);
-    const row = Math.min(active.row, size.rows - 1);
-    const column = Math.min(active.column, size.columns - 1);
+    const row = Math.min(
+      command === 'insertRowAbove' ? active.row + shift : active.row,
+      size.rows - 1,
+    );
+    const column = Math.min(
+      command === 'insertColumnLeft' ? active.column + shift : active.column,
+      size.columns - 1,
+    );
     this.#focusCell(block.id, row, column, CARET_END);
   }
 
@@ -3734,7 +3745,21 @@ export class NEditor {
       ? richFromBlocks(pasted)
       : resolved.block.type === 'code'
         ? // A code block is literal: pasted structure becomes text, never blocks.
-          richFromPlainText(plain.length > 0 ? plain : pasted.map(blockText).join('\n'))
+          //
+          // The parsed text wins wherever there was HTML to parse. `text/plain`
+          // is only the same characters when it came from somewhere that has no
+          // richer form -- a terminal, a textarea. When this editor wrote the
+          // clipboard, `text/plain` is `toMarkdown` output, so preferring it put
+          // the ``` fence lines of a copied code block into the code as literal
+          // lines, and turned a copied `snake_case` into `snake\_case`:
+          // characters the user never typed. Where there is no HTML the raw
+          // plain text is right, since parsing it as Markdown would eat its
+          // punctuation instead.
+          richFromPlainText(
+            html.length > 0
+              ? pasted.map(blockText).join('\n')
+              : plain || pasted.map(blockText).join('\n'),
+          )
         : // A lone paragraph is a phrase, not a document: keep it in this block
           // so pasting mid-sentence still works.
           pasted.length === 1 && pasted[0]?.type === 'paragraph'

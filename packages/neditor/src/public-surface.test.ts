@@ -511,3 +511,54 @@ describe('history state a host can bind a button to', () => {
     expect(editor.canUndo).toBe(true);
   });
 });
+
+describe('a table command hands the caret back to the cell it was invoked from', () => {
+  /**
+   * The toolbar's stated promise, and four of its six commands kept it. "Insert
+   * row above" and "insert column left" put the new row or column *at* the
+   * active index, which pushes the user's own cell one along -- and the caret
+   * restore reused the pre-edit indices, so it landed in the new blank cell
+   * instead of the text they were editing.
+   */
+  const table = () =>
+    block({
+      id: 'tbl',
+      type: 'table',
+      rows: [
+        [[{ text: 'A' }], [{ text: 'B' }]],
+        [[{ text: 'C' }], [{ text: 'D' }]],
+      ],
+    });
+
+  const clickToolbar = (editor: NEditor, label: string): void => {
+    const cell = editor.element.querySelector<HTMLElement>('[data-cell="1:1"]')!;
+    cell.focus();
+    const range = document.createRange();
+    range.selectNodeContents(cell);
+    const selection = getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+
+    const button = [...document.querySelectorAll<HTMLElement>('.neditor-table-toolbar__button')]
+      .reverse()
+      .find((one) => one.getAttribute('aria-label') === label)!;
+
+    button.click();
+  };
+
+  test.each([
+    ['Insert row above', 'D'],
+    ['Insert row below', 'D'],
+    ['Insert column left', 'D'],
+    ['Insert column right', 'D'],
+  ])('%s leaves the caret in the cell that held its text', (label, expected) => {
+    const editor = mount([table()]);
+    clickToolbar(editor, label);
+
+    const focused = document.activeElement as HTMLElement | null;
+
+    expect(focused?.dataset.cell, `${label} moved the caret away`).toBeDefined();
+    expect(focused?.textContent).toBe(expected);
+  });
+});
