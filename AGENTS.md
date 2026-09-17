@@ -28,7 +28,7 @@ release. Add a tool name to select part of the graph. For example, run
 
 # neditor
 
-A monorepo for an independently built, Notion-like block editor, packaged as a reusable, framework-free library.
+A monorepo for a block-based rich-text editor, packaged as a reusable, framework-free library.
 
 - `packages/neditor` — `@neditor/core`. Vanilla TypeScript, compiled to vanilla JS. **Never add a framework dependency here**, and keep `dependencies` empty: the package must stay drop-in for any web app.
 - `apps/web` — Astro 7 site that consumes the package and serves as the dev harness.

@@ -1,5 +1,5 @@
 /**
- * @neditor/core — a framework-agnostic, Notion-like block editor.
+ * @neditor/core — a framework-agnostic, block-based rich-text editor.
  *
  * ```ts
  * import { createEditor } from '@neditor/core';

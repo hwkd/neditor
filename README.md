@@ -1,7 +1,7 @@
 # neditor
 
-A monorepo for an independently built, Notion-like block editor, shipped as a
-reusable package that any web app can drop in.
+A monorepo for a block-based rich-text editor, shipped as a reusable package
+that any web app can drop in.
 
 - **[`packages/neditor`](packages/neditor)** — `@neditor/core`, the editor.
   Vanilla JavaScript, no framework, no runtime dependencies.
@@ -89,8 +89,3 @@ for the full list.
 ## License
 
 MIT.
-
-Notion is a trademark of Notion Labs, Inc. This project is an independent
-implementation, is not affiliated with, endorsed by, or derived from Notion
-Labs, Inc., and "Notion-like" is used only to describe the style of editor it
-implements.

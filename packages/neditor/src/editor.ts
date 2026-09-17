@@ -554,7 +554,7 @@ const MARK_SHORTCUTS: Readonly<Record<string, Mark>> = {
 };
 
 /**
- * A Notion-like block editor.
+ * A block-based rich-text editor.
  *
  * Plain DOM and plain classes: no framework, no virtual DOM, no runtime
  * dependencies. Mount it anywhere an `HTMLElement` exists.

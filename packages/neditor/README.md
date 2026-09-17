@@ -1,6 +1,6 @@
 # @neditor/core
 
-A Notion-like block editor in vanilla JavaScript. No framework, no runtime
+A block-based rich-text editor in vanilla JavaScript. No framework, no runtime
 dependencies, no build step required on your side.
 
 ```bash
@@ -108,7 +108,7 @@ Use a full, versioned path to `dist/index.mjs`:
 
 ```html
 <script type="module">
-  import { createEditor } from 'https://cdn.jsdelivr.net/npm/@neditor/core@0.1.0/dist/index.mjs';
+  import { createEditor } from 'https://cdn.jsdelivr.net/npm/@neditor/core@0.1.1/dist/index.mjs';
   createEditor({ element: '#editor' });
 </script>
 ```
@@ -118,8 +118,11 @@ split — `index.mjs` imports a sibling `./markdown-*.mjs` — and jsDelivr serv
 bare package URL with a 200 rather than a redirect, so the response URL stays at
 `/npm/@neditor/`, the relative specifier resolves against that, and the chunk
 404s. unpkg redirects into `dist/` and so happens to work either way; the
-versioned path above works on both. `https://cdn.jsdelivr.net/npm/@neditor/core/+esm`
-also works, because jsDelivr inlines the chunk for that path.
+versioned path above works on both. Dropping the `@0.1.1` works too if you would
+rather track latest — any path ending in `/dist/index.mjs` puts the base URL
+inside `dist/`, which is the only thing that matters.
+`https://cdn.jsdelivr.net/npm/@neditor/core/+esm` also works, because jsDelivr
+inlines the chunk for that path.
 
 ## Options
 
@@ -749,8 +752,3 @@ Known gaps, deliberately out of scope for 0.1:
 ## License
 
 MIT.
-
-Notion is a trademark of Notion Labs, Inc. This project is an independent
-implementation, is not affiliated with, endorsed by, or derived from Notion
-Labs, Inc., and "Notion-like" is used only to describe the style of editor it
-implements.
