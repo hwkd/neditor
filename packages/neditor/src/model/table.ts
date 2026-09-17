@@ -125,7 +125,7 @@ export function tableSetCell(
 /**
  * Inserts an empty row. `at` is clamped, so `length` appends.
  *
- * At {@link MAX_TABLE_ROWS} the grid is returned unchanged, so the editor
+ * At 1000 rows the grid is returned unchanged, so the editor
  * cannot build a table that `normalizeTableRows` would truncate on reload.
  */
 export function tableInsertRow(rows: TableRows, at: number): TableRows {
@@ -154,7 +154,7 @@ export function tableDeleteRow(rows: TableRows, at: number): TableRows {
   return rows.filter((_, index) => index !== at).map((row) => [...row]);
 }
 
-/** Inserts an empty column, up to {@link MAX_TABLE_COLUMNS}. */
+/** Inserts an empty column, up to 64. */
 export function tableInsertColumn(rows: TableRows, at: number): TableRows {
   if (tableSize(rows).columns >= MAX_TABLE_COLUMNS) {
     return rows.map((row) => [...row]);

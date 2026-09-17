@@ -6,7 +6,8 @@ const SAFE_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:']);
  *
  * A link travels with the document, so it can arrive from a paste, an import,
  * or another user. `javascript:` and `data:` hrefs execute when clicked, so
- * anything outside {@link SAFE_SCHEMES} is rejected rather than escaped.
+ * anything outside `http:`, `https:`, `mailto:` and `tel:` is rejected
+ * rather than escaped.
  */
 export function sanitizeUrl(input: string): string | null {
   // TAB, LF and CR are stripped from anywhere in a URL before it is parsed, so

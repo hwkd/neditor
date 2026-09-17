@@ -4,8 +4,13 @@
  * CSS loader, bundler plugin or build step on the consumer's side. Everything
  * is themable through the custom properties on `.neditor`, so overriding a
  * colour never requires editing this string.
+ *
+ * Annotated `string` rather than inferred. Without it the emitted declaration
+ * gives this const the literal type of the whole stylesheet — 29k characters
+ * that every consumer's compiler parses, and that a wrapper re-exporting it
+ * copies verbatim into its own `.d.ts`, where it then goes stale.
  */
-export const NEDITOR_STYLES = `
+export const NEDITOR_STYLES: string = `
 .neditor,
 .neditor-portal {
   --neditor-font: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial,

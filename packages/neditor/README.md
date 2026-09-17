@@ -102,6 +102,25 @@ Because it is plain DOM, it drops into anything — React (`useEffect` + a ref),
 Vue (`onMounted`), Svelte (`onMount`), Astro (a `<script>` tag), or a bare HTML
 page over a CDN. Call `destroy()` when the host component unmounts.
 
+### From a CDN
+
+Use a full, versioned path to `dist/index.mjs`:
+
+```html
+<script type="module">
+  import { createEditor } from 'https://cdn.jsdelivr.net/npm/@neditor/core@0.1.0/dist/index.mjs';
+  createEditor({ element: '#editor' });
+</script>
+```
+
+Not the bare `https://cdn.jsdelivr.net/npm/@neditor/core`. The ESM build is code
+split — `index.mjs` imports a sibling `./markdown-*.mjs` — and jsDelivr serves a
+bare package URL with a 200 rather than a redirect, so the response URL stays at
+`/npm/@neditor/`, the relative specifier resolves against that, and the chunk
+404s. unpkg redirects into `dist/` and so happens to work either way; the
+versioned path above works on both. `https://cdn.jsdelivr.net/npm/@neditor/core/+esm`
+also works, because jsDelivr inlines the chunk for that path.
+
 ## Options
 
 | Option            | Type                          | Default              | Description                                                   |
@@ -201,8 +220,10 @@ you type picks it up — the same as any word processor. A partially bold
 selection reports Bold as inactive, so pressing it bolds the remainder rather
 than clearing what is already bold.
 
-Clicking a link opens the link editor; `⌘`/`Ctrl`-click follows it. In read-only
-mode links navigate normally.
+Clicking a link opens the link editor; `⌘`/`Ctrl`-click opens it in a new tab
+with `noopener,noreferrer`. In read-only mode every link click does the same —
+the handler always cancels the native navigation, so an unsafe `href` can never
+reach the browser by falling through.
 
 The link editor, the callout icon picker and the image popover all take focus,
 and all three close on a pointer that lands anywhere outside them — leaving
@@ -275,7 +296,7 @@ With blocks selected:
 | `⌘`/`Ctrl` + `C` / `X`         | Copy or cut, as Markdown and HTML.        |
 | Any character                  | Replace them with a paragraph holding it. |
 | `Enter`                        | Drop back into the text of the last one.¹ |
-| `Escape`                       | Back to text editing.                     |
+| `Escape`                       | Leave the editor.                         |
 
 ¹ The last one that has text: a divider has no caret to take, so `Enter` walks
 back through the selection and, if none of it can hold one, keeps the selection.
@@ -323,8 +344,12 @@ command menu is a combobox on the block being typed in, and its
 `aria-activedescendant` follows the highlight on every path that moves it —
 arrow keys, filtering, and the mouse crossing an item — so the option announced
 is always the one `Enter` will commit.
-Selected blocks carry `aria-selected` and a border, not colour alone, and the
-stylesheet has a `forced-colors` block for Windows High Contrast.
+Selected blocks carry `data-selected="true"` and a 2px accent bar, not colour
+alone. They deliberately do not carry `aria-selected`: it is prohibited on the
+`generic` role a bare block `<div>` maps to, so browsers drop it, and a role
+that would carry it would displace the heading and list semantics the content
+element exists to provide. Selection is announced through the live region
+instead. The stylesheet has a `forced-colors` block for Windows High Contrast.
 
 **Contrast.** Every text token meets WCAG 1.4.3 in both themes: muted text
 5.6:1, placeholders 4.8:1, inline code 5.0:1, and the primary button 4.6:1 in

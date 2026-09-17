@@ -46,7 +46,7 @@ export type BlockType =
   | 'divider';
 
 export interface Block {
-  /** Stable, opaque identity. See {@link createBlockId}. */
+  /** Stable, opaque identity, assigned by `createBlock`. */
   id: string;
   type: BlockType;
   /** Formatted text as a list of runs. See `model/rich-text.ts`. */
@@ -717,7 +717,7 @@ export function computeListNumbers(blocks: readonly Block[]): Map<string, number
 
 /**
  * Clamps every block so it is never more than one level deeper than the block
- * above it, nor deeper than {@link MAX_DEPTH}.
+ * above it, nor deeper than 32.
  *
  * Depth is stored per block rather than as a tree, which keeps reordering
  * cheap but means a move can leave an orphan indented under nothing. Re-running

@@ -21,7 +21,7 @@ export type Mark = (typeof MARKS)[number];
 
 export interface TextRun {
   text: string;
-  /** Sorted and deduped by {@link sortMarks}. Omitted when empty. */
+  /** Sorted and deduped by the model. Omitted when empty. */
   marks?: Mark[];
   /** Already sanitized by `sanitizeUrl` before it reaches the model. */
   link?: string;
