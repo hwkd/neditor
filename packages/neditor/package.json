@@ -65,7 +65,7 @@
     "dev": "vp pack --watch",
     "test": "vp test --run",
     "prepack": "vp pack && node scripts/emit-css.mjs",
-    "prepublishOnly": "vp test --run && node scripts/check-dts.mjs"
+    "prepublishOnly": "node scripts/check-publisher.mjs && vp test --run && node scripts/check-dts.mjs"
   },
   "devDependencies": {
     "happy-dom": "catalog:",
