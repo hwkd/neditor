@@ -688,46 +688,186 @@ describe('withHiddenDescendants scales with the selection, not with the document
   /**
    * It called `findBlock` -- a linear scan -- once per selected id, so every
    * select-all gesture (copy, cut, delete, duplicate, indent, paste-over,
-   * drag-drop, Cmd+Shift+Arrow) cost selection x document. Indexed once now.
+   * drag-drop, Cmd+Shift+Arrow) cost selection x document.
    *
-   * A ratio against a document ten times smaller, rather than a stopwatch: the
-   * quadratic term is what this measures, and it does not move with the machine.
+   * Counted, not timed. This was a stopwatch: a ratio between a 500-block
+   * document and a 5000-block one, asserted under 15. It failed 5 runs in 15 on
+   * a CI runner while failing 0 in 15 here, because the small side of the ratio
+   * was 19 microseconds and scheduler noise is bigger than that. Larger
+   * documents make it worse rather than better -- the healthy ratio climbed
+   * 6.3 -> 14.5 -> 17.6 as the pair grew 500/5000 -> 1000/10000 -> 2000/20000,
+   * because the one-time index build stops dominating the small side. There is
+   * no threshold that is both stable and meaningful.
+   *
+   * What the stopwatch was reaching for is a count, so count it. A scan reads
+   * array SLOTS, and that is what is metered here -- not reads of `.id`, which
+   * meters only one way of spelling a scan. `blocks.indexOf(block)` is the same
+   * quadratic defect and reads no id at all; metering ids scores it clean.
    */
-  const documentOf = (count: number): Block[] =>
-    Array.from(
-      { length: count },
-      (_, index) => ({ id: `b${index}`, type: 'paragraph', depth: 0, content: [] }) as Block,
-    );
-
   /**
-   * The best of several runs, not one. A single timing picks up whatever else
-   * the machine was doing, and this test failed once in a full suite run while
-   * passing alone -- the minimum is the honest answer to "how fast can this go"
-   * and is what distinguishes the two implementations.
+   * A document of collapsed sections: one collapsed toggle holding two
+   * children, then a plain paragraph, repeating.
+   *
+   * The toggles are a FRACTION of the document, not a fixed number of them,
+   * and that is the whole design. `descendantsOf` is a scan, so the cost it
+   * adds is toggles x document -- which is only quadratic if the toggle count
+   * grows with the document. A fixture with four toggles in it leaves the old
+   * implementation at four passes, indistinguishable from linear, and the
+   * guard passes on the defect. It did: that version of this fixture scored
+   * the pre-fix code clean.
    */
-  const timeFor = (count: number): number => {
-    const blocks = documentOf(count);
-    const ids = blocks.map((one) => one.id);
-    let best = Infinity;
+  const documentOf = (count: number): Block[] => {
+    const blocks: Block[] = [];
 
-    for (let run = 0; run < 5; run += 1) {
-      const started = performance.now();
+    while (blocks.length < count) {
+      const at = blocks.length;
 
-      withHiddenDescendants(blocks, ids);
-      best = Math.min(best, performance.now() - started);
+      if (at + 4 <= count) {
+        blocks.push(
+          { id: `t${at}`, type: 'toggle', depth: 0, collapsed: true, content: [] },
+          { id: `c${at + 1}`, type: 'paragraph', depth: 1, content: [] },
+          { id: `c${at + 2}`, type: 'paragraph', depth: 1, content: [] },
+          { id: `b${at + 3}`, type: 'paragraph', depth: 0, content: [] },
+        );
+        continue;
+      }
+
+      blocks.push({ id: `b${at}`, type: 'paragraph', depth: 0, content: [] });
     }
 
-    return Math.max(best, 0.05);
+    return blocks;
   };
 
-  // Measured both ways rather than guessed: ten times the document costs about
-  // 5.8x indexed and about 31x with the linear find. A threshold between them
-  // leaves margin on each side without being sensitive to the machine.
-  test('ten times the document is not a hundred times the work', () => {
-    const small = timeFor(500);
-    const large = timeFor(5000);
+  /**
+   * Slot reads caused by growing a select-all over the whole document.
+   *
+   * The proxy counts reads of a numeric index and nothing else, so `length`,
+   * iteration protocol and method lookups do not inflate it. Every scan spelled
+   * any way -- `find`, `findIndex`, `indexOf`, `slice`, a hand-rolled loop --
+   * goes through it.
+   */
+  const slotReads = (blocks: Block[]): number => {
+    let reads = 0;
+    const metered = new Proxy(blocks, {
+      get(target, key, receiver) {
+        if (typeof key === 'string' && key !== '' && !Number.isNaN(Number(key))) {
+          reads += 1;
+        }
 
-    expect(large / small, `${small.toFixed(2)}ms vs ${large.toFixed(2)}ms`).toBeLessThan(15);
+        return Reflect.get(target, key, receiver) as unknown;
+      },
+    });
+
+    // Select-all, so the answer can only be the whole document. A wrong size
+    // means the count below is of something other than the work being claimed,
+    // and an implementation that returns nothing cannot score a clean zero.
+    expect(
+      withHiddenDescendants(
+        metered,
+        blocks.map((block) => block.id),
+      ).size,
+    ).toBe(blocks.length);
+
+    return reads;
+  };
+
+  /**
+   * The vacuity check. Every assertion below is an upper bound, which a meter
+   * wired to nothing satisfies perfectly -- so one test has to fail if the
+   * proxy ever stops counting.
+   */
+  test('the meter counts slot reads, and only slot reads', () => {
+    let reads = 0;
+    const blocks: Block[] = [{ id: 'a', type: 'paragraph', depth: 0, content: [] }];
+    const metered = new Proxy(blocks, {
+      get(target, key, receiver) {
+        if (typeof key === 'string' && key !== '' && !Number.isNaN(Number(key))) {
+          reads += 1;
+        }
+
+        return Reflect.get(target, key, receiver) as unknown;
+      },
+    });
+
+    expect(reads).toBe(0);
+    expect(metered.length).toBe(1);
+    expect(reads).toBe(0);
+    expect(metered[0]!.id).toBe('a');
+    expect(reads).toBe(1);
+  });
+
+  /**
+   * The claim: the work is a bounded number of passes over the document, not a
+   * pass per selected block.
+   *
+   * Bounded rather than exact. The current implementation reads about 4.3 slots
+   * per block, and pinning that number would red the build on rewrites that are
+   * strictly better -- indexing only toggles, or skipping the walk when nothing
+   * is collapsed. Eight passes leaves room for those without leaving room for a
+   * scan: the defect read 202 per block through `indexOf` and 800 through
+   * `find`, both more than an order of magnitude over.
+   */
+  const PASSES = 8;
+
+  test.each([[200], [1600]])(
+    'select-all over %i blocks costs a few passes over the document, not one per block',
+    (count) => {
+      const blocks = documentOf(count);
+      const reads = slotReads(blocks);
+
+      expect(reads).toBeGreaterThan(0);
+      expect(
+        reads / count,
+        `${reads} slot reads over ${count} blocks is ${(reads / count).toFixed(1)} passes`,
+      ).toBeLessThanOrEqual(PASSES);
+    },
+  );
+
+  /**
+   * A constant bound alone admits a partial revert -- a scan for some ids and
+   * the index for the rest stays under eight passes at one size. Growth is what
+   * catches those: eight times the document costs eight times the work if the
+   * cost is linear in the document, and sixty-four times if it is linear in
+   * document x selection.
+   *
+   * Measured at these sizes: 8.0 indexed, 59.9 with `indexOf`, 62.6 with the
+   * `descendantsOf` scan this replaced, 63.7 with `find`. Sixteen sits with a
+   * factor of two above the healthy number and nearly four below the defect.
+   */
+  test('eight times the document is eight times the work, not sixty-four', () => {
+    const small = slotReads(documentOf(200));
+    const large = slotReads(documentOf(1600));
+
+    expect(
+      large / small,
+      `${small} slot reads at 200 blocks, ${large} at 1600 -- a factor of ${(large / small).toFixed(1)}`,
+    ).toBeLessThan(16);
+  });
+
+  /**
+   * The fixture carries collapsed toggles because only a selected collapsed
+   * toggle reaches `descendantsOf`. The stopwatch this replaced used plain
+   * paragraphs, so it never ran that half of the function -- and that half was
+   * still quadratic the whole time it was passing. Select-all over 16k
+   * collapsed blocks cost 149ms against 1.2ms for the same count of paragraphs,
+   * and doubling the document quadrupled it.
+   */
+  test('a document of collapsed sections is not more expensive than one of paragraphs', () => {
+    const count = 1600;
+    const collapsed = slotReads(documentOf(count));
+    const flat = slotReads(
+      Array.from({ length: count }, (_, at) => ({
+        id: `b${at}`,
+        type: 'paragraph' as const,
+        depth: 0,
+        content: [],
+      })),
+    );
+
+    expect(
+      collapsed / flat,
+      `${collapsed} slot reads with toggles against ${flat} without`,
+    ).toBeLessThan(4);
   });
 
   test('a collapsed toggle still hides everything under it', () => {

@@ -170,7 +170,17 @@ export function canMergeText(type: BlockType): boolean {
  * blocks that follow it while staying deeper than it.
  */
 export function descendantsOf(blocks: readonly Block[], id: string): string[] {
-  const index = findBlockIndex(blocks, id);
+  return descendantsFrom(blocks, findBlockIndex(blocks, id));
+}
+
+/**
+ * `descendantsOf` for a caller that already knows the block's position.
+ *
+ * Walks the tail in place. `blocks.slice(index + 1)` copied it first, which is
+ * a second pass over the document per call and, for a caller in a loop, a
+ * second document-sized allocation per iteration.
+ */
+function descendantsFrom(blocks: readonly Block[], index: number): string[] {
   const parent = blocks[index];
 
   if (!parent) {
@@ -179,7 +189,9 @@ export function descendantsOf(blocks: readonly Block[], id: string): string[] {
 
   const out: string[] = [];
 
-  for (const block of blocks.slice(index + 1)) {
+  for (let at = index + 1; at < blocks.length; at += 1) {
+    const block = blocks[at]!;
+
     if (block.depth <= parent.depth) {
       break;
     }
@@ -244,16 +256,42 @@ export function withHiddenDescendants(
   // Indexed once. `findBlock` is a linear scan, and calling it per selected id
   // made every select-all gesture -- copy, cut, delete, duplicate, indent,
   // paste-over, drag-drop, Cmd+Shift+Arrow -- cost selection x document.
-  const byId = new Map(blocks.map((block) => [block.id, block]));
+  //
+  // The index holds POSITIONS, not blocks. Holding blocks left the other half
+  // of the same defect in place: `descendantsOf` takes an id, so it scanned for
+  // the block all over again, once per selected collapsed toggle. That is the
+  // same selection x document cost on a document of collapsed sections, and the
+  // guard below missed it for as long as its fixture was plain paragraphs --
+  // select-all over 16k such blocks cost 149ms against 1.2ms for the same count
+  // of paragraphs, and doubling the document quadrupled it.
+  //
+  // First position wins, matching the `findBlockIndex` this replaces. Documents
+  // reaching here are normalized, and `normalizeDocument` reassigns duplicate
+  // ids, so the two only differ on a document that cannot occur.
+  const indexById = new Map<string, number>();
+
+  for (let at = 0; at < blocks.length; at += 1) {
+    const { id } = blocks[at]!;
+
+    if (!indexById.has(id)) {
+      indexById.set(id, at);
+    }
+  }
 
   for (const id of [...out]) {
-    const block = byId.get(id);
+    const at = indexById.get(id);
 
-    if (block?.type !== 'toggle' || block.collapsed !== true) {
+    if (at === undefined) {
       continue;
     }
 
-    for (const child of descendantsOf(blocks, id)) {
+    const block = blocks[at]!;
+
+    if (block.type !== 'toggle' || block.collapsed !== true) {
+      continue;
+    }
+
+    for (const child of descendantsFrom(blocks, at)) {
       out.add(child);
     }
   }

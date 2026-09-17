@@ -1407,13 +1407,33 @@ describe('reading a pasted subtree is linear in its size', () => {
    */
   const RATIO = 25;
 
+  /**
+   * The best of five runs, not one.
+   *
+   * A single timing of a ~0.6ms parse is mostly whatever else the machine was
+   * doing: over fifteen trials the ratio below ranged 0.8 to 4.1 with one
+   * reading, and 1.2 to 1.8 with three. It takes one stalled run to spoil a
+   * single measurement and five to spoil this minimum, and that is the whole
+   * difference between this failing on a busy CI runner and not. Five runs of
+   * a 0.6ms parse costs 3ms, so the margin is close to free.
+   *
+   * The sizes cannot grow to solve it instead: `parseRichText` bounds list
+   * nesting at 256 levels, so a nested `<ul>` past that stops producing one
+   * block per level -- at n=1000 it yields 257 against the flat spelling's
+   * 1000, and the two sides are no longer the same document in two shapes.
+   */
   function elapsed(html: string, expected: number): number {
-    const started = performance.now();
-    const blocks = blocksFromHtml(document, html);
+    let best = Infinity;
 
-    expect(blocks).toHaveLength(expected);
+    for (let run = 0; run < 5; run += 1) {
+      const started = performance.now();
+      const blocks = blocksFromHtml(document, html);
 
-    return Math.max(performance.now() - started, 0.1);
+      expect(blocks).toHaveLength(expected);
+      best = Math.min(best, performance.now() - started);
+    }
+
+    return Math.max(best, 0.1);
   }
 
   test('deeply nested lists cost about what the same blocks cost flat', () => {
