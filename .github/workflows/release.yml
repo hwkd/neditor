@@ -122,7 +122,7 @@ jobs:
           test -f "$tarball" || { echo "::error::expected $tarball"; exit 1; }
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
 
-      - name: The packed manifest must not carry catalog: or a stale version
+      - name: 'The packed manifest must not carry catalog: or a stale version'
         run: |
           manifest=$(tar -xzOf "${{ steps.pack.outputs.tarball }}" package/package.json)
 
