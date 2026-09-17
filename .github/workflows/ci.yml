@@ -36,15 +36,17 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
 
-      # `--retry=2` is here for one reason, and it is not "tests are allowed to
-      # be unreliable". Three tests in rich-dom.test.ts assert a ratio of two
+      # `--retry=3` is here for one reason, and it is not "tests are allowed to
+      # be unreliable". The timing job measured the real rate on this runner:
+      # 5 of 15 runs. At 33% per attempt, three attempts still reds about one
+      # push in 28; four brings it near one in 80. Three tests in rich-dom.test.ts assert a ratio of two
       # wall-clock measurements, and the faster side of the ratio is about 2ms.
       # A shared CI runner descheduling the process for 40ms inflates that ratio
       # by an order of magnitude without anything having regressed. A real
       # regression puts the ratio in the hundreds on every attempt, so it still
       # fails all three. The `timing` job below is what actually watches those
       # three; this flag only stops runner noise from reddening everything else.
-      - run: pnpm --filter @neditor/core exec vp test --run --retry=2
+      - run: pnpm --filter @neditor/core exec vp test --run --retry=3
 
   build:
     name: Build and package gates
@@ -128,9 +130,10 @@ jobs:
               printf 'run %2d/%s  pass\n' "$i" "$REPEATS"
             else
               failures=$((failures + 1))
-              name=$(grep -oE '^ FAIL .*' "/tmp/timing/run-$i.log" | head -1)
-              detail=$(grep -oE '[0-9.]+ms vs [0-9.]+ms|expected [0-9.]+ to be less than [0-9.]+' \
-                       "/tmp/timing/run-$i.log" | head -1)
+              clean=$(sed $'s/\033\[[0-9;]*m//g' "/tmp/timing/run-$i.log")
+              name=$(printf '%s' "$clean" | grep -oE 'FAIL +[^ ]+\.test\.ts > .*' | head -1)
+              detail=$(printf '%s' "$clean" \
+                       | grep -oE '[0-9.]+ms vs [0-9.]+ms|expected [0-9.]+ to be less than [0-9.]+' | head -1)
               printf 'run %2d/%s  FAIL  %s  %s\n' "$i" "$REPEATS" "${name:-unknown test}" "${detail:-}"
             fi
           done
