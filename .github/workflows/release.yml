@@ -91,8 +91,12 @@ jobs:
           # day -- fine for testing, not for the one job that ships an artifact.
           # 24 also carries npm 11, which is what OIDC needs.
           node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
           cache: pnpm
+          # Deliberately no `registry-url`. It exists to write an .npmrc line
+          # reading the token out of NODE_AUTH_TOKEN, and under trusted
+          # publishing there is no token -- so it wrote a literal
+          # `_authToken=XXXXX-XXXXX-XXXXX-XXXXX`, which every later read command
+          # then sent to the registry.
 
       - run: pnpm install --frozen-lockfile
 
@@ -151,28 +155,42 @@ jobs:
       # This path cannot make that mistake: the tarball is already packed by pnpm
       # and the step above proves it.
       - name: Publish
-        run: npm publish "${{ steps.pack.outputs.tarball }}" --access public
+        run: |
+          set -o pipefail
+          npm publish "${{ steps.pack.outputs.tarball }}" --access public 2>&1 | tee "$RUNNER_TEMP/publish.log"
 
-      - name: Confirm the registry agrees
+      # Read from the publish output, not the registry. Provenance is stated by
+      # the command that produced it, so this answers immediately and cannot
+      # race the registry.
+      - name: Provenance must have been signed
+        run: |
+          if grep -q 'Signed provenance statement' "$RUNNER_TEMP/publish.log"; then
+            grep -E 'Signed provenance statement|transparency log' "$RUNNER_TEMP/publish.log"
+          else
+            echo "::error::Published without a provenance statement. That is the reason this\
+           workflow uses OIDC, so treat it as a failure: check the trusted publisher on npmjs.com."
+            exit 1
+          fi
+
+      # npm scans a new version before serving it, and that is not quick -- 0.1.2
+      # took about ten minutes to appear. The publish above already succeeded, so
+      # a version that is not visible yet is pending, not broken. This reports
+      # and never fails; the first version of it polled for thirty seconds and
+      # failed a release that had in fact worked.
+      - name: Registry visibility (informational)
+        continue-on-error: true
         run: |
           version="${{ needs.guard.outputs.version }}"
-          for attempt in 1 2 3 4 5; do
-            got=$(npm view "@neditor/core@${version}" version --silent 2>/dev/null || true)
-            [ "$got" = "$version" ] && break
-            echo "registry has not caught up (attempt $attempt); waiting"
-            sleep 6
+          for attempt in $(seq 1 12); do
+            if [ "$(npm view "@neditor/core@${version}" version 2>/dev/null)" = "$version" ]; then
+              echo "registry is serving $version"
+              exit 0
+            fi
+            echo "still processing (attempt $attempt/12)"
+            sleep 10
           done
-
-          test "$got" = "$version" || { echo "::error::registry reports '$got'"; exit 1; }
-
-          # Provenance is the reason for the OIDC dance, so say whether it
-          # actually landed rather than assuming it did.
-          if npm view "@neditor/core@${version}" dist.attestations --json 2>/dev/null | grep -q provenance; then
-            echo "published $version with provenance"
-          else
-            echo "::warning::Published $version, but the registry reports no provenance\
-           attestation. Check the trusted publisher configuration on npmjs.com."
-          fi
+          echo "::notice::$version published, and the registry has not finished processing it yet.\
+           This is normal and needs no action."
 
       - name: GitHub release
         env:
