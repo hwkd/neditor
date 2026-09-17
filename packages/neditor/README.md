@@ -108,7 +108,7 @@ Use a full, versioned path to `dist/index.mjs`:
 
 ```html
 <script type="module">
-  import { createEditor } from 'https://cdn.jsdelivr.net/npm/@neditor/core@0.1.2/dist/index.mjs';
+  import { createEditor } from 'https://cdn.jsdelivr.net/npm/@neditor/core@0.1.3/dist/index.mjs';
   createEditor({ element: '#editor' });
 </script>
 ```
@@ -118,7 +118,7 @@ split — `index.mjs` imports a sibling `./markdown-*.mjs` — and jsDelivr serv
 bare package URL with a 200 rather than a redirect, so the response URL stays at
 `/npm/@neditor/`, the relative specifier resolves against that, and the chunk
 404s. unpkg redirects into `dist/` and so happens to work either way; the
-versioned path above works on both. Dropping the `@0.1.2` works too if you would
+versioned path above works on both. Dropping the `@0.1.3` works too if you would
 rather track latest — any path ending in `/dist/index.mjs` puts the base URL
 inside `dist/`, which is the only thing that matters.
 `https://cdn.jsdelivr.net/npm/@neditor/core/+esm` also works, because jsDelivr
