@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Format, lint, types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vp check
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # `--retry=2` is here for one reason, and it is not "tests are allowed to
+      # be unreliable". Three tests in rich-dom.test.ts assert a ratio of two
+      # wall-clock measurements, and the faster side of the ratio is about 2ms.
+      # A shared CI runner descheduling the process for 40ms inflates that ratio
+      # by an order of magnitude without anything having regressed. A real
+      # regression puts the ratio in the hundreds on every attempt, so it still
+      # fails all three. The `timing` job below is what actually watches those
+      # three; this flag only stops runner noise from reddening everything else.
+      - run: pnpm --filter @neditor/core exec vp test --run --retry=2
+
+  build:
+    name: Build and package gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # `build` is `vp pack && emit-css && check-dts`. check-dts packs the
+      # package and compiles a consumer against the built declarations, so this
+      # job is also the gate on the published type surface.
+      - run: pnpm --filter @neditor/core run build
+
+      - name: publint
+        working-directory: packages/neditor
+        run: pnpm dlx publint@latest
+
+      - name: The package must not name another company's product
+        run: |
+          if grep -rniq notion packages/neditor/dist packages/neditor/README.md packages/neditor/package.json; then
+            echo "::error::'notion' appears in the publishable package."
+            grep -rni notion packages/neditor/dist packages/neditor/README.md packages/neditor/package.json
+            exit 1
+          fi
+          echo "clean"
+
+  timing:
+    name: Timing tests (flake watch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # Several tests assert a ratio between two wall-clock measurements --
+      # nested against flat parse cost, a large document against a small one.
+      # Unfixed those ratios are in the hundreds; fixed they are near one, and
+      # the thresholds sit at 15 and 25. Wide margins, except that the fast side
+      # of the ratio is between 0.05ms and 2ms, so a shared runner descheduling
+      # the process for a few tens of milliseconds crosses them with nothing
+      # having regressed.
+      #
+      # Running once and reporting pass/fail cannot tell a regression from a
+      # busy runner. So run REPEATS times and read the rate: a regression fails
+      # nearly every attempt, noise fails a few. Failing the job needs a
+      # majority; anything short of that is surfaced as a warning rather than
+      # swallowed, so the flake rate is visible on every run instead of being
+      # discovered the day it finally blocks someone.
+      #
+      # The file list is derived, not written down. A hand-kept list silently
+      # stops covering the timing test someone adds next month -- and that has
+      # already happened once here, where a watch aimed at one file missed a
+      # second flaky test in another.
+      - name: Repeat the suite and measure the failure rate
+        working-directory: packages/neditor
+        env:
+          REPEATS: 15
+        run: |
+          mkdir -p /tmp/timing
+          failures=0
+          for i in $(seq 1 "$REPEATS"); do
+            # The whole suite, not a list of timing files. A hand-kept list
+            # stops covering the timing test someone adds next month, and that
+            # has already happened here -- a watch aimed at one file missed a
+            # second flaky test in another. The suite runs in about three
+            # seconds, so covering everything costs less than maintaining a list
+            # that quietly goes wrong.
+            #
+            # Deliberately no --retry. Retry is what the `test` job uses to stay
+            # green; this job exists to measure what retry hides.
+            if pnpm exec vp test --run > "/tmp/timing/run-$i.log" 2>&1; then
+              printf 'run %2d/%s  pass\n' "$i" "$REPEATS"
+            else
+              failures=$((failures + 1))
+              name=$(grep -oE '^ FAIL .*' "/tmp/timing/run-$i.log" | head -1)
+              detail=$(grep -oE '[0-9.]+ms vs [0-9.]+ms|expected [0-9.]+ to be less than [0-9.]+' \
+                       "/tmp/timing/run-$i.log" | head -1)
+              printf 'run %2d/%s  FAIL  %s  %s\n' "$i" "$REPEATS" "${name:-unknown test}" "${detail:-}"
+            fi
+          done
+
+          {
+            echo "### Flake watch"
+            echo "\`$failures\` of \`$REPEATS\` runs failed."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          majority=$(( REPEATS / 2 + 1 ))
+
+          if [ "$failures" -ge "$majority" ]; then
+            echo "::error::Suite failed $failures/$REPEATS runs without retries. At that rate this\
+           is a real failure, not runner noise."
+            exit 1
+          fi
+
+          if [ "$failures" -gt 0 ]; then
+            echo "::warning::Flaky on this runner: $failures/$REPEATS runs failed. Under the\
+           majority threshold, so not treated as a regression -- but the margin is thin enough to watch."
+          else
+            echo "All $REPEATS runs passed."
+          fi
