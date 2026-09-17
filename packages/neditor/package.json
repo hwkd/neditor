@@ -1,6 +1,6 @@
 {
   "name": "@neditor/core",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A framework-agnostic, block-based rich-text editor. Vanilla JavaScript, zero runtime dependencies.",
   "keywords": [
     "block-editor",
