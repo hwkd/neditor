@@ -1,0 +1,189 @@
+name: Release
+
+# A tag is the trigger, but the tag is not trusted: the version in it has to
+# match the manifest, and the commit has to be one that is already on main and
+# already green. See the `guard` job.
+on:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Check the tag against the manifest
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: check
+        name: The tag, the manifest and main must agree
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest=$(node -p "require('./packages/neditor/package.json').version")
+
+          # A tag that disagrees with the manifest publishes the wrong version
+          # under the right name, and npm does not allow taking it back.
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package version ${manifest}.\
+           Retag, or bump the manifest -- do not publish a version whose tag names a different one."
+            exit 1
+          fi
+
+          # A tag can be pushed from any commit, including one that was never
+          # reviewed and never built. Only publish history that is on main.
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::${GITHUB_SHA} is not an ancestor of origin/main. Tag a commit that has\
+           landed on main."
+            exit 1
+          fi
+
+          # Republishing is impossible, so a tag pointing at an already-published
+          # version is a mistake worth catching before the gates spend five minutes.
+          if npm view "@neditor/core@${tag}" version --silent >/dev/null 2>&1; then
+            echo "::error::@neditor/core@${tag} is already on the registry. A published version\
+           cannot be replaced; bump to the next one."
+            exit 1
+          fi
+
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+          echo "publishing $tag from $GITHUB_SHA"
+
+  gates:
+    name: Gates
+    needs: guard
+    # The same checks a push to main runs -- format, lint, types, the suite, the
+    # build and dts gates, publint, the flake watch -- not a second copy of them.
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to npm
+    needs: [guard, gates]
+    runs-on: ubuntu-latest
+
+    # Trusted publishing matches an environment name as part of the OIDC claim,
+    # so this string has to equal the one configured on npmjs.com. It is also
+    # where a required reviewer goes if you want a human to approve each publish.
+    environment: npm-publish
+
+    permissions:
+      # Mints the OIDC token npm exchanges for a short-lived publish credential.
+      # There is no NPM_TOKEN in this repository and there should never be one.
+      id-token: write
+      # Creates the GitHub release at the end.
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Pinned, not read from `engines`. `engines` is a floor for consumers
+          # (">=22.12.0"), and resolving a floor gives whatever is newest on the
+          # day -- fine for testing, not for the one job that ships an artifact.
+          # 24 also carries npm 11, which is what OIDC needs.
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: npm must be new enough to exchange an OIDC token
+        run: |
+          have=$(npm --version)
+          need=11.5.1
+          if [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then
+            echo "::error::npm $have is older than $need, which is the floor for trusted\
+           publishing. Node 24 normally carries npm 11; add \`npm i -g npm@latest\` if that changes."
+            exit 1
+          fi
+          echo "npm $have, node $(node --version)"
+
+      # pnpm packs and npm publishes, and each does the half only it does well.
+      #
+      # Only pnpm resolves the workspace `catalog:` protocol -- `npm pack` ships
+      # the literal string "catalog:" to the registry, which is what 0.1.0 did.
+      # Only npm exchanges an OIDC token and attaches provenance. Packing with
+      # one and publishing the other tarball gets both.
+      - name: Pack with pnpm
+        id: pack
+        working-directory: packages/neditor
+        run: |
+          pnpm pack --pack-destination "$RUNNER_TEMP"
+          tarball="$RUNNER_TEMP/neditor-core-${{ needs.guard.outputs.version }}.tgz"
+          test -f "$tarball" || { echo "::error::expected $tarball"; exit 1; }
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+
+      - name: The packed manifest must not carry catalog: or a stale version
+        run: |
+          manifest=$(tar -xzOf "${{ steps.pack.outputs.tarball }}" package/package.json)
+
+          if printf '%s' "$manifest" | grep -q '"catalog:'; then
+            echo "::error::The packed manifest still contains a \`catalog:\` specifier. It was\
+           packed by npm, not pnpm, and the registry copy of this version could never be corrected."
+            printf '%s' "$manifest" | grep '"catalog:'
+            exit 1
+          fi
+
+          packed=$(printf '%s' "$manifest" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")
+          if [ "$packed" != "${{ needs.guard.outputs.version }}" ]; then
+            echo "::error::Tarball says $packed, tag says ${{ needs.guard.outputs.version }}."
+            exit 1
+          fi
+          echo "packed $packed, catalog: resolved"
+
+      # No NPM_TOKEN and no `--provenance`. Under trusted publishing npm mints
+      # its own short-lived credential from the OIDC token and attaches
+      # provenance itself; passing the flag is redundant and passing a token
+      # would defeat the point.
+      #
+      # Publishing a tarball means npm runs no lifecycle scripts, so
+      # `prepublishOnly` -- and the pnpm-only guard in it -- does not fire here.
+      # That guard exists to stop a laptop publishing with npm from a directory.
+      # This path cannot make that mistake: the tarball is already packed by pnpm
+      # and the step above proves it.
+      - name: Publish
+        run: npm publish "${{ steps.pack.outputs.tarball }}" --access public
+
+      - name: Confirm the registry agrees
+        run: |
+          version="${{ needs.guard.outputs.version }}"
+          for attempt in 1 2 3 4 5; do
+            got=$(npm view "@neditor/core@${version}" version --silent 2>/dev/null || true)
+            [ "$got" = "$version" ] && break
+            echo "registry has not caught up (attempt $attempt); waiting"
+            sleep 6
+          done
+
+          test "$got" = "$version" || { echo "::error::registry reports '$got'"; exit 1; }
+
+          # Provenance is the reason for the OIDC dance, so say whether it
+          # actually landed rather than assuming it did.
+          if npm view "@neditor/core@${version}" dist.attestations --json 2>/dev/null | grep -q provenance; then
+            echo "published $version with provenance"
+          else
+            echo "::warning::Published $version, but the registry reports no provenance\
+           attestation. Check the trusted publisher configuration on npmjs.com."
+          fi
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ needs.guard.outputs.version }}"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists, leaving it alone"
+            exit 0
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            "${{ steps.pack.outputs.tarball }}#neditor-core-${version}.tgz"
