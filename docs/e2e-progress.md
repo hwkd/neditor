@@ -452,3 +452,14 @@ byte-identical on 900,000 documents.
 
 Recorded, not from this branch: a line break inside a table cell is written as `\` + newline inside the
 row, which splits the row in GFM readers (identical on `main`).
+
+## Audit 23 (2026-09-30)
+
+An independent review of 6bb7c0b, asked to show the branch is not clean: **no findings.** The three
+mutants from V1 are caught, the mutation runners turn up nothing new, and fresh-seed runs of every
+fuzzer show only the accepted classes (240,000 structural and nested documents against three parsers,
+80,000 round trips, 80,000 against commonmark.js, 40,000 typing/paste parity, 40,000 through the HTML
+clipboard pair).
+
+Recorded from that review, identical on `main` and not from this branch: a quote whose text opens with a
+link whose own text starts with `!` and holds `] ` (written `> [!a\] b](/u)`) is read back as a callout.
