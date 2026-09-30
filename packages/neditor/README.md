@@ -249,8 +249,8 @@ These convert the moment you type the closing delimiter:
 
 The HTML spellings the Markdown writer uses for formatting that starts or ends
 with a space convert too: `<u>underline</u>`, `<strong>`, `<em>`, `<s>` and
-`<code>`. Inside a link destination only the link itself closes, so `_x_` in a
-URL is not italicised, and neither is a `_x_` that opens inside a bare URL, up to the next
+`<code>`. Inside a link destination only the link itself and a code span close, so `_x_`
+in a URL is not italicised, and neither is a `_x_` that opens inside a bare URL, up to the next
 whitespace; `_see https://a.test_`, which opens before it, still is. A bare URL here is
 `http://` or `https://` anywhere in a word, or `www.` at its start or after `*`, `_`, `~`,
 `(`, `[` or `]` (or, in pasted Markdown, after any backslash-escaped character), in either

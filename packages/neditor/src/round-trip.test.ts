@@ -1038,3 +1038,56 @@ describe('audit 14', () => {
     expect(throughMarkdown(blocks)[0]?.rows).toEqual(start(blocks)[0]?.rows);
   });
 });
+
+describe('audit 15', () => {
+  // A label is inline content to other readers: a backtick in the alt text
+  // paired with one in the caption and the image was gone, and `<!a` with a
+  // `>` later on the line was an HTML declaration.
+  test.each([
+    ['the ` key', '![the \\` key](https://a.test/x.png)\\\npress `Esc`'],
+    ['x <!a', '![x \\<!a](https://a.test/x.png)\\\npress `Esc`'],
+  ])('an image with alt %j is written %j', (alt, markdown) => {
+    const blocks = [
+      b({
+        type: 'image',
+        src: 'https://a.test/x.png',
+        alt,
+        content: [{ text: 'press ' }, { text: 'Esc', marks: ['code'] }],
+      }),
+    ];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    const back = throughMarkdown(blocks)[0];
+    expect(back?.alt).toBe(alt);
+    expect(back?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  test('a callout icon holding a backtick is escaped too', () => {
+    const blocks = [
+      b({
+        type: 'callout',
+        icon: '`',
+        content: [{ text: 'run ' }, { text: 'x', marks: ['code'] }],
+      }),
+    ];
+    expect(toMarkdown({ blocks })).toBe('> [!\\`] run `x`');
+    expect(throughMarkdown(blocks)[0]?.icon).toBe('`');
+  });
+
+  // Foreign Markdown: a plain destination may hold `<` after its first
+  // character, and nothing but the link closes inside it.
+  test.each([
+    ['[a](/p?a<b&q=*x*)', '/p?a<b&q=*x*'],
+    ['[a](/p?a<b&q=_x_)', '/p?a<b&q=_x_'],
+    ['[a](https://a.test/?q=<em>y</em>&r=1)', 'https://a.test/?q=%3Cem%3Ey%3C/em%3E&r=1'],
+  ])('%s links to %s', (markdown, href) => {
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual([{ text: 'a', link: href }]);
+  });
+
+  // An unclosed angle form holds no whitespace, so prose after one is prose.
+  test('emphasis after an unclosed angle destination still closes', () => {
+    expect(blocksFromMarkdown('see [a](<b c *x*')[0]?.content).toEqual([
+      { text: 'see [a](<b c ' },
+      { text: 'x', marks: ['italic'] },
+    ]);
+  });
+});

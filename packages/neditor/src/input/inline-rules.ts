@@ -120,7 +120,9 @@ export const BARE_URL_START = /https?:\/\/|www\./i;
 function inOpenDestination(window: string): boolean {
   const at = window.lastIndexOf('](');
 
-  return at !== -1 && /^\]\((?:<[^<>\s]*|[^)\s<]*)$/.test(window.slice(at));
+  // The plain alternative is the link rule's own: no `<` to open it, any after.
+  // Forbidding `<` throughout let a span close in `/p?a<b&q=*x*`.
+  return at !== -1 && /^\]\((?:<[^<>\s]*|(?:[^)\s<][^)\s]*)?)$/.test(window.slice(at));
 }
 
 export interface InlineRuleMatch {
@@ -282,15 +284,11 @@ export function matchInlineRule(
       continue;
     }
 
-    // Both link patterns need a `](` somewhere behind the caret, and can only
-    // start at the `[` that opens it. Finding that with two index lookups keeps
-    // the regex off the rest of the window — left to walk back from every `[`
-    // it turned a line of unpaired brackets, `[0, 1) [1, 2) ...`, into a
-    // second of work per paste, because every `)` restarted the scan.
     // The earliest `[` a link ending here can start at is the one that opens
     // the destination's `](`, so that position is computed rather than the
     // window walked from every bracket in it — which is what keeps a line of
-    // unpaired brackets off the quadratic path. It is computed and not
+    // unpaired brackets, `[0, 1) [1, 2) ...`, off the quadratic path (it was a
+    // second of work per paste: every `)` restarted the scan). It is computed and not
     // guessed: a foreign destination may hold `](` of its own
     // (`[see](<https://…?q=[foo](bar)>)`), so taking the last one put the
     // opener inside the URL, and trying candidates in turn needed a cap that

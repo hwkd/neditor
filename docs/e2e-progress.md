@@ -342,3 +342,15 @@ Two comments in `inline-rules.ts` that said a link pattern can only start at the
 the README's "the end of the destination is unambiguous", were untrue since L2 and are rewritten. One
 behaviour the Audit 13 brief listed as unchanged is not: `[notes](<drafts/plan [v2](/old>)` -- a closed
 angle form that is refused because it holds a space -- is plain text since M1, where `main` linked `v2`.
+
+## Audit 15 (2026-09-30)
+
+An independent review of 91692e7. The change held: about 25,000 URLs per block type, built from
+markup-shaped atoms, round-tripped and read the same in commonmark.js and micromark with no failure,
+where the same fuzzer finds 1,504 on the commit before. Three low findings.
+
+| #   | Kind                        | What                                                                                                                                                                                                                                                | Resolution                                                                                                   |
+| --- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| O1  | Interop, from A11's caption | An alt text is inline content to other readers. A backtick in it paired with one in the caption, and `<!a` with a later `>` was an HTML declaration; either way the image was gone there. On `main` no caption was written, so it could not happen. | A backtick and a `<` in a label (alt text, callout icon) are escaped; the reader already unescapes both.     |
+| O2  | Defect, foreign Markdown    | `inOpenDestination` forbade `<` anywhere in a plain destination while the link rule forbids it only as the first character, so in `[a](/p?a<b&q=*x*)` the `*x*` was emphasised and lost.                                                            | The two agree. The README says a code span closes in a destination too, which the code has always let it do. |
+| O3  | Stale comment               | One "can only start at the `[` that opens it" sentence survived Audit 14's rewrite, directly above the paragraph that says otherwise.                                                                                                               | Removed; its one useful fact moved into that paragraph.                                                      |

@@ -1117,8 +1117,11 @@ function escapeContinuations(markdown: string): string {
  *
  * A `]` inside one closes it early and the rest leaks into the line as markup,
  * so the brackets are escaped and `blocksFromMarkdown` unescapes them back.
+ * A backtick and a `<` too: a label is inline content to other readers, so a
+ * backtick in an alt text paired with one in the caption, or `<!a` with a `>`
+ * later on the line, swallowed the `](` between them and the image was gone.
  */
-const LABEL_ESCAPE = /[\\[\]]/g;
+const LABEL_ESCAPE = /[\\[\]`<]/g;
 
 function escapeMarkdownLabel(text: string): string {
   return text.replace(LABEL_ESCAPE, (char) => `\\${char}`);
