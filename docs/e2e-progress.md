@@ -382,3 +382,15 @@ Q1 the writer and the reader were swept instead: 35 character sequences repeated
 times through eight writer contexts (paragraph, bold, code, alt text, link destination, table cell,
 heading, bullet) and seven reader contexts, looking for growth above linear. None found; the two
 reader lines the sweep flagged measured linear, and equal to `main`, from 8,000 to 64,000.
+
+## Audit 18 (2026-09-30)
+
+An independent review of f7ffcd2: behaviourally clean (HEAD and the commit before write byte-identical
+Markdown for 120,000 random blocks with no carriage return in them; `oneLine` matches the pattern it
+replaced on two million strings), no superlinear path in multi-run, multi-block or nested content. Two
+low findings.
+
+| #   | Kind                 | What                                                                                                                                                                                       | Resolution                                                              |
+| --- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
+| R1  | Defect, pre-existing | A code block ending in a carriage return lost its last line break: the `\r` and the newline before the closing fence were read as one CRLF. Q2's row said a code block already handled it. | The same rewrite in the code branch.                                    |
+| R2  | Test gap (f7ffcd2)   | Three mutants survived: trimming a label's own leading or trailing space, and looking for a `\r` only in the first run. Q1 had called the label pinned case by case.                       | The two label edges and a carriage return in a second run are asserted. |

@@ -1578,7 +1578,9 @@ export function toMarkdown(doc: NEditorDocument): string {
       // A code block is literal: its text must not be re-escaped as Markdown.
       const text =
         block.type === 'code'
-          ? blockText(block)
+          ? // Its carriage returns are line breaks too. One left at the end
+            // joined the newline before the closing fence into a single CRLF.
+            blockText(block).replace(/\r\n?/g, '\n')
           : protectEdgeWhitespace(
               escapeContinuations(
                 richToMarkdown(block.content, { splitLines: block.type.startsWith('heading') }),

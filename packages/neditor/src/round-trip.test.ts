@@ -1143,6 +1143,9 @@ describe('audit 17', () => {
     ['a\n', 'a '],
     ['a\n\n \n b', 'a b'],
     ['a  b', 'a  b'],
+    // Only the whitespace around a break goes: a label's own edges are kept.
+    [' a\nb', ' a b'],
+    ['a\nb ', 'a b '],
   ])('a label %j is written with %j', (alt, written) => {
     expect(toMarkdown({ blocks: [b({ type: 'image', src: '/x.png', alt })] })).toBe(
       `![${written}](/x.png)`,
@@ -1181,5 +1184,25 @@ describe('audit 17', () => {
     ]);
     expect(back).toHaveLength(1);
     expect(back[0]?.content).toEqual(t('a\nb'));
+  });
+
+  test('a carriage return in a later run is rewritten too', () => {
+    const back = throughMarkdown([
+      b({ content: [{ text: 'x' }, { text: 'a\rb', marks: ['bold'] }] }),
+    ]);
+    expect(back).toHaveLength(1);
+    expect(back[0]?.content).toEqual([{ text: 'x' }, { text: 'a\nb', marks: ['bold'] }]);
+  });
+
+  // In a code block too, and not only in the middle: a trailing one joined the
+  // newline before the closing fence into one CRLF, and the last break was gone.
+  test.each([
+    ['a\r', 'a\n'],
+    ['a\r\nb', 'a\nb'],
+    ['\ra\r', '\na\n'],
+  ])('a code block holding %j comes back as %j', (text, expected) => {
+    const back = throughMarkdown([b({ type: 'code', content: t(text) })]);
+    expect(back).toHaveLength(1);
+    expect(back[0]?.content).toEqual(t(expected));
   });
 });
