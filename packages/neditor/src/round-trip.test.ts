@@ -1228,3 +1228,123 @@ describe('audit 19', () => {
     expect(blocksFromMarkdown(markdown)[0]?.content).toEqual(content);
   });
 });
+
+describe('audit 20', () => {
+  // A caption of `=` under an image line is a setext underline to other
+  // readers: the image became a heading and the caption was gone.
+  test.each(['===', '='])('an image caption %j is escaped', (caption) => {
+    const blocks = [b({ type: 'image', src: '/x.png', alt: 'cat', content: t(caption) })];
+    expect(toMarkdown({ blocks })).toBe(`![cat](/x.png)\\\n\\${caption}`);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(t(caption));
+  });
+
+  // Boundaries a mutation pass found nothing held in place. Each row is the
+  // exact Markdown, and the block must come back as it went in.
+  test.each([
+    // References: hex in either case, and a named one with a digit in it.
+    ['paragraph', '&#x41;', '\\&#x41;'],
+    ['paragraph', '&#X41;', '\\&#X41;'],
+    ['paragraph', 'a &frac12; b', 'a \\&frac12; b'],
+    // An ordinal closed by a paren is a list marker too.
+    ['paragraph', '1) x', '1\\) x'],
+    ['paragraph', 'a\n1. x', 'a\\\n1\\. x'],
+    // A `_` is left bare only between ASCII letters or digits, in a URL.
+    ['paragraph', 'https://a.test/x_1', 'https://a.test/x_1'],
+    ['paragraph', 'http://a.test/x_y', 'http://a.test/x_y'],
+    ['paragraph', 'awww.a/a__b__c', 'awww.a/a\\_\\_b\\_\\_c'],
+    ['paragraph', 'awww.é_b_é', 'awww.é\\_b\\_é'],
+    // A closing sequence follows a tab as well as a space, at every level.
+    ['heading1', 'a\t#', '# a\t\\#'],
+    ['heading2', 'a #', '## a \\#'],
+    ['heading3', 'a #', '### a \\#'],
+    // Every trailing whitespace character is a reference, whatever its length.
+    ['paragraph', 'a  ', 'a&#32;&#32;'],
+    ['paragraph', 'a\u00a0', 'a&#160;'],
+    ['paragraph', 'a\u3000', 'a&#12288;'],
+  ] as const)('%s %j is written %j', (type, text, markdown) => {
+    const blocks = [b({ type, content: t(text) })];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    const back = throughMarkdown(blocks)[0];
+    expect(back?.type).toBe(type);
+    expect(back?.content).toEqual(t(text));
+  });
+
+  test('a code run with edge whitespace still has its reference escaped', () => {
+    const blocks = [b({ content: [{ text: ' &#x41;', marks: ['code'] }] })];
+    expect(toMarkdown({ blocks })).toBe('<code> \\&#x41;</code>');
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  test.each([
+    ['\\_', '\\\\_'],
+    ['a[b', 'a\\[b'],
+  ])('a label %j is written %j', (label, written) => {
+    const image = [b({ type: 'image', src: '/x.png', alt: label })];
+    expect(toMarkdown({ blocks: image })).toBe(`![${written}](/x.png)`);
+    expect(throughMarkdown(image)[0]?.alt).toBe(label);
+
+    const callout = [b({ type: 'callout', icon: label, content: t('x') })];
+    expect(toMarkdown({ blocks: callout })).toBe(`> [!${written}] x`);
+    expect(throughMarkdown(callout)[0]?.icon).toBe(label);
+  });
+
+  test.each([
+    ['/a<b', '[x](</a%3Cb>)'],
+    ['/a>b', '[x](</a%3Eb>)'],
+  ])('a link to %s is written %s and is still a link', (href, markdown) => {
+    const blocks = [b({ content: [{ text: 'x', link: href }] })];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual([
+      { text: 'x', link: markdown.slice(5, -2) },
+    ]);
+  });
+
+  // The length bound, at its edges. The reader reaches back 2000 characters,
+  // so a span written as exactly that is left whole and one character more is
+  // split -- on the first pass and on every later one.
+  test.each([
+    ['a span written as exactly the limit', 'a'.repeat(1996)],
+    ['one character over, with a space to split at', `${'ab '.repeat(665)}ab`],
+    ['a remainder that is itself over the limit', `${'ab '.repeat(1166)}a`],
+    ['a remainder written as exactly one over', `${'ab '.repeat(1166)}${'ab '.repeat(165)}ab`],
+  ])('%s round-trips', (_name, text) => {
+    const blocks = [b({ content: [{ text: 'p ' }, { text, marks: ['bold'] }] })];
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  test('a tail that cannot be split is still written with its mark', () => {
+    const blocks = [
+      b({ content: [{ text: 'p ' }, { text: `aaa ${'x'.repeat(2500)}`, marks: ['bold'] }] }),
+    ];
+    const markdown = toMarkdown({ blocks });
+    expect(markdown.startsWith('p **aaa**<strong> xxx')).toBe(true);
+    expect(markdown.endsWith('xxx</strong>')).toBe(true);
+  });
+
+  // The reader, on typed or foreign text.
+  test.each([
+    // Any whitespace ends a URL's token, not only a space.
+    ['https://a.test/\t_y_', [{ text: 'https://a.test/\t' }, { text: 'y', marks: ['italic'] }]],
+    // The open destination is the last `](`, not the first.
+    ['[a](b)[c](/p*x*q*)', [{ text: '[a](b)' }, { text: 'c', link: '/p*x*q*' }]],
+    // An angle destination holds no `<`.
+    ['[a](<https://a.test/x<y>)', [{ text: '[a](<https://a.test/x<y>)' }]],
+    // A reference is decoded up to U+10FFFF, and never to a NUL or half a pair.
+    ['a&#1114111;', [{ text: `a${String.fromCodePoint(0x10ffff)}` }]],
+    ['&#0;', [{ text: '&#0;' }]],
+    ['&#55357;', [{ text: '&#55357;' }]],
+    // A decoded character is text: two placeholders for an astral one, so
+    // offsets stay aligned, and never a delimiter.
+    ['&#128512;*a*', [{ text: '\u{1F600}' }, { text: 'a', marks: ['italic'] }]],
+    ['&#42;a*', [{ text: '*a*' }]],
+  ])('%j is read as %j', (markdown, content) => {
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual(content);
+  });
+
+  test('an even number of trailing backslashes is not a soft break', () => {
+    expect(blocksFromMarkdown('C:\\\\dir\\\\\nnext').map((block) => block.content)).toEqual([
+      t('C:\\dir\\'),
+      t('next'),
+    ]);
+  });
+});

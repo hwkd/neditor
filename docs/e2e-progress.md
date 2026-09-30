@@ -407,3 +407,19 @@ README and CHANGELOG were run and matched.
 | S1  | Test gaps             | Four non-equivalent mutants survived: trimming one side only of a label's middle part; dropping `options` in the carriage-return rewrite (a heading's per-line spans); and either bound of `inOpenDestination` (whitespace ends the plain form, `<` the angle form). | Each is asserted.                                                                                                                |
 | S2  | Docs                  | The CHANGELOG did not record R1.                                                                                                                                                                                                                                     | Added to the carriage-return entry.                                                                                              |
 | S3  | Interop, same on main | A code block nested under a list item is written with its fence indented and its body not. This reader round-trips it at every depth; commonmark.js reads an empty code block and lets the body out as a paragraph.                                                  | Not fixed here: it changes both the writer and the reader, and the branch did not touch it. Recorded, and raised as a follow-up. |
+
+## Audit 20 (2026-09-30)
+
+An independent review of 6d38ff8 with a mutation pass over every function the branch added or changed
+in the writer and the reader: 196 mutants. 180,000 mixed multi-block documents round-tripped, and
+140,000 depth-0 documents read the same in commonmark.js apart from T1.
+
+| #   | Kind                      | What                                                                                                                                                                                                                                       | Resolution                                                                                                                          |
+| --- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| T1  | Interop, from A11         | An image caption made only of `=` sat under the image line as a setext underline: other readers made the image a heading and dropped the caption. B7 escaped `=` on later caption lines only.                                              | A caption opening with `=` is escaped.                                                                                              |
+| T2  | Test gaps                 | 32 mutants in branch-added code changed behaviour and passed every test: 14 broke this reader's own round trip, 8 only other readers would notice, 10 changed how typed or foreign text is read.                                           | One assertion per mutant, from the reviewer's literal inputs. All 32 are caught when that reviewer's runner is re-run on this tree. |
+| T3  | Dead code, stale comments | The bullet's triangle escape skipped leading whitespace and escaped breaks that `protectEdgeWhitespace` has already turned into references; `LEADING_BANG` never fired, since a `!` before a link is escaped earlier, in `richToMarkdown`. | Both removed; the comment says where the protection is.                                                                             |
+
+Left as they are, by the reviewer's own classification: 16 surviving mutants that are equivalent, 13
+that change the Markdown written without any reader reading it differently, and 17 in code unchanged
+from `main`.

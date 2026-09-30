@@ -928,9 +928,6 @@ const LEADING_MARKER = /^(\s*)([#>+-])/;
 // A soft break follows as `\` + newline, which the reader rejoins before
 // testing for a prefix: `1.` then Shift+Enter came back a numbered list.
 const LEADING_ORDINAL = /^(\s*)(\d+)([.)])(?=\s|$|\\\n)/;
-// `![…](…)` alone is an image line; a paragraph opening with a `!` and a
-// linked label came back as one, the text gone.
-const LEADING_BANG = /^(\s*)!(?=\[)/;
 
 /**
  * Escapes run text for Markdown.
@@ -1072,10 +1069,7 @@ function protectEdgeWhitespace(markdown: string): string {
 
 /** Stops a paragraph that begins with `#`, `-` or `1.` becoming that block. */
 function escapeLeadingMarker(text: string): string {
-  return text
-    .replace(LEADING_ORDINAL, '$1$2\\$3')
-    .replace(LEADING_MARKER, '$1\\$2')
-    .replace(LEADING_BANG, '$1\\!');
+  return text.replace(LEADING_ORDINAL, '$1$2\\$3').replace(LEADING_MARKER, '$1\\$2');
 }
 
 /**
@@ -1612,19 +1606,12 @@ export function toMarkdown(doc: NEditorDocument): string {
         // so escaping the triangle in ordinary prose would put a literal
         // backslash into everyone else's rendering of "press ▾ to expand".
         case 'bulleted_list':
-          // `^(\s*)` like the other leading-marker escapes in this file, not a
-          // bare `^`: the reader's bullet prefix eats the marker and every
-          // space after it, so a triangle behind whitespace still lands where a
-          // toggle's marker is read. Anchored tighter, `-  ▾ x` came back as a
-          // toggle with the triangle eaten.
-          // The prefix skips escaped soft breaks as well as spaces: a leading
-          // newline is written `\` + newline, so a bare `\s*` stopped at that
-          // backslash, wrote no escape, and the triangle behind it was read as
-          // a toggle marker.
-          return marked(
-            '-',
-            escapeLeadingMarker(text.replace(/^((?:\\\n|\s)*)([\u25B8\u25BE])/, '$1\\$2')),
-          );
+          // Anchored at the very start: a triangle behind whitespace or a line
+          // break needs nothing, because `protectEdgeWhitespace` has already
+          // written what precedes it as references, and `- &#32;▾ x` is not a
+          // toggle to the reader. (This used to skip leading whitespace and
+          // escaped breaks itself, from before the edge was protected.)
+          return marked('-', escapeLeadingMarker(text.replace(/^([\u25B8\u25BE])/, '\\$1')));
         case 'numbered_list':
           return marked(`${numbers.get(block.id) ?? 1}.`, escapeLeadingMarker(text));
         case 'todo':
@@ -1652,8 +1639,12 @@ export function toMarkdown(doc: NEditorDocument): string {
             block.src ?? '',
           )})`;
 
-          // The caption's first line follows a break too, so its marker is escaped.
-          return text.length === 0 ? image : `${image}\\\n${escapeLeadingMarker(text)}`;
+          // The caption's first line follows a break too, so its marker is
+          // escaped -- and a `=`, as on any continuation line: `===` under the
+          // image line made the image a heading in every other reader.
+          return text.length === 0
+            ? image
+            : `${image}\\\n${escapeLeadingMarker(text).replace(/^=/, '\\=')}`;
         }
         case 'table':
           return tableToMarkdown(block, indent);

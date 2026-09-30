@@ -58,8 +58,9 @@ that changes what you store or what other applications receive is listed first.
   - A block marker at the start of a line after a soft break is escaped
     (`\# not a heading`), and so is a `!` opening a paragraph with `![`.
 - **Markdown.** An image's caption is written after the image, following a hard
-  break, instead of being dropped. A backtick or `<` in its alt text (or in a
-  callout's icon) is escaped, so other readers cannot pair it with one in the
+  break, instead of being dropped. A caption that opens with `=` is escaped
+  (under the image line, `===` made the image a heading elsewhere). A backtick
+  or `<` in its alt text (or in a callout's icon) is escaped, so other readers cannot pair it with one in the
   caption, and a line break there is written as a space: written raw it split
   the image line and the image came back as two paragraphs. An image with no source yet is written
   `![alt]()` instead of being lost.
