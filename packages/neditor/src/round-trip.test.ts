@@ -1007,3 +1007,34 @@ describe('audit 13', () => {
     expect(blocksFromMarkdown('![a]()')[0]?.type).toBe('image');
   });
 });
+
+describe('audit 14', () => {
+  // A `](` inside a destination is a link's hinge to the rules: a link-shaped
+  // `[foo](b.ar)` in a query was made into a link of its own and its brackets
+  // taken out of the URL, and a closed `](b)` made the rest of the destination
+  // look like prose, so `*x*` after it was emphasised. The writer escapes the
+  // bracket, and no `](` is left for a rule to find.
+  test.each([
+    ['https://a.test/?q=[foo](b.ar)', '[see](<https://a.test/?q=[foo\\](b.ar)>)'],
+    ['mailto:a@b.test?subject=[x](/y)', '[see](<mailto:a@b.test?subject=[x\\](/y)>)'],
+    ['https://a.test/?q=](b)*x*', '[see](<https://a.test/?q=\\](b)*x*>)'],
+    ['mailto:a@b.test?subject=](b)_x_', '[see](<mailto:a@b.test?subject=\\](b)_x_>)'],
+  ])('a link to %s is written %s', (href, markdown) => {
+    const blocks = [b({ content: [{ text: 'see', link: href }] })];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  test('and in a table cell', () => {
+    const blocks = [
+      b({
+        type: 'table',
+        rows: [
+          [[{ text: 'see', link: 'https://a.test/?q=[foo](b.ar)|](b)*x*' }], [{ text: 'z' }]],
+          [[{ text: '1' }], [{ text: '2' }]],
+        ] as never,
+      }),
+    ];
+    expect(throughMarkdown(blocks)[0]?.rows).toEqual(start(blocks)[0]?.rows);
+  });
+});

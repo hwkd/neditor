@@ -50,10 +50,11 @@ that changes what you store or what other applications receive is listed first.
     one that opens with `=` is escaped, so it is not a setext heading
     underline.
   - In a link or image destination, a backslash is doubled, a `|` is written
-    `\|`, a backtick `` \` ``, and an `&` that begins a reference `\&`: the
-    first was read back as an escape, the second ended a table cell, two of the
-    third closed a code span and were dropped from the URL, and other readers
-    decoded the fourth.
+    `\|`, a backtick `` \` ``, a `](` as `\](`, and an `&` that begins a
+    reference `\&`: the first was read back as an escape, the second ended a
+    table cell, two of the third closed a code span and were dropped from the
+    URL, the fourth made a link (or emphasis) out of part of the URL, and other
+    readers decoded the fifth.
   - A block marker at the start of a line after a soft break is escaped
     (`\# not a heading`), and so is a `!` opening a paragraph with `![`.
 - **Markdown.** An image's caption is written after the image, following a hard

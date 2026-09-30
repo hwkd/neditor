@@ -149,8 +149,15 @@ export interface InlineRuleMatch {
  * in the window and its shape says exactly which `](` opened it: `](<` for the
  * angle-bracket form, and for the plain form the one immediately before a run
  * of characters that are neither `)` nor whitespace — which is all the pattern
- * admits there. Reading it off directly costs two scans and cannot be wrong,
- * where guessing was and enumerating needed a bound.
+ * admits there. Reading it off directly costs two scans, where guessing was
+ * wrong and enumerating needed a bound.
+ *
+ * It is where the search starts, not a promise of where a match does: the
+ * patterns are anchored at the caret alone, so when the link at this opener is
+ * not one -- a plain destination opening with `<` -- the engine goes on to a
+ * later `[`. In foreign Markdown that finds a link inside an unclosed angle
+ * form, as CommonMark does; the writer escapes every `](` in a destination so
+ * that its own output holds none to find.
  */
 function linkOpener(window: string, angled: boolean): number {
   if (angled) {
@@ -280,14 +287,14 @@ export function matchInlineRule(
     // the regex off the rest of the window — left to walk back from every `[`
     // it turned a line of unpaired brackets, `[0, 1) [1, 2) ...`, into a
     // second of work per paste, because every `)` restarted the scan.
-    // A link pattern can only start at the `[` that opens the destination's
-    // `](`, so that one position is computed rather than the window walked from
-    // every bracket in it — which is what keeps a line of unpaired brackets off
-    // the quadratic path. It is computed and not guessed: a destination may
-    // hold `](` of its own (`[see](<https://…?q=[foo](bar)>)`, which this
-    // editor writes itself), so taking the last one put the opener inside the
-    // URL, and trying candidates in turn needed a cap that lost the link
-    // outright once a URL carried enough of them.
+    // The earliest `[` a link ending here can start at is the one that opens
+    // the destination's `](`, so that position is computed rather than the
+    // window walked from every bracket in it — which is what keeps a line of
+    // unpaired brackets off the quadratic path. It is computed and not
+    // guessed: a foreign destination may hold `](` of its own
+    // (`[see](<https://…?q=[foo](bar)>)`), so taking the last one put the
+    // opener inside the URL, and trying candidates in turn needed a cap that
+    // lost the link outright once a URL carried enough of them.
     let searchedFrom = 0;
     let match: RegExpExecArray | null = null;
 
