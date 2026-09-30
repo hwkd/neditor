@@ -195,7 +195,7 @@ const OPENERS = new Set(['*', '_', '~', '`', '<', '[']);
  * prose, which no other reader does; it is honoured at the one place the writer
  * emits it, the head of a bullet, and nowhere else.
  */
-const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!&]/;
+const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!&=]/;
 
 /**
  * A numeric character reference, which the writer uses for whitespace at the
@@ -206,14 +206,34 @@ const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!&]/;
 const NUMERIC_REFERENCE = /^&#(?:(\d{1,7})|[xX]([0-9a-fA-F]{1,6}));/;
 
 /**
- * Where references are decoded: the run at either edge of a block's text, and
- * nowhere else, because that is the only place the writer puts them. Decoding
- * them everywhere corrupted foreign text -- a link destination holding `&#38;`
- * came back with a NUL in it, and a pasted code span holding `&#169;` came
- * back as a copyright sign.
+ * Where references are decoded: a run at either edge of a block's text or at
+ * the start of a line after a soft break, and nowhere else, because those are
+ * the places the writer puts them (every reader strips leading whitespace from
+ * a line, and trims a block). Decoding them everywhere corrupted foreign text --
+ * a link destination holding `&#38;` came back with a NUL in it, and a pasted
+ * code span holding `&#169;` came back as a copyright sign.
  */
-const LEADING_REFERENCES = /^(?:&#(?:\d{1,7}|[xX][0-9a-fA-F]{1,6});)+/;
+const LINE_LEADING_REFERENCES = /(?:^|\n)((?:&#(?:\d{1,7}|[xX][0-9a-fA-F]{1,6});)+)/g;
 const TRAILING_REFERENCES = /(?:&#(?:\d{1,7}|[xX][0-9a-fA-F]{1,6});)+$/;
+
+/** The `[start, end)` spans of `text` whose references are the writer's, in order. */
+function decodableReferences(text: string): Array<readonly [number, number]> {
+  const spans: Array<readonly [number, number]> = [];
+
+  for (const match of text.matchAll(LINE_LEADING_REFERENCES)) {
+    const run = match[1] ?? '';
+    const start = match.index + match[0].length - run.length;
+    spans.push([start, start + run.length]);
+  }
+
+  const trailing = TRAILING_REFERENCES.exec(text);
+
+  if (trailing && !spans.some(([start]) => start === trailing.index)) {
+    spans.push([trailing.index, text.length]);
+  }
+
+  return spans;
+}
 
 function decodeReference(match: RegExpExecArray): string | null {
   const code = match[1] !== undefined ? Number(match[1]) : Number.parseInt(match[2] ?? '', 16);
@@ -239,9 +259,16 @@ const ESCAPED = '\u0000';
  * trailing backslashes is unambiguously the break marker it emits for `\n`.
  */
 function endsWithSoftBreak(line: string): boolean {
-  const trailing = /\\+$/.exec(line);
+  // Counted from the end, not matched: the line this is asked about is the
+  // joined block so far, and an unanchored `/\\+$/` rescanned all of it for
+  // every line joined, which made a long soft-broken paragraph quadratic.
+  let count = 0;
 
-  return trailing ? trailing[0].length % 2 === 1 : false;
+  while (line.charCodeAt(line.length - 1 - count) === 92) {
+    count += 1;
+  }
+
+  return count % 2 === 1;
 }
 
 /**
@@ -315,8 +342,9 @@ export function parseInlineMarkdown(text: string): RichText {
     return [];
   }
 
-  const leadingEnd = LEADING_REFERENCES.exec(text)?.[0].length ?? 0;
-  const trailingStart = text.length - (TRAILING_REFERENCES.exec(text)?.[0].length ?? 0);
+  // Visited in order as `index` only grows, so the lookup is a moving pointer.
+  const decodable = text.includes('&#') ? decodableReferences(text) : [];
+  let span = 0;
 
   // What a rule can still reach, plus the character of context the lookbehinds
   // need. Text before it is cut from `matchable` for good.
@@ -509,12 +537,20 @@ export function parseInlineMarkdown(text: string): RichText {
       index += 1;
       literal = next;
       projected = ESCAPED;
-    } else if (char === '&' && (index < leadingEnd || index >= trailingStart)) {
-      // A decoded reference is text, never a delimiter -- the same opacity an
-      // escape gets, one placeholder per UTF-16 unit so offsets stay aligned.
-      const reference = NUMERIC_REFERENCE.exec(text.slice(index, index + 12));
+    } else if (char === '&' && decodable.length > 0) {
+      // Visited in order, so the span lookup is a pointer that only moves on.
+      while (span < decodable.length && decodable[span]![1] <= index) {
+        span += 1;
+      }
+
+      const reference =
+        span < decodable.length && decodable[span]![0] <= index
+          ? NUMERIC_REFERENCE.exec(text.slice(index, index + 12))
+          : null;
       const decoded = reference ? decodeReference(reference) : null;
 
+      // A decoded reference is text, never a delimiter -- the same opacity an
+      // escape gets, one placeholder per UTF-16 unit so offsets stay aligned.
       if (reference && decoded !== null) {
         index += reference[0].length - 1;
         literal = decoded;

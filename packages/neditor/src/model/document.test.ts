@@ -335,7 +335,7 @@ describe('rich markdown serialization', () => {
   test('whitespace at the edge of a bold run keeps its mark without touching the delimiter', () => {
     // `**bold **` is not emphasis in any Markdown dialect, so the space cannot
     // sit against the delimiter -- but hoisting it outside dropped its mark. The
-    // run is written as HTML, which every reader renders as written.
+    // run is written as HTML, which CommonMark renders as written.
     const content = richSetMark(richFromPlainText('a bold b'), 2, 7, 'bold', true);
     const block = { ...createBlock('paragraph'), content };
     const markdown = toMarkdown({ blocks: [block] });

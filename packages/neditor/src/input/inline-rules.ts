@@ -72,7 +72,8 @@ const INLINE_RULES: readonly InlineRule[] = [
   // `toMarkdown` writes a marked run whose text starts or ends with whitespace
   // as HTML: `**bold **` is not emphasis in any dialect, and `a**bold&#32;**b`
   // is literal asterisks in CommonMark (the closer is not right-flanking), but
-  // every reader renders `a<strong>bold </strong>b` as written.
+  // any reader that allows inline HTML renders `a<strong>bold </strong>b` as
+  // written.
   { closer: '>', pattern: /<strong>([^<]+)<\/strong>$/, mark: 'bold' },
   { closer: '>', pattern: /<em>([^<]+)<\/em>$/, mark: 'italic' },
   { closer: '>', pattern: /<s>([^<]+)<\/s>$/, mark: 'strikethrough' },

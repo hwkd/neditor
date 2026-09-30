@@ -942,19 +942,20 @@ const LEADING_BANG = /^(\s*)!(?=\[)/;
 function escapeMarkdownText(text: string): string {
   return text
     .replace(INLINE_ESCAPE, (char) => `\\${char}`)
-    .replace(NUMERIC_REFERENCE_AMPERSAND, '\\&')
+    .replace(REFERENCE_AMPERSAND, '\\&')
     .replaceAll('\n', '\\\n');
 }
 
 /**
- * An `&` that would begin a numeric character reference.
+ * An `&` that would begin a character reference.
  *
- * The reader decodes `&#32;` and `&#x20;`, which is how edge whitespace is
- * written (see {@link protectEdgeWhitespace}); text that happens to contain one
- * literally is escaped so it comes back as typed. Only this shape: every other
- * `&` is written bare, as every other reader expects.
+ * The reader decodes numeric references where the writer puts them, for
+ * whitespace (see {@link protectEdgeWhitespace}), and every other reader
+ * decodes named ones too -- so `&amp;` typed as text showed as `&` there. Text
+ * holding either shape is escaped so it comes back as typed; every other `&` is
+ * written bare.
  */
-const NUMERIC_REFERENCE_AMPERSAND = /&(?=#(?:\d+|[xX][0-9a-fA-F]+);)/g;
+const REFERENCE_AMPERSAND = /&(?=#(?:\d+|[xX][0-9a-fA-F]+);|[a-zA-Z][a-zA-Z0-9]{0,31};)/g;
 
 /**
  * Writes whitespace at either edge of a block's text as numeric references.
@@ -995,9 +996,19 @@ function escapeLeadingMarker(text: string): string {
  * a hard break, so the same goes for them.
  */
 function escapeContinuations(markdown: string): string {
-  return markdown
-    .replace(/(\\\n[^\S\n]*)(\d+)([.)])(?=\s|$|\\\n)/g, '$1$2\\$3')
-    .replace(/(\\\n[^\S\n]*)([#>+-])/g, '$1\\$2');
+  return (
+    markdown
+      .replace(/(\\\n[^\S\n]*)(\d+)([.)])(?=\s|$|\\\n)/g, '$1$2\\$3')
+      // `=` too: `===` under a line is a heading underline, as `---` is.
+      .replace(/(\\\n[^\S\n]*)([#>+=-])/g, '$1\\$2')
+      // And the whitespace a line starts with, which every reader strips; the
+      // reader here decodes references at the start of a line for this.
+      .replace(
+        /(\\\n)([^\S\n]+)/g,
+        (_match, lineBreak: string, run: string) =>
+          lineBreak + run.replace(/[^\S\n]/g, (char) => `&#${char.codePointAt(0) ?? 32};`),
+      )
+  );
 }
 
 /**
@@ -1044,7 +1055,11 @@ function fenceFor(text: string): string {
   return '`'.repeat(Math.max(3, longest + 1));
 }
 
-/** The HTML spelling of each mark, for a run whose text has edge whitespace. */
+/**
+ * The HTML spelling of each mark, for a run a delimiter cannot express: edge
+ * whitespace or a line break, code that needs an escape, or a run whose
+ * delimiters would not be flanking where it sits (see runToMarkdown).
+ */
 const MARK_TAGS: Record<Mark, string> = {
   code: 'code',
   bold: 'strong',
@@ -1062,19 +1077,6 @@ const MARK_DELIMITERS: ReadonlyArray<readonly [Mark, string, string]> = [
   ['underline', '<u>', '</u>'],
 ];
 
-/**
- * Wraps a run in its Markdown delimiters.
- *
- * Whitespace at the edge of a marked run stays inside the mark: it used to be
- * written outside the delimiters, and the mark on it was lost -- invisible for
- * bold, a visible gap in an underline, a strike, a code span or a link. `**`,
- * `*` and `~~` cannot open or close against whitespace, and CommonMark strips a
- * space from each side of a code span, so such a run is written as HTML tags
- * instead (`a<strong>bold </strong>b`), which every reader renders as written
- * and this one reads back. (Numeric references inside `**` were tried first:
- * `a**bold&#32;**b` is literal asterisks in CommonMark, whose closer there is
- * not right-flanking.) A link's text holds the whitespace as it is.
- */
 /**
  * The longest text a single emphasis or link span is written across.
  *
@@ -1100,7 +1102,10 @@ function splitLongSpan(text: string, emitted: number): [string, string] | null {
     return null;
   }
 
-  const at = text.lastIndexOf(' ', SAFE_SPAN);
+  // At a space or a line break: a long run of lines with no space in reach --
+  // paths, identifiers -- otherwise went out as one span the reader could not
+  // close, and came back as raw markup.
+  const at = Math.max(text.lastIndexOf(' ', SAFE_SPAN), text.lastIndexOf('\n', SAFE_SPAN));
 
   // A single unbroken token longer than the bound cannot be split without
   // changing the text, so it is written whole and does not round-trip. Nothing
@@ -1108,7 +1113,67 @@ function splitLongSpan(text: string, emitted: number): [string, string] | null {
   return at <= 0 ? null : [text.slice(0, at), text.slice(at)];
 }
 
-function runToMarkdown(run: TextRun): string {
+/** What a run is written next to, and how the block it is in handles breaks. */
+interface RunContext {
+  /** The character before the run in its block, or '' at the start. */
+  before?: string;
+  /** The character after it, or '' at the end. */
+  after?: string;
+  /**
+   * One span per line: a heading is a single line in every other reader, so a
+   * span written whole across a break there split its delimiters between the
+   * heading and the paragraph after it. The break's own mark is the price.
+   */
+  splitLines?: boolean;
+  /** Write HTML tags whatever the text: the run's delimiters would merge with a neighbour's. */
+  tagged?: boolean;
+}
+
+const PUNCTUATION = /[\p{P}\p{S}]/u;
+const SPACE = /\s/u;
+
+/**
+ * Whether `*`-style delimiters around a run would open and close it.
+ *
+ * CommonMark's flanking rule, in the part that bites: a delimiter against
+ * punctuation also needs whitespace or punctuation on its outer side, so
+ * `word**(x)**` is literal asterisks there. Judged on the run's neighbours in
+ * the text, which is conservative -- the character actually written beside a
+ * delimiter may be another run's delimiter, punctuation -- and wrong only
+ * towards writing HTML where `**` would have done.
+ */
+function flanks(text: string, before: string, after: string): boolean {
+  const first = text[0] ?? '';
+  const last = text.at(-1) ?? '';
+  const outside = (char: string) => char === '' || SPACE.test(char) || PUNCTUATION.test(char);
+
+  return (
+    (!PUNCTUATION.test(first) || outside(before)) && (!PUNCTUATION.test(last) || outside(after))
+  );
+}
+
+/**
+ * Wraps a run in its Markdown delimiters.
+ *
+ * Whitespace at the edge of a marked run stays inside the mark: it used to be
+ * written outside the delimiters, and the mark on it was lost -- invisible for
+ * bold, a visible gap in an underline, a strike, a code span or a link. `**`,
+ * `*` and `~~` cannot open or close against whitespace, and CommonMark strips a
+ * space from each side of a code span, so such a run is written as HTML tags
+ * instead (`a<strong>bold </strong>b`), which this reader reads back and any
+ * reader that allows inline HTML renders as written -- one that escapes raw
+ * HTML, as markdown-it does by default, shows the tags. (Numeric references inside `**` were tried first:
+ * `a**bold&#32;**b` is literal asterisks in CommonMark, whose closer there is
+ * not right-flanking.) A link's text holds the whitespace as it is.
+ */
+function runToMarkdown(run: TextRun, context: RunContext = {}): string {
+  if (context.splitLines && run.text.includes('\n')) {
+    return run.text
+      .split('\n')
+      .map((line) => runToMarkdown({ ...run, text: line }))
+      .join('\\\n');
+  }
+
   const escaped = escapeMarkdownText(run.text);
   const marks = new Set(run.marks ?? []);
 
@@ -1122,7 +1187,14 @@ function runToMarkdown(run: TextRun): string {
   // holds a line break (written `\` + newline), would show the backslash.
   const edged = /^\s|\s$/.test(run.text);
   const literalCode = !marks.has('code') || (escaped === run.text && !run.text.includes('`'));
-  const tagged = edged || !literalCode;
+  // Inside a link the delimiters sit against `[` and `]`, which always flank.
+  const emphasis = marks.has('bold') || marks.has('italic') || marks.has('strikethrough');
+  // Judged on what the delimiters will actually touch, which for a code run is
+  // its backtick: `**`x`**1` is literal asterisks.
+  const inner = marks.has('code') ? '`' : run.text;
+  const flanking =
+    !emphasis || run.link !== undefined || flanks(inner, context.before ?? '', context.after ?? '');
+  const tagged = context.tagged || edged || !literalCode || !flanking;
   let core = escaped;
 
   for (const [mark, open, close] of MARK_DELIMITERS) {
@@ -1135,16 +1207,15 @@ function runToMarkdown(run: TextRun): string {
     core = `[${core}](${destinationToMarkdown(run.link)})`;
   }
 
-  // And one span per readable length, for the same reason as the line split
-  // above: a span whose opening delimiter the reader cannot reach is one it
-  // leaves in the prose as literal characters. Measured on what was actually
-  // emitted rather than on the raw text, so a run only splits when it really
-  // is too long for the reader.
+  // And one span per readable length: a span whose opening delimiter the reader
+  // cannot reach is one it leaves in the prose as literal characters. Measured
+  // on what was actually emitted rather than on the raw text, so a run only
+  // splits when it really is too long for the reader.
   if ((run.marks?.length || run.link) && core.length > INLINE_SPAN_LIMIT) {
     const split = splitLongSpan(run.text, core.length);
 
     if (split) {
-      return split.map((part) => runToMarkdown({ ...run, text: part })).join('');
+      return split.map((part) => runToMarkdown({ ...run, text: part }, context)).join('');
     }
   }
 
@@ -1167,8 +1238,55 @@ function tableToMarkdown(block: Block, indent: string): string {
   return header ? [line(header), divider, ...body.map(line)].join('\n') : `${indent}`;
 }
 
-export function richToMarkdown(content: readonly TextRun[]): string {
-  return content.map(runToMarkdown).join('');
+/** The character a run's delimiters sit against on one side: a code run's is its backtick. */
+function innerEdge(run: TextRun | undefined, side: 'first' | 'last'): string {
+  if (!run) {
+    return '';
+  }
+
+  return run.marks?.includes('code')
+    ? '`'
+    : ((side === 'first' ? run.text[0] : run.text.at(-1)) ?? '');
+}
+
+export function richToMarkdown(
+  content: readonly TextRun[],
+  options: { splitLines?: boolean } = {},
+): string {
+  let previous = '';
+
+  return content
+    .map((run, index) => {
+      const context: RunContext = {
+        before: content[index - 1]?.text.at(-1) ?? '',
+        after: content[index + 1]?.text[0] ?? '',
+        splitLines: options.splitLines,
+      };
+      let written = runToMarkdown(run, context);
+
+      // `**(**` then `**`(`**` is `**(****`(`**`: the two closing and opening
+      // delimiters are one run of four to CommonMark, punctuation on both sides
+      // lets it open as well as close, and the rule of three then leaves the
+      // first span unclosed. Only measured between punctuation -- between
+      // letters (`**a*****b***`) the same run resolves as written.
+      if (
+        written.startsWith('*') &&
+        /(?:^|[^\\])(?:\\\\)*\*$/.test(previous) &&
+        PUNCTUATION.test(innerEdge(content[index - 1], 'last')) &&
+        PUNCTUATION.test(innerEdge(run, 'first'))
+      ) {
+        written = runToMarkdown(run, { ...context, tagged: true });
+      }
+
+      // `!` straight before a link makes it an image in every other reader. An
+      // even run of backslashes before it is escaped backslashes, not an escape.
+      const bang = content[index + 1]?.link ? /(\\*)!$/.exec(written) : null;
+
+      previous = bang && (bang[1] ?? '').length % 2 === 0 ? `${written.slice(0, -1)}\\!` : written;
+
+      return previous;
+    })
+    .join('');
 }
 
 /** Serializes the document to Markdown. Useful for copy/paste and export. */
@@ -1182,7 +1300,11 @@ export function toMarkdown(doc: NEditorDocument): string {
       const text =
         block.type === 'code'
           ? blockText(block)
-          : protectEdgeWhitespace(escapeContinuations(richToMarkdown(block.content)));
+          : protectEdgeWhitespace(
+              escapeContinuations(
+                richToMarkdown(block.content, { splitLines: block.type.startsWith('heading') }),
+              ),
+            );
       // An empty block is a bare marker. The space after it is what makes the
       // marker readable, not what makes it a marker, and trailing whitespace
       // does not survive the trip back — ours trims it, and so does every other

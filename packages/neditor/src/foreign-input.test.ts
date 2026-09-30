@@ -546,6 +546,12 @@ describe('typing a line and pasting it give the same result', () => {
     'a<strong>b </strong>c',
     '<em> i</em> and <s>x </s>',
     'a<code> c </code>b',
+    // Pre-existing: typing toggled a mark the text already had, so a doubled
+    // mark came out plain when typed and marked when pasted.
+    '**__a__**',
+    '<s><s>x</s></s>',
+    '~~<s>a</s>~~',
+    'one *two\nthree* four',
   ])('%s', async (line) => {
     const { parseInlineMarkdown } = await import('./index.ts');
     const editor = mount([block({})]);

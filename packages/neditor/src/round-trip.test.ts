@@ -382,7 +382,7 @@ describe('audit 2: what other readers see, and what this one must not misread', 
   // Checked against commonmark.js 0.31: `a**bold&#32;**b` is literal asterisks
   // there -- the closer is preceded by punctuation and followed by a letter, so
   // it is not right-flanking. Runs with edge whitespace are written as HTML
-  // tags, which every CommonMark reader renders as written.
+  // tags, which CommonMark renders as written.
   test.each([
     [
       [{ text: 'a' }, { text: 'bold ', marks: ['bold'] }, { text: 'b' }],
@@ -472,5 +472,116 @@ describe('audit 2: what other readers see, and what this one must not misread', 
     const began = performance.now();
     blocksFromMarkdown(line.repeat(10));
     expect(performance.now() - began).toBeLessThan(400);
+  });
+});
+
+describe('audit 3', () => {
+  const lines = Array.from({ length: 90 }, (_, index) => `src/components/Widget${index}.tsx`).join(
+    '\n',
+  );
+
+  // A regression from keeping multi-line runs whole: with no space in reach the
+  // writer could not split a long run, and the reader cannot close a span that
+  // long, so it came back as raw markup.
+  test.each(['code', 'bold'] as const)(
+    'a long %s run of lines with no spaces round-trips',
+    (mark) => {
+      const blocks = [b({ content: [{ text: lines, marks: [mark] }] })];
+      expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+    },
+  );
+
+  // An ATX heading is one line in every other reader, so a span written whole
+  // across a break there split its delimiters between heading and paragraph.
+  test('a heading writes each line of a formatted run as its own span', () => {
+    const blocks = [b({ type: 'heading1', content: t('Title\nsub', { marks: ['bold'] }) })];
+    expect(toMarkdown({ blocks })).toBe('# **Title**\\\n**sub**');
+    const back = throughMarkdown(blocks)[0]!;
+    expect(back.content.filter((run) => run.text !== '\n')).toEqual([
+      { text: 'Title', marks: ['bold'] },
+      { text: 'sub', marks: ['bold'] },
+    ]);
+  });
+
+  test('a named entity in the text is escaped, and comes back as typed', () => {
+    const blocks = [b({ content: t('a &amp; b &copy; c & d') })];
+    expect(toMarkdown({ blocks })).toBe('a \\&amp; b \\&copy; c & d');
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  // CommonMark: `**` after a letter and before punctuation cannot open.
+  test.each([
+    [[{ text: 'word' }, { text: '(x)', marks: ['bold'] }], 'word<strong>(x)</strong>'],
+    [[{ text: '(x)', marks: ['italic'] }, { text: 'word' }], '<em>(x)</em>word'],
+    [[{ text: 'a (' }, { text: 'x', marks: ['bold'] }, { text: ') b' }], 'a (**x**) b'],
+    [[{ text: 'a ' }, { text: '(x)', marks: ['bold'] }, { text: ' b' }], 'a **(x)** b'],
+    // The delimiter sits against what is written inside it, not the run's text:
+    // a code span's backtick is punctuation.
+    [
+      [{ text: 'x y', marks: ['bold', 'code'] }, { text: '1' }],
+      '<strong><code>x y</code></strong>1',
+    ],
+    [[{ text: 'a' }, { text: 'b', marks: ['italic', 'code'] }], 'a<em><code>b</code></em>'],
+    [[{ text: 'a ' }, { text: 'x y', marks: ['bold', 'code'] }, { text: ' b' }], 'a **`x y`** b'],
+    // Two runs' delimiters that touch are one delimiter run to CommonMark, and
+    // between punctuation it can both open and close, so the rule of three
+    // leaves it unmatched. The second run is written as HTML.
+    [
+      [
+        { text: '(', marks: ['bold'] },
+        { text: '(', marks: ['bold', 'code'] },
+      ],
+      '**(**<strong><code>(</code></strong>',
+    ],
+    [
+      [
+        { text: '<', marks: ['bold', 'italic'] },
+        { text: '_', marks: ['italic'] },
+      ],
+      '***\\<***<em>\\_</em>',
+    ],
+    // Between letters it cannot, and the delimiters are kept.
+    [
+      [
+        { text: 'a', marks: ['bold'] },
+        { text: 'b', marks: ['bold', 'italic'] },
+      ],
+      '**a*****b***',
+    ],
+  ] as const)('%j is written %s', (content, markdown) => {
+    const blocks = [b({ content: content as never })];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  test('a "!" right before a link is escaped, so it is not an image', () => {
+    const blocks = [b({ content: [{ text: 'x!' }, { text: 'l', link: 'https://a.test/' }] })];
+    expect(toMarkdown({ blocks })).toBe('x\\![l](https://a.test/)');
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  test('a literal backslash before that "!" does not stop it being escaped', () => {
+    const blocks = [b({ content: [{ text: 'x\\!' }, { text: 'l', link: 'https://a.test/' }] })];
+    expect(toMarkdown({ blocks })).toBe('x\\\\\\![l](https://a.test/)');
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  test('"===" on a continuation line is escaped, so it is not a heading underline', () => {
+    const blocks = [b({ content: t('a\n===') })];
+    expect(toMarkdown({ blocks })).toBe('a\\\n\\===');
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  test('leading spaces after a line break are kept, for other readers too', () => {
+    const blocks = [b({ content: t('a\n  b') })];
+    expect(toMarkdown({ blocks })).toBe('a\\\n&#32;&#32;b');
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  test('a long soft-broken paragraph parses in linear time', () => {
+    const markdown = Array.from({ length: 20000 }, (_, index) => `line ${index} text\\`).join('\n');
+    const began = performance.now();
+    blocksFromMarkdown(markdown);
+    expect(performance.now() - began).toBeLessThan(1000);
   });
 });

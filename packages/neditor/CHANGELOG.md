@@ -19,7 +19,18 @@ that changes what you store or what other applications receive is listed first.
   - A code run that needs escaping or holds a line break is written as
     `<code>…</code>`: other readers showed the backslashes of `` `snake\_case` ``.
   - A formatted run or link containing a line break is written as one span,
-    not one per line.
+    not one per line -- except in a heading, which every other reader ends at
+    the line, so there each line is its own span and a mark on the break itself
+    is not kept.
+  - A formatted run is also written as HTML where CommonMark's flanking rule
+    would leave `**` or `*` literal: against punctuation with a letter on the
+    far side (`word<strong>(x)</strong>`), around a code span next to a letter,
+    and where two runs' delimiters would touch between punctuation.
+  - Named entities in the text (`&amp;`, `&copy;`) are escaped, and so is a
+    `!` straight before a link, which other readers took for an image.
+  - Leading spaces after a soft break are written as `&#32;`, and a line after
+    one that opens with `=` is escaped, so it is not a setext heading
+    underline.
   - A block marker at the start of a line after a soft break is escaped
     (`\# not a heading`), and so is a `!` opening a paragraph with `![`.
 - **Markdown.** An image's caption is written after the image, following a hard
@@ -28,7 +39,9 @@ that changes what you store or what other applications receive is listed first.
 - **Markdown reader.** Numeric character references are decoded at the edges
   of a block's text, where this writer puts them, and nowhere else. `<strong>`,
   `<em>`, `<s>` and `<code>` are read as marks, as `<u>` already was -- when
-  typed, too.
+  typed, too. Inline formatting may span a soft line break, typed or pasted,
+  as in CommonMark. Numeric references are also decoded at the start of a line
+  after a soft break, where the writer now puts them.
 - **Clipboard HTML.** An image with no source is written as
   `<figure data-neditor-image>` instead of a broken `<img src="">`.
 - **Touch.** A finger dragged across blocks no longer selects them (the browser
@@ -57,7 +70,17 @@ that changes what you store or what other applications receive is listed first.
 - The slash menu stayed open after arrowing back over the `/`, and its combobox
   had no accessible name. With the popovers in another tree (`portalContainer`
   outside the editor's shadow root), its `aria-controls` and
-  `aria-activedescendant` pointed at nothing; they use element references there.
+  `aria-activedescendant` pointed at nothing; they use element references
+  there. Element references only cross into an ancestor tree -- an editor in a
+  shadow root with its menu on the page -- so a light-DOM editor whose
+  `portalContainer` is a shadow root, or one in another document, still has no
+  programmatic relation to its menu.
 - A text selection could be left inside a block while blocks were selected
   (WebKit drags), and a touch swipe that became a scroll could leave blocks
   selected.
+- Typing a delimiter pair around text that already carried that mark
+  (`**__a__**`) took the mark off again, where pasting the same characters
+  kept it: inline rules set a mark rather than toggling it.
+- A long formatted run of lines with no spaces (a list of paths) was written as
+  one span too long for the reader to close, and came back as raw markup; it is
+  split at a line break.

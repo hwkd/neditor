@@ -3886,7 +3886,10 @@ export class NEditor {
     if (match.link) {
       content = richSetLink(content, start, end, match.link);
     } else if (match.mark) {
-      content = richToggleMark(content, start, end, match.mark);
+      // Set, not toggled: a span typed around text that already has the mark
+      // keeps it, as it does when the same line is pasted -- toggling made
+      // `**__a__**` plain when typed and bold when pasted.
+      content = richSetMark(content, start, end, match.mark, true);
     }
 
     this.#commitResolved(target, content);
@@ -3991,6 +3994,12 @@ export class NEditor {
    * in a shadow root and the popovers on the page, these IDs pointed at nothing.
    * Across trees the element-reflection property is used where the browser has
    * it, and no ID is written that could not resolve.
+   *
+   * Reflection only reaches into an ancestor tree: an editor in a shadow root
+   * pointing at a menu on the page works, but a light-DOM editor whose
+   * `portalContainer` is a shadow root, or one in another document, gets no
+   * relation at all -- the browser drops the reference rather than expose an
+   * element the host's tree cannot see.
    */
   #reference(
     host: HTMLElement,

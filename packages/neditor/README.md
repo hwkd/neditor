@@ -250,7 +250,8 @@ These convert the moment you type the closing delimiter:
 The HTML spellings the Markdown writer uses for formatting that starts or ends
 with a space convert too: `<u>underline</u>`, `<strong>`, `<em>`, `<s>` and
 `<code>`. Inside a link destination only the link itself closes, so `_x_` in a
-URL is not italicised.
+URL is not italicised. A span may cross a line break made with `Shift`+`Enter`, as it may
+in CommonMark, but an emphasis delimiter (`*`, `_`, `~`) cannot sit against the break.
 
 ### Block Markdown
 
@@ -681,8 +682,9 @@ writes is what `blocksFromMarkdown` reads back:
 - Whitespace at the edge of a formatted run keeps its formatting. `**`, `*`
   and `~~` cannot open or close against whitespace, and CommonMark trims a
   code span's edge spaces, so such a run is written as HTML --
-  `a<strong>bold </strong>b`, `<em>`, `<s>`, `<code>`, `<u>` -- which every
-  reader renders as written and this one reads back. Link text holds the
+  `a<strong>bold </strong>b`, `<em>`, `<s>`, `<code>`, `<u>` -- which this
+  reader reads back and any reader that allows inline HTML renders as written
+  (one that escapes raw HTML, as markdown-it does by default, shows the tags). Link text holds the
   whitespace as it is.
 - A formatted run or a link that contains a line break is written whole
   (`**one\` + newline + `two**`) and read back whole, as CommonMark allows.
@@ -694,7 +696,7 @@ writes is what `blocksFromMarkdown` reads back:
   heading or a list there, and a paragraph opening with `![` has its `!`
   escaped so it is not read back as an image.
 - References are read back only where the writer puts them, at the edges of a
-  block's text. Anywhere else, including code spans and link destinations,
+  block's text and at the start of a line after a soft break. Anywhere else, including code spans and link destinations,
   `&#…;` stays the text it is, and a literal one at an edge is escaped, so it
   comes back as typed.
 
