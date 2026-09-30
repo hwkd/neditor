@@ -174,24 +174,30 @@ function linkOpener(window: string, angled: boolean): number {
   return -1;
 }
 
-/**
- * Whether the caret is inside a bare URL: `https://…` or `www.…` with no
- * whitespace since.
- *
- * GFM links such a URL as it stands, underscores included, and the writer
- * leaves a `_` between two letters or digits bare there -- escaped, the
- * backslash became part of the link. So no `_` inside one is a delimiter, the
- * same way nothing closes inside a link destination: typing
- * `https://a.test/_y_` used to italicise the `y` and delete the underscores.
- */
-function inBareUrl(window: string): boolean {
-  let start = window.length;
+/** A bare URL's start where GFM would link one: opening a token, or after `*`, `_`, `~` or `(`. */
+const BARE_URL_IN_TOKEN = new RegExp(`(?:^|[*_~(])(${BARE_URL_START.source})`);
 
-  while (start > 0 && !/\s/.test(window[start - 1] ?? '')) {
-    start -= 1;
+/**
+ * Whether a span whose opening delimiter is at `opener` opens inside a bare
+ * URL: `https://…` or `www.…`, up to the caret with no whitespace since.
+ *
+ * Typing `https://a.test/_y_` used to italicise the `y` and delete the
+ * underscores, and `www.a.test/__init__` lost four. A span that opens *before*
+ * the URL is still a span -- `_see https://a.test_` is italic in CommonMark and
+ * in GFM, which leaves a trailing `_` out of the link -- so it is the opener's
+ * position that decides, not the mere presence of a URL. Refusing every `_` in
+ * a token with a URL in it was tried first, and took those away.
+ */
+function opensInBareUrl(window: string, opener: number): boolean {
+  let token = window.length;
+
+  while (token > 0 && !/\s/.test(window[token - 1] ?? '')) {
+    token -= 1;
   }
 
-  return BARE_URL_START.test(window.slice(start));
+  const url = opener < token ? null : BARE_URL_IN_TOKEN.exec(window.slice(token));
+
+  return url !== null && opener >= token + url.index + url[0].length - (url[1] ?? '').length;
 }
 
 export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null {
@@ -219,10 +225,6 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
     // it anyway is not free: the link patterns walk the window from every `[`
     // in it, which is most of the cost of parsing a line of stray brackets.
     if (rule.closer !== closer) {
-      continue;
-    }
-
-    if (closer === '_' && inBareUrl(window)) {
       continue;
     }
 
@@ -258,6 +260,12 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
     const inner = match?.[1];
 
     if (!match || whole === undefined || inner === undefined || inner.length === 0) {
+      continue;
+    }
+
+    // Asked only once a `_` rule has matched: the answer needs a walk back to
+    // the last whitespace, and a line of underscores would pay it per character.
+    if (closer === '_' && opensInBareUrl(window, searchedFrom + match.index)) {
       continue;
     }
 

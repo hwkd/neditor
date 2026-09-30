@@ -974,10 +974,12 @@ const ASCII_WORD = /[A-Za-z0-9]/;
  *
  * GFM links a bare URL and takes a backslash as part of it, so `x\\_y` there
  * linked to `x%5C_y` and showed the backslash. A `_` between two letters or
- * digits cannot open or close emphasis in CommonMark, and the reader takes no
- * `_` inside a bare URL for a delimiter (`inBareUrl`), so that one is written
- * bare. Any other `_`, and `*` and `~`, are still escaped: CommonMark would
- * read them as emphasis, and that is the worse failure.
+ * digits cannot open or close emphasis in CommonMark, and cannot open a span in
+ * this reader either (its `_` rules refuse an opener after a word character),
+ * so that one is written bare: every `_` that could open is still escaped, and
+ * a closer with nothing to close is text. Any other `_`, and `*` and `~`, are
+ * escaped as before: CommonMark would read them as emphasis, and that is the
+ * worse failure.
  */
 function bareUrls(text: string): Array<readonly [number, number]> {
   if (!BARE_URL_START.test(text)) {
@@ -1057,12 +1059,15 @@ function protectEdgeWhitespace(markdown: string): string {
     }
   }
 
-  // Spaces inside a tag are safe where they are; only a break needs moving.
   if (start === end || (end < led.length && !broken)) {
     return led;
   }
 
-  return led.slice(0, start) + encode(led.slice(start, end)) + led.slice(end);
+  // Inside a tag only a break needs moving, so the spaces before the first one
+  // stay as they are: as `&#32;` against a URL they are taken into GFM's link.
+  const from = end < led.length ? led.indexOf('\\\n', start) : start;
+
+  return led.slice(0, from) + encode(led.slice(from, end)) + led.slice(end);
 }
 
 /** Stops a paragraph that begins with `#`, `-` or `1.` becoming that block. */

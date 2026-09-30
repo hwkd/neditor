@@ -807,12 +807,6 @@ describe('audit 5', () => {
     expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
   });
 
-  test('an underscore inside a bare URL never closes a span opened before it', () => {
-    expect(blocksFromMarkdown('_a https://a.test/x_y')[0]?.content).toEqual(
-      t('_a https://a.test/x_y'),
-    );
-  });
-
   // A closing tag alone on the last line of a list item or a quote is an HTML
   // block to micromark, which ends the item there. The break is written as a
   // reference inside the tag, as one at the very edge of a block already is.
@@ -824,6 +818,14 @@ describe('audit 5', () => {
       expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
     },
   );
+
+  // Only the break needs moving: a space before it is safe inside the tag, and
+  // written as `&#32;` against a URL it is taken into the link by GFM.
+  test('spaces before that break stay as they are', () => {
+    const blocks = [b({ content: [{ text: 'see https://a.test/ \n', marks: ['bold'] }] })];
+    expect(toMarkdown({ blocks })).toBe('<strong>see https://a.test/ &#10;</strong>');
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
 
   test.each([
     ['spaces', ' '],

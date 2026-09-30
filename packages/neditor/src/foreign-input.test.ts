@@ -565,4 +565,33 @@ describe('typing a line and pasting it give the same result', () => {
 
     expect(editor.getDocument().blocks[0]!.content).toEqual(parseInlineMarkdown(line));
   });
+
+  // Parity alone cannot pin this: typing and pasting share `matchInlineRule`, so
+  // they agree with the rule or without it. These say what both must produce.
+  test.each([
+    // Opened inside the URL: not a span. Typing a URL used to eat these.
+    ['https://a.test/_y_', [{ text: 'https://a.test/_y_' }]],
+    ['www.a.test/__init__', [{ text: 'www.a.test/__init__' }]],
+    ['(https://a.test/_y_)', [{ text: '(https://a.test/_y_)' }]],
+    // Opened before it: a span, as in CommonMark and GFM, which leaves a
+    // trailing `_` out of the link.
+    ['_see https://example.com_', [{ text: 'see https://example.com', marks: ['italic'] }]],
+    ['__see www.example.com__', [{ text: 'see www.example.com', marks: ['bold'] }]],
+    ['_https://a.test/x_', [{ text: 'https://a.test/x', marks: ['italic'] }]],
+    [
+      '(_https://a.test/x_)',
+      [{ text: '(' }, { text: 'https://a.test/x', marks: ['italic'] }, { text: ')' }],
+    ],
+    // `www.` in the middle of a word opens no URL.
+    ['_awww.cute_', [{ text: 'awww.cute', marks: ['italic'] }]],
+    ['awww._x_', [{ text: 'awww.' }, { text: 'x', marks: ['italic'] }]],
+  ])('a `_` span and a bare URL: %s', async (line, content) => {
+    const { parseInlineMarkdown } = await import('./index.ts');
+    const editor = mount([block({})]);
+
+    typeCharByChar(hosts(editor)[0]!, line);
+
+    expect(editor.getDocument().blocks[0]!.content).toEqual(content);
+    expect(parseInlineMarkdown(line)).toEqual(content);
+  });
 });

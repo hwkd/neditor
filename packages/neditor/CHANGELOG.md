@@ -36,7 +36,7 @@ that changes what you store or what other applications receive is listed first.
     still taken into the link by GFM readers; CommonMark readers are
     unaffected.
   - A formatted run written as HTML that ends a block with a line break keeps
-    the break inside the tag as `&#10;`; the closing tag alone on a line ended
+    the break (and anything after it) inside the tag as `&#10;`; the closing tag alone on a line ended
     a list item early in micromark.
   - In a heading, a trailing run of `#` is escaped (`# a \#`): other readers
     drop it as a closing sequence. In a list item or a quote, text that opens
@@ -103,5 +103,6 @@ that changes what you store or what other applications receive is listed first.
 - Parsing a long soft-broken paragraph took time quadratic in its length, and
   so did writing a long run of spaces inside a block.
 - Typing or pasting a bare URL with `_x_` in it (`https://a.test/_y_`)
-  italicised the `y` and deleted the underscores. No `_` inside a bare URL
-  (`https://…` or `www.…`, up to the next whitespace) is a delimiter now.
+  italicised the `y` and deleted the underscores. A `_` span that opens inside
+  a bare URL (`https://…` or `www.…`, up to the next whitespace) is no longer
+  one; a span that opens before the URL (`_see https://a.test_`) still is.
