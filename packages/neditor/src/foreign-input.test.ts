@@ -593,10 +593,27 @@ describe('typing a line and pasting it give the same result', () => {
     // `www.` in the middle of a word opens no URL.
     ['_awww.cute_', [{ text: 'awww.cute', marks: ['italic'] }]],
     ['awww._x_', [{ text: 'awww.' }, { text: 'x', marks: ['italic'] }]],
-    // A protocol after a letter is no URL; after a digit it is. As micromark reads them.
-    ['xhttps://a.test/_y_', [{ text: 'xhttps://a.test/' }, { text: 'y', marks: ['italic'] }]],
-    ['XHTTPS://a.test/_y_', [{ text: 'XHTTPS://a.test/' }, { text: 'y', marks: ['italic'] }]],
+    // A protocol counts whatever precedes it. After a letter no reader links
+    // it, but a finished span leaves one there: `**see**https://…` is
+    // `seehttps://…` by the time the `_` closes, and GFM links that URL.
+    ['xhttps://a.test/_y_', [{ text: 'xhttps://a.test/_y_' }]],
     ['1http://a.test/_y_', [{ text: '1http://a.test/_y_' }]],
+    [
+      '**see**https://a.test/_y_',
+      [{ text: 'see', marks: ['bold'] }, { text: 'https://a.test/_y_' }],
+    ],
+    // The span opens in the URL and closes after whitespace: it is the token
+    // the opener is in that decides, not the one the caret is in.
+    [
+      'GET http://localhost:9200/_cat/indices and http://localhost:9200/my_index/_search',
+      [
+        {
+          text: 'GET http://localhost:9200/_cat/indices and http://localhost:9200/my_index/_search',
+        },
+      ],
+    ],
+    ['https://a.test/_x and y_', [{ text: 'https://a.test/_x and y_' }]],
+    ['https://a.test/__x and y__', [{ text: 'https://a.test/__x and y__' }]],
     // Where the line is uncertain it falls on the side of the URL. A host may
     // begin with `_` (`_dmarc.example.com`), and at the closing `_` nothing
     // says whether more host follows; a link labelled with its own URL is the

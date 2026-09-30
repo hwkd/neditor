@@ -1135,13 +1135,18 @@ const DESTINATION_UNSAFE = /[()<>\s]/;
  * an escaped character is opaque, so it could never read the URL back out.
  */
 function destinationToMarkdown(url: string): string {
+  // A backslash is doubled in either form: bare, the reader (and CommonMark)
+  // takes it and an escapable character after it for an escape, so
+  // `?q=a\\_b` came back as `?q=a_b`, and one ending the URL escaped the `)`.
+  const escaped = url.replaceAll('\\', '\\\\');
+
   if (!DESTINATION_UNSAFE.test(url)) {
-    return url;
+    return escaped;
   }
 
   // `<` and `>` would close the bracketed form. A URL that reached us through
   // `sanitizeUrl` has them percent-encoded already, so this is a no-op there.
-  return `<${url.replace(/[<>\s]/g, (char) => encodeURIComponent(char))}>`;
+  return `<${escaped.replace(/[<>\s]/g, (char) => encodeURIComponent(char))}>`;
 }
 
 /**

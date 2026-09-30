@@ -182,48 +182,50 @@ function linkOpener(window: string, angled: boolean): number {
 }
 
 /**
- * Where a bare URL starts inside a token.
+ * A bare URL's start in the part of a token that precedes a span's opener.
  *
- * A protocol after anything but a letter, so a quoted or punctuated URL counts
- * (`"https://…"`, `see:https://…`) and `xhttps://` does not; `www.` opening the
- * token or after `*`, `_`, `~`, `(` or `[`, so `awww.cute` is a word. Either
- * case.
+ * A protocol anywhere in it; `www.` opening the token or after `*`, `_`, `~`,
+ * `(` or `[`, so `awww.cute` is a word. Either case.
  *
- * This is not GFM's autolink grammar, and two attempts to make it so each took
+ * This is not GFM's autolink grammar, and each attempt to make it so took
  * underscores out of real URLs: refusing a `_` straight after the scheme broke
  * `https://_dmarc.example.com/a_b_c` (a host may begin with one, and at the
- * closing `_` nothing says whether more host follows), and refusing a URL after
- * `[` broke a link labelled with its own URL, `[https://a.test/_private_dir](…)`.
- * So where it is uncertain the line falls on the side of the URL: text that
- * other readers would have emphasised stays literal with its underscores
- * (`http://_a_`, `[https://a.test/__init__](…)`), which loses nothing, rather
- * than a URL losing characters, which does.
+ * closing `_` nothing says whether more host follows); refusing a URL after
+ * `[` broke a link labelled with its own URL, `[https://a.test/_private_dir](…)`;
+ * and refusing a protocol after a letter broke `**see**https://a.test/_y_`,
+ * which is `seehttps://…` by the time its `_` closes because the finished
+ * span's delimiters are gone. So where it is uncertain the line falls on the
+ * side of the URL: text that other readers would have emphasised stays literal
+ * with its underscores (`http://_a_`, `xhttps://a.test/_y_`), which loses
+ * nothing, rather than a URL losing characters, which does.
  */
-const BARE_URL_IN_TOKEN = /(?:^|[^a-z])(https?:\/\/)|(?:^|[*_~([])(www\.)/i;
+const BARE_URL_IN_TOKEN = /https?:\/\/|(?:^|[*_~([])www\./i;
 
 /**
  * Whether a span whose opening delimiter is at `opener` opens inside a bare
- * URL: `https://…` or `www.…`, up to the caret with no whitespace since.
+ * URL: one that starts earlier in the same whitespace-delimited token.
  *
  * Typing `https://a.test/_y_` used to italicise the `y` and delete the
  * underscores, and `www.a.test/__init__` lost four. A span that opens *before*
  * the URL is still a span -- `_see https://a.test_` is italic in CommonMark and
- * in GFM, which leaves a trailing `_` out of the link -- so it is the opener's
- * position that decides, not the mere presence of a URL. Refusing every `_` in
- * a token with a URL in it was tried first, and took those away.
+ * in GFM, which leaves a trailing `_` out of the link -- so it is where the
+ * opener sits that decides. It is the opener's token that is looked at, not the
+ * caret's: a span may close words later, and
+ * `http://localhost:9200/_cat/indices and …/my_index` lost an underscore from
+ * each URL while only the second token was being asked about.
+ *
+ * It sees what `matchInlineRule` is given: a URL whose start is more than
+ * `INLINE_SPAN_LIMIT` behind the caret, or that the Markdown reader has already
+ * retired from the text it keeps, is not seen.
  */
 function opensInBareUrl(window: string, opener: number): boolean {
-  let token = window.length;
+  let token = opener;
 
   while (token > 0 && !/\s/.test(window[token - 1] ?? '')) {
     token -= 1;
   }
 
-  const url = opener < token ? null : BARE_URL_IN_TOKEN.exec(window.slice(token));
-
-  return (
-    url !== null && opener >= token + url.index + url[0].length - (url[1] ?? url[2] ?? '').length
-  );
+  return BARE_URL_IN_TOKEN.test(window.slice(token, opener));
 }
 
 export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null {

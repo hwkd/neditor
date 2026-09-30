@@ -2,7 +2,7 @@ import type { Block, BlockType } from '../model/document.ts';
 import { DEFAULT_CALLOUT_ICON, createBlock } from '../model/document.ts';
 import type { TableRows } from '../model/table.ts';
 import { normalizeTableRows } from '../model/table.ts';
-import { sanitizeImageUrl } from '../util/url.ts';
+import { sanitizeImageUrl, sanitizeUrl } from '../util/url.ts';
 import type { RichText } from '../model/rich-text.ts';
 import {
   richConcat,
@@ -10,6 +10,7 @@ import {
   richFromPlainText,
   richSetLink,
   richSetMark,
+  richToPlainText,
 } from '../model/rich-text.ts';
 import { INLINE_SPAN_LIMIT, matchInlineRule } from './inline-rules.ts';
 
@@ -654,6 +655,25 @@ export function parseInlineMarkdown(text: string): RichText {
       continue;
     }
 
+    // The rule read the destination off the projection, where an escaped
+    // character is a placeholder: `[x](https://a.test/a\\_b)` linked to
+    // `a%00b`. The content holds what the escape stands for, which is how
+    // CommonMark reads a destination, so the href is taken from there.
+    let link = match.link;
+
+    if (link !== undefined && matchable.slice(innerEnd, match.end).includes(ESCAPED)) {
+      const closing = (richToPlainText(content) + pending).slice(-match.closeLength);
+      const href = sanitizeUrl(
+        closing.startsWith('](<') ? closing.slice(3, -2) : closing.slice(2, -1),
+      );
+
+      if (!href) {
+        continue;
+      }
+
+      link = href;
+    }
+
     flush();
 
     // The span may reach back over runs that were parked; they have to be in
@@ -672,8 +692,8 @@ export function parseInlineMarkdown(text: string): RichText {
     const start = match.start - base;
     const end = start + (innerEnd - innerStart);
 
-    if (match.link) {
-      content = richSetLink(content, start, end, match.link);
+    if (link !== undefined) {
+      content = richSetLink(content, start, end, link);
     } else if (match.mark) {
       content = richSetMark(content, start, end, match.mark, true);
     }
@@ -811,7 +831,7 @@ export function blocksFromMarkdown(text: string): Block[] {
       // An empty destination is an image block with no picture yet -- the
       // writer's own spelling of one. Anything else has to be a usable source.
       const destination = image[2] ?? image[3] ?? '';
-      const src = destination === '' ? '' : sanitizeImageUrl(destination);
+      const src = destination === '' ? '' : sanitizeImageUrl(stripEscapes(destination));
 
       if (src !== null) {
         const caption = breakAt === -1 ? '' : line.slice(breakAt + 1);

@@ -106,9 +106,15 @@ that changes what you store or what other applications receive is listed first.
   so did writing a long run of spaces inside a block.
 - Typing or pasting a bare URL with `_x_` in it (`https://a.test/_y_`)
   italicised the `y` and deleted the underscores. A `_` span that opens inside
-  a bare URL (`http://` or `https://` not preceded by a letter, or `www.`
-  opening a word, up to the next whitespace) is no longer one; a span that
+  a bare URL (`http://` or `https://` anywhere in a word, or `www.` at its
+  start or after `*`, `_`, `~`, `(` or `[`; up to the next whitespace) is no
+  longer one, wherever it closes; a span that
   opens before the URL (`_see https://a.test_`) still is. The test is broader
   than GFM's autolink rule on purpose, so `http://_a_` and a link label that
   is a URL (`[https://a.test/__init__](…)`) keep their underscores where other
   readers emphasise.
+- A pasted link whose destination held a backslash escape
+  (`[wiki](https://en.wikipedia.org/wiki/Foo_\(bar\))`) linked to a URL with a
+  NUL where the escaped character was; an image's destination kept the
+  backslash. Both are read as CommonMark reads them. A link or image URL that
+  itself holds a backslash is written with it doubled.

@@ -839,3 +839,60 @@ describe('audit 5', () => {
     ).toBeLessThan(LINEAR);
   });
 });
+
+describe('audit 10', () => {
+  // The punctuation clause of the touching rule on its own: the two cases in
+  // audit 3's table are also caught by the rule of three added later, and
+  // passed with this clause removed. This one has junctions of four and four.
+  test('touching delimiters between punctuation, where the rule of three says nothing', () => {
+    const blocks = [
+      b({
+        content: [
+          { text: 'a"_)', marks: ['bold'] },
+          { text: '!', marks: ['bold', 'code'] },
+          { text: '*a*(', marks: ['bold'] },
+        ],
+      }),
+    ];
+    expect(toMarkdown({ blocks })).toBe('**a"\\_)**<strong><code>!</code></strong>**\\*a\\*(**');
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  // The href was read off the projection the rules match against, where an
+  // escaped character is a placeholder: it came back as a NUL in the URL.
+  test.each([
+    ['[x](https://a.test/a\\_b)', 'https://a.test/a_b'],
+    [
+      '[wiki](https://en.wikipedia.org/wiki/Foo_\\(bar\\))',
+      'https://en.wikipedia.org/wiki/Foo_(bar)',
+    ],
+    ['[x](https://a.test/?a=1\\&b=2)', 'https://a.test/?a=1&b=2'],
+    ['[x](<https://a.test/a\\_b>)', 'https://a.test/a_b'],
+  ])('%s links to %s', (markdown, href) => {
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual([
+      { text: markdown.slice(1, markdown.indexOf(']')), link: href },
+    ]);
+  });
+
+  test('an image destination is unescaped the same way', () => {
+    expect(blocksFromMarkdown('![alt](https://a.test/a\\_b.png)')[0]?.src).toBe(
+      'https://a.test/a_b.png',
+    );
+  });
+
+  // A backslash in a destination is doubled, or the reader takes it and the
+  // character after it for an escape.
+  test.each(['https://a.test/?q=a\\_b', 'https://a.test/?q=a\\'])(
+    'a link to %s round-trips',
+    (href) => {
+      const blocks = [b({ content: [{ text: 'x', link: href }] })];
+      expect(toMarkdown({ blocks })).toBe(`[x](${href.replaceAll('\\', '\\\\')})`);
+      expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+    },
+  );
+
+  test('an image whose source holds a backslash round-trips', () => {
+    const blocks = [b({ type: 'image', src: 'https://a.test/?q=a\\_b', alt: 'a' })];
+    expect(throughMarkdown(blocks)[0]?.src).toBe('https://a.test/?q=a\\_b');
+  });
+});
