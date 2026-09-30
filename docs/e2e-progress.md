@@ -436,3 +436,19 @@ items.
 | U2  | Test gap (16d39ac)       | The triangle escape's anchor was unpinned: unanchored, `press ▾ now` in a bullet is escaped and comes back with the backslash.                                                                                                                         | Asserted.                                                                                                             |
 | U3  | Stale comments (16d39ac) | Two test comments still described the prefix T3 removed, one of them saying the opposite of the code; the CHANGELOG still credited the `!` escape to the removed rule.                                                                                 | Reworded.                                                                                                             |
 | U4  | Dead code, T3 incomplete | The `(\s*)` prefix of `LEADING_MARKER` and `LEADING_ORDINAL` was dead for the same reason: every caller's text has been through `protectEdgeWhitespace`.                                                                                               | Anchored at the start. `toMarkdown` is byte-identical to the commit before on 180,000 whitespace-heavy random blocks. |
+
+## Audit 22 (2026-09-30)
+
+An independent review of 75a55f8. **No functional defect found.** 186,000 single blocks and 60,000
+nested documents built from structural line shapes (pipe and delimiter rows, setext and thematic lines,
+fences, HTML block starts, reference definitions, indented code) produced no unexpected table, heading,
+rule, list, quote or code block in commonmark.js, micromark or micromark+GFM; the prefix removal is
+byte-identical on 900,000 documents.
+
+| #   | Kind                | What                                                                                                                                       | Resolution                                                                                  |
+| --- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| V1  | Test gaps (75a55f8) | Three mutants of the `:-` escape survived: requiring two hyphens, dropping the `g` flag, and escaping any caption that opens with a colon. | `:-` and `:-:` after a break, two such lines in one block, and a caption `:b` are asserted. |
+| V2  | Docs (75a55f8)      | The CHANGELOG's caption entry named `=` but not `:-`.                                                                                      | Added.                                                                                      |
+
+Recorded, not from this branch: a line break inside a table cell is written as `\` + newline inside the
+row, which splits the row in GFM readers (identical on `main`).

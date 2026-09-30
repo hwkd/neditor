@@ -59,8 +59,9 @@ that changes what you store or what other applications receive is listed first.
     (`\# not a heading`). So are `=` and `:-` there: under a line, `===` is a
     heading underline and `:---` a GFM table's delimiter row.
 - **Markdown.** An image's caption is written after the image, following a hard
-  break, instead of being dropped. A caption that opens with `=` is escaped
-  (under the image line, `===` made the image a heading elsewhere). A backtick
+  break, instead of being dropped. A caption that opens with `=` or `:-` is
+  escaped (under the image line, `===` made the image a heading elsewhere and
+  `:---` a table header in GFM readers). A backtick
   or `<` in its alt text (or in a callout's icon) is escaped, so other readers cannot pair it with one in the
   caption, and a line break there is written as a space: written raw it split
   the image line and the image came back as two paragraphs. An image with no source yet is written

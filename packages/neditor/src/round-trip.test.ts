@@ -1358,10 +1358,22 @@ describe('audit 21', () => {
     expect(throughMarkdown(blocks)[0]?.content).toEqual(t(caption));
   });
 
-  test('nor is the line after a soft break', () => {
-    const blocks = [b({ content: t('a\n:---') })];
-    expect(toMarkdown({ blocks })).toBe('a\\\n:\\---');
-    expect(throughMarkdown(blocks)[0]?.content).toEqual(t('a\n:---'));
+  test.each([':---', ':-', ':-:'])('nor is %j on the line after a soft break', (line) => {
+    const blocks = [b({ content: t(`a\n${line}`) })];
+    expect(toMarkdown({ blocks })).toBe(`a\\\n:\\${line.slice(1)}`);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(t(`a\n${line}`));
+  });
+
+  test('on every such line, not only the first', () => {
+    const blocks = [b({ content: t('a\n:-\n:---') })];
+    expect(toMarkdown({ blocks })).toBe('a\\\n:\\-\\\n:\\---');
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(t('a\n:-\n:---'));
+  });
+
+  test('a caption whose colon is not followed by a hyphen is left alone', () => {
+    const blocks = [b({ type: 'image', src: '/x.png', alt: 'cat', content: t(':b') })];
+    expect(toMarkdown({ blocks })).toBe('![cat](/x.png)\\\n:b');
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(t(':b'));
   });
 
   test('a colon that is not followed by a hyphen is left alone', () => {
