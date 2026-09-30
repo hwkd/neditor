@@ -245,3 +245,24 @@ An independent review of 1e66868: nothing high or medium, five low.
 | H3  | Stale comment            | `BARE_URL_START` was described as shared with the reader, which no longer uses it.                                                                                                  | It says what it is: the writer's, and deliberately looser.                                                                              |
 | H4  | Gap from fa68993         | A scheme with no host (`http://_a_`, `www._y_`) suppressed emphasis; GFM links none of these and italicises.                                                                        | A `_` straight after the scheme is no URL. GFM's full host rule is not reproduced: `https://a.b_c.d/_y_` stays literal (noted in code). |
 | H5  | Known, not fixed         | The rules see text whose delimiters are already stripped, so `` `https://a.test/`_y_ `` reads as a bare URL followed by `_y_` and stays literal, where other readers italicise.     | Recorded. Telling a finished code span or link from bare text needs run information `matchInlineRule` is not given -- a design change.  |
+
+## Audit 9 (2026-09-30)
+
+An independent review of 21c7071 found that both of Audit 8's behaviour changes (H1, H4) took
+underscores out of real URLs, and that the documentation no longer matched the rule. Four rounds had
+each moved the line for "what is a bare URL" towards GFM's autolink grammar and each had broken a
+case the round before had right -- the retry pattern AGENTS.md warns about. The rule is now settled
+on one principle instead of on that grammar:
+
+> Inside text that looks like a URL, a `_` span that opens there is not a span. Where it is uncertain
+> whether GFM would link the text, it is treated as a URL: underscores kept where another reader would
+> have emphasised lose nothing, and underscores taken out of a URL do.
+
+| #   | Kind                     | What                                                                                                                                      | Resolution                                                                                                             |
+| --- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| I1  | **Regression (21c7071)** | H4's "no `_` straight after the scheme" italicised inside `https://_dmarc.example.com/a_b_c`: a host may begin with `_`.                  | H4 reverted. `http://_a_` and `www._y_` stay literal, which is the accepted side of the principle.                     |
+| I2  | **Regression (21c7071)** | H1's "not after `[`" exposed a link labelled with its own URL: `[https://a.test/_private_dir](…)` lost its underscores.                   | H1 reverted, and `www.` after `[` is a URL too, so both spellings agree. `[https://a.test/__init__](…)` stays literal. |
+| I3  | Overclaim                | H1's test comment and row said a span in a label is a span however the URL is spelled; that held only for a URL opening the label.        | Moot with H1 reverted; the tests now state the principle.                                                              |
+| I4  | Inaccurate docs          | A comment said an intraword `_` "is no delimiter to any reader" (it cannot _open_); README and CHANGELOG stated the rule unconditionally. | Corrected; README and CHANGELOG define what counts as a bare URL and say it is deliberately broader than GFM's.        |
+
+H1 and H4 above are superseded by I2 and I1.

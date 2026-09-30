@@ -250,8 +250,11 @@ These convert the moment you type the closing delimiter:
 The HTML spellings the Markdown writer uses for formatting that starts or ends
 with a space convert too: `<u>underline</u>`, `<strong>`, `<em>`, `<s>` and
 `<code>`. Inside a link destination only the link itself closes, so `_x_` in a
-URL is not italicised, and neither is a `_x_` that opens inside a bare URL (`https://…` or
-`www.…`, up to the next whitespace); `_see https://a.test_`, which opens before it, still is. A span may cross a line break made with `Shift`+`Enter`, as it may
+URL is not italicised, and neither is a `_x_` that opens inside a bare URL, up to the next
+whitespace; `_see https://a.test_`, which opens before it, still is. A bare URL here is
+`http://` or `https://` not preceded by a letter, or `www.` opening a word, in either case --
+broader than what GFM links, on purpose: underscores kept where another reader would have
+emphasised cost nothing, and underscores taken out of a URL do. A span may cross a line break made with `Shift`+`Enter`, as it may
 in CommonMark, but an emphasis delimiter (`*`, `_`, `~`) cannot sit against the break.
 
 ### Block Markdown

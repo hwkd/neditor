@@ -99,9 +99,9 @@ export const INLINE_SPAN_LIMIT = 2000;
  * What can open a bare URL, for the writer (`bareUrls` in `model/document.ts`).
  *
  * Deliberately looser than the reader's `BARE_URL_IN_TOKEN`, which also asks
- * what comes before and after: the writer only uses it to leave a `_` between
- * two letters or digits bare, and that one is no delimiter to any reader
- * whether or not a URL is there.
+ * what comes before: the writer only uses it to leave a `_` between two letters
+ * or digits bare, and that one cannot open a span in any reader whether or not
+ * a URL is there.
  */
 export const BARE_URL_START = /https?:\/\/|www\./i;
 
@@ -182,20 +182,24 @@ function linkOpener(window: string, angled: boolean): number {
 }
 
 /**
- * A bare URL's start inside a token, where a GFM reader would link one.
+ * Where a bare URL starts inside a token.
  *
- * `www.` only opening the token or after `*`, `_`, `~` or `(` -- `awww.cute` is
- * a word. A protocol is linked after any character that is not a letter, which
- * is what lets a quoted or punctuated URL through (`"https://…"`, `see:https://…`):
- * holding it to the `www.` rule italicised those again. Either case, as GFM reads them.
+ * A protocol after anything but a letter, so a quoted or punctuated URL counts
+ * (`"https://…"`, `see:https://…`) and `xhttps://` does not; `www.` opening the
+ * token or after `*`, `_`, `~`, `(` or `[`, so `awww.cute` is a word. Either
+ * case.
  *
- * Not after `[`, though: a link's label is not autolinked, so a span in
- * `[https://a.test/__init__](…)` is a span to every reader. And not with a `_`
- * straight after it: `http://_a_` has no host, links nowhere, and is italic.
- * (GFM's full rule -- no `_` in the last two segments of the host -- is not
- * reproduced; `https://a.b_c.d/_y_` stays literal here.)
+ * This is not GFM's autolink grammar, and two attempts to make it so each took
+ * underscores out of real URLs: refusing a `_` straight after the scheme broke
+ * `https://_dmarc.example.com/a_b_c` (a host may begin with one, and at the
+ * closing `_` nothing says whether more host follows), and refusing a URL after
+ * `[` broke a link labelled with its own URL, `[https://a.test/_private_dir](…)`.
+ * So where it is uncertain the line falls on the side of the URL: text that
+ * other readers would have emphasised stays literal with its underscores
+ * (`http://_a_`, `[https://a.test/__init__](…)`), which loses nothing, rather
+ * than a URL losing characters, which does.
  */
-const BARE_URL_IN_TOKEN = /(?:^|[^a-z[])(https?:\/\/)(?!_)|(?:^|[*_~(])(www\.)(?!_)/i;
+const BARE_URL_IN_TOKEN = /(?:^|[^a-z])(https?:\/\/)|(?:^|[*_~([])(www\.)/i;
 
 /**
  * Whether a span whose opening delimiter is at `opener` opens inside a bare

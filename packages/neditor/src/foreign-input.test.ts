@@ -597,27 +597,25 @@ describe('typing a line and pasting it give the same result', () => {
     ['xhttps://a.test/_y_', [{ text: 'xhttps://a.test/' }, { text: 'y', marks: ['italic'] }]],
     ['XHTTPS://a.test/_y_', [{ text: 'XHTTPS://a.test/' }, { text: 'y', marks: ['italic'] }]],
     ['1http://a.test/_y_', [{ text: '1http://a.test/_y_' }]],
-    // Nor is a scheme with no host after it: GFM links none of these.
+    // Where the line is uncertain it falls on the side of the URL. A host may
+    // begin with `_` (`_dmarc.example.com`), and at the closing `_` nothing
+    // says whether more host follows; a link labelled with its own URL is the
+    // common label. Keeping underscores other readers would have taken for
+    // emphasis loses nothing; taking them out of a URL does.
+    ['https://_dmarc.example.com/a_b_c', [{ text: 'https://_dmarc.example.com/a_b_c' }]],
+    ['see http://_a_ now', [{ text: 'see http://_a_ now' }]],
+    ['www._a_.example.com', [{ text: 'www._a_.example.com' }]],
     [
-      'see http://_a_ now',
-      [{ text: 'see http://' }, { text: 'a', marks: ['italic'] }, { text: ' now' }],
+      '[https://a.test/_private_dir](https://a.test/)',
+      [{ text: 'https://a.test/_private_dir', link: 'https://a.test/' }],
     ],
-    ['www._y_', [{ text: 'www.' }, { text: 'y', marks: ['italic'] }]],
-    // A link's label is not autolinked, so a span in it is a span, whichever
-    // way the URL in it is spelled.
     [
       '[https://a.test/__init__](https://a.test/)',
-      [
-        { text: 'https://a.test/', link: 'https://a.test/' },
-        { text: 'init', marks: ['bold'], link: 'https://a.test/' },
-      ],
+      [{ text: 'https://a.test/__init__', link: 'https://a.test/' }],
     ],
     [
       '[www.a.test/__init__](https://a.test/)',
-      [
-        { text: 'www.a.test/', link: 'https://a.test/' },
-        { text: 'init', marks: ['bold'], link: 'https://a.test/' },
-      ],
+      [{ text: 'www.a.test/__init__', link: 'https://a.test/' }],
     ],
   ])('a `_` span and a bare URL: %s', async (line, content) => {
     const { parseInlineMarkdown } = await import('./index.ts');
