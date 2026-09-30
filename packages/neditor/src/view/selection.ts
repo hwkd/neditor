@@ -21,6 +21,83 @@ function selectionOf(element: HTMLElement): Selection | null {
   return root.getSelection?.() ?? element.ownerDocument.defaultView?.getSelection() ?? null;
 }
 
+/** What a caller needs to read from the selection, wherever it had to come from. */
+export interface SelectionReading {
+  /** Start to end, in document order. */
+  range: Range;
+  anchorNode: Node;
+  focusNode: Node;
+  isCollapsed: boolean;
+}
+
+type ComposedRanges = (...args: unknown[]) => readonly StaticRange[];
+
+/**
+ * The selection as seen from inside `node`'s tree.
+ *
+ * In a shadow root that has no `getSelection` of its own -- WebKit, and
+ * Firefox -- the document's selection is retargeted: WebKit reports the
+ * shadow host, not the caret inside it, so every offset read from it was 0 and
+ * a shadow-mounted editor could not tell where its caret was (the e2e finding
+ * F10: Enter split at the start, marks never applied, the toolbar never
+ * showed). `getComposedRanges` is the standard way to see through that
+ * boundary. It is tried in both of its shapes -- the dictionary form, and the
+ * variadic one Safari first shipped -- and only trusted when it actually
+ * reaches into this root.
+ */
+export function readSelection(node: Node): SelectionReading | null {
+  const root = node.getRootNode() as ShadowRoot & { getSelection?: () => Selection | null };
+  const doc = node.ownerDocument ?? (node as Document);
+  const selection = root.getSelection?.() ?? doc.defaultView?.getSelection() ?? null;
+
+  if (!selection || selection.rangeCount === 0) {
+    return null;
+  }
+
+  const isShadow = 'host' in root;
+
+  if (isShadow && !root.getSelection && !root.contains(selection.anchorNode)) {
+    const composed = (selection as Selection & { getComposedRanges?: ComposedRanges })
+      .getComposedRanges;
+
+    for (const args of [[{ shadowRoots: [root] }], [root]]) {
+      let ranges: readonly StaticRange[] | undefined;
+
+      try {
+        ranges = composed?.apply(selection, args);
+      } catch {
+        continue;
+      }
+
+      const first = ranges?.[0];
+
+      if (first && root.contains(first.startContainer) && root.contains(first.endContainer)) {
+        const range = doc.createRange();
+        range.setStart(first.startContainer, first.startOffset);
+        range.setEnd(first.endContainer, first.endOffset);
+
+        return {
+          range,
+          anchorNode: first.startContainer,
+          focusNode: first.endContainer,
+          isCollapsed: range.collapsed,
+        };
+      }
+    }
+  }
+
+  if (!selection.anchorNode || !selection.focusNode) {
+    return null;
+  }
+
+  return {
+    range: selection.getRangeAt(0),
+    anchorNode: selection.anchorNode,
+    focusNode: selection.focusNode,
+    isCollapsed: selection.isCollapsed,
+  };
+}
+
 /** Character offset of a DOM position within `element`. */
 function offsetOf(element: HTMLElement, container: Node, offset: number): number {
   const probe = element.ownerDocument.createRange();
@@ -59,13 +136,11 @@ function locate(element: HTMLElement, offset: number): { node: Node; offset: num
 
 /** The current selection as offsets into `element`, or null when it is elsewhere. */
 export function getSelectionRange(element: HTMLElement): OffsetRange | null {
-  const selection = selectionOf(element);
+  const range = readSelection(element)?.range;
 
-  if (!selection || selection.rangeCount === 0) {
+  if (!range) {
     return null;
   }
-
-  const range = selection.getRangeAt(0);
 
   if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) {
     return null;
@@ -92,6 +167,19 @@ export function setSelectionRange(element: HTMLElement, start: number, end: numb
 
   const from = locate(element, start);
   const to = locate(element, end);
+
+  // Not removeAllRanges + addRange: WebKit ignores a range added inside a
+  // shadow root, so every caret placed there went nowhere (the e2e finding
+  // F10). setBaseAndExtent is honoured across the boundary in every engine.
+  // Cleared first all the same: setting the range it already has fires no
+  // selectionchange, and the editor keys its toolbars off that event -- so
+  // re-selecting the text Escape had hidden the toolbar for left it hidden.
+  if (typeof selection.setBaseAndExtent === 'function') {
+    selection.removeAllRanges();
+    selection.setBaseAndExtent(from.node, from.offset, to.node, to.offset);
+    return;
+  }
+
   const range = element.ownerDocument.createRange();
 
   range.setStart(from.node, from.offset);

@@ -1,5 +1,4 @@
 import { expect, MOD, test } from '../helpers/test.ts';
-import { FIREFOX_BLOCK_CLIPBOARD } from '../helpers/clipboard.ts';
 
 test.describe('10 · pointer selection across blocks', () => {
   test('P1 dragging text into another block selects whole blocks; back to the start shrinks to text', async ({
@@ -32,12 +31,8 @@ test.describe('10 · pointer selection across blocks', () => {
   test('P2 a release below the last block selects through the last block', async ({
     editor,
     page,
-    browserName,
   }) => {
-    test.fail(
-      browserName === 'webkit',
-      'FINDING F7: WebKit leaves focus and a live text selection in the last block host after the release, while block selection is active',
-    );
+    // Was FINDING F7, fixed; see docs/e2e-progress.md.
     await editor.load({ doc: 'five' });
     const start = await editor.pointAt(editor.content('c'), 2);
     const last = (await editor.block('e').boundingBox())!;
@@ -52,13 +47,12 @@ test.describe('10 · pointer selection across blocks', () => {
   test('P3 read-only: pointer selection works and the blocks can be copied', async ({
     editor,
     page,
-    browserName,
   }) => {
     await editor.load({ doc: 'five', editable: false });
     await editor.dragText(['a', 1], ['b', 3]);
     expect(await editor.selected()).toEqual(['a', 'b']);
 
-    test.fail(browserName === 'firefox', FIREFOX_BLOCK_CLIPBOARD);
+    // Was FINDING F8, fixed; see docs/e2e-progress.md.
     await page.keyboard.press(`${MOD}+c`);
     await page.locator('#paste-target').click();
     await page.keyboard.press(`${MOD}+v`);

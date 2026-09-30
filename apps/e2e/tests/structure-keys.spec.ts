@@ -169,10 +169,7 @@ test.describe('03 · structural keys', () => {
     editor,
     page,
   }) => {
-    test.fail(
-      true,
-      'FINDING F2: moving a block up re-parents its focused host, and the offset is read after the DOM move lost it',
-    );
+    // Was FINDING F2, fixed; see docs/e2e-progress.md.
     await editor.load({ doc: 'paragraphs' });
     await editor.placeCaret('p2', 3);
     await page.keyboard.press(`${MOD}+Shift+ArrowDown`);

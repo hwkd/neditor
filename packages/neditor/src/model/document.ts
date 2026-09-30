@@ -935,7 +935,36 @@ const LEADING_ORDINAL = /^(\s*)(\d+)([.)])(?=\s|$)/;
  * the trailing count stays unambiguous.
  */
 function escapeMarkdownText(text: string): string {
-  return text.replace(INLINE_ESCAPE, (char) => `\\${char}`).replaceAll('\n', '\\\n');
+  return text
+    .replace(INLINE_ESCAPE, (char) => `\\${char}`)
+    .replace(NUMERIC_REFERENCE_AMPERSAND, '\\&')
+    .replaceAll('\n', '\\\n');
+}
+
+/**
+ * An `&` that would begin a numeric character reference.
+ *
+ * The reader decodes `&#32;` and `&#x20;`, which is how edge whitespace is
+ * written (see {@link protectEdgeWhitespace}); text that happens to contain one
+ * literally is escaped so it comes back as typed. Only this shape: every other
+ * `&` is written bare, as every other reader expects.
+ */
+const NUMERIC_REFERENCE_AMPERSAND = /&(?=#(?:\d+|[xX][0-9a-fA-F]+);)/g;
+
+/**
+ * Writes whitespace at either edge of a block's text as numeric references.
+ *
+ * Leading whitespace on a line is indentation -- depth, to this reader -- and
+ * every reader trims the rest, so written bare it was simply lost: Enter in the
+ * middle of "Alpha one" leaves " one", and a Markdown copy or save read it back
+ * as "one". A numeric reference is how CommonMark itself spells a character that
+ * must not be read as syntax, so other readers render it correctly too.
+ */
+function protectEdgeWhitespace(markdown: string): string {
+  const encode = (run: string) =>
+    run.replace(/[^\S\n]/g, (char) => `&#${char.codePointAt(0) ?? 32};`);
+
+  return markdown.replace(/^[^\S\n]+/, encode).replace(/[^\S\n]+$/, encode);
 }
 
 /** Stops a paragraph that begins with `#`, `-` or `1.` becoming that block. */
@@ -1091,8 +1120,9 @@ function tableToMarkdown(block: Block, indent: string): string {
   const { columns } = tableSize(rows);
 
   // A literal pipe would end the cell, so it has to be escaped.
+  // Cells are trimmed on the way back, so their edge whitespace is protected too.
   const line = (cells: readonly RichText[]): string =>
-    `${indent}| ${cells.map((cell) => richToMarkdown(cell)).join(' | ')} |`;
+    `${indent}| ${cells.map((cell) => protectEdgeWhitespace(richToMarkdown(cell))).join(' | ')} |`;
 
   const divider = `${indent}| ${Array.from({ length: columns }, () => '---').join(' | ')} |`;
   const [header, ...body] = rows;
@@ -1112,7 +1142,10 @@ export function toMarkdown(doc: NEditorDocument): string {
     .map((block) => {
       const indent = '  '.repeat(block.depth);
       // A code block is literal: its text must not be re-escaped as Markdown.
-      const text = block.type === 'code' ? blockText(block) : richToMarkdown(block.content);
+      const text =
+        block.type === 'code'
+          ? blockText(block)
+          : protectEdgeWhitespace(richToMarkdown(block.content));
       // An empty block is a bare marker. The space after it is what makes the
       // marker readable, not what makes it a marker, and trailing whitespace
       // does not survive the trip back — ours trims it, and so does every other

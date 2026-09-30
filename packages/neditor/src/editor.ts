@@ -88,6 +88,7 @@ import type { OffsetRange } from './view/selection.ts';
 import {
   getCaretOffset,
   getSelectionRange,
+  readSelection,
   isCaretAtEnd,
   isCaretAtStart,
   offsetsOfNode,
@@ -980,6 +981,9 @@ export class NEditor {
     this.#document.addEventListener('pointerup', this.#handlePointerUp);
     this.#document.addEventListener('pointercancel', this.#handlePointerCancel);
     this.#document.addEventListener('pointerdown', this.#handleDocumentPointerDown);
+    for (const type of ['copy', 'cut', 'paste'] as const) {
+      this.#document.addEventListener(type, this.#handleDocumentClipboard);
+    }
     this.#document.addEventListener('keydown', this.#handleDocumentKeyDown, true);
     this.#document.addEventListener('selectionchange', this.#handleSelectionChange);
     // Capture, so a scroll inside any container on the way down is heard: a
@@ -1474,6 +1478,9 @@ export class NEditor {
     this.#document.removeEventListener('pointerup', this.#handlePointerUp);
     this.#document.removeEventListener('pointercancel', this.#handlePointerCancel);
     this.#document.removeEventListener('pointerdown', this.#handleDocumentPointerDown);
+    for (const type of ['copy', 'cut', 'paste'] as const) {
+      this.#document.removeEventListener(type, this.#handleDocumentClipboard);
+    }
     this.#document.removeEventListener('keydown', this.#handleDocumentKeyDown, true);
     this.#document.removeEventListener('selectionchange', this.#handleSelectionChange);
 
@@ -2323,6 +2330,17 @@ export class NEditor {
 
   /** Shows the row and column controls whenever the caret is inside a table. */
   #syncTableToolbar(): void {
+    // Someone is operating the toolbar: leave it, and the cell it acts on,
+    // alone. WebKit clears the document selection when focus moves to one of
+    // its buttons, so the check below found no caret in a cell and hid the
+    // toolbar under the focus F10 had just given it (the e2e finding F13).
+    const toolbar = this.#tableToolbar.element;
+    const root = toolbar.getRootNode() as Document | ShadowRoot;
+
+    if (this.#activeCell && this.#tableToolbar.isOpen && toolbar.contains(root.activeElement)) {
+      return;
+    }
+
     const target = this.#selectionTarget();
 
     if (
@@ -2582,6 +2600,32 @@ export class NEditor {
     }
   };
 
+  /**
+   * A clipboard event in block mode that never reached the root.
+   *
+   * Block mode focuses the root, which is not editable, and Firefox dispatches
+   * clipboard events at <body> when the focused element is not editable -- so
+   * the root's own listeners never ran, and copy, cut and paste over selected
+   * blocks silently did nothing there (the e2e finding F8). Handled only while
+   * this editor's root holds focus with blocks selected, and only when the
+   * event did not pass through the root, whose listeners have it otherwise.
+   */
+  #handleDocumentClipboard = (event: ClipboardEvent): void => {
+    if (
+      this.#selected.size === 0 ||
+      this.#activeElement() !== this.#root ||
+      composedTargets(event).includes(this.#root)
+    ) {
+      return;
+    }
+
+    if (event.type === 'paste') {
+      this.#handlePaste(event);
+    } else {
+      this.#handleCopy(event);
+    }
+  };
+
   /* ----------------------------------------------------- gutter and drag -- */
 
   #handlePointerOver = (event: PointerEvent): void => {
@@ -2749,6 +2793,10 @@ export class NEditor {
       return;
     }
 
+    if (this.#takeStrayCaretOut()) {
+      return;
+    }
+
     this.#promoteCrossBlockSelection();
   };
 
@@ -2863,9 +2911,15 @@ export class NEditor {
 
     const anchorBlockId = this.#renderer.blockIdFromNode(node);
 
-    this.#textDrag = anchorBlockId
-      ? { anchorBlockId, pointerId: event.pointerId, currentId: anchorBlockId }
-      : null;
+    // Not for touch. A finger moving across blocks is the browser's pan, and
+    // Chromium delivers a few pointermoves before it says so with
+    // pointercancel -- enough to cross a block edge and select two blocks that
+    // then outlived the scroll (the e2e finding F11). Long-press is the touch
+    // way into block selection.
+    this.#textDrag =
+      anchorBlockId && event.pointerType !== 'touch'
+        ? { anchorBlockId, pointerId: event.pointerId, currentId: anchorBlockId }
+        : null;
 
     // Touch has no hover, so the controls have to be offered some other way.
     // Offered on exactly the terms hover offers them, though: `#handlePointerOver`
@@ -3064,9 +3118,9 @@ export class NEditor {
    * by {@link #updateTextDrag}.
    */
   #promoteCrossBlockSelection(): boolean {
-    const selection = this.#selection();
+    const selection = readSelection(this.#root);
 
-    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+    if (!selection || selection.isCollapsed) {
       return false;
     }
 
@@ -3226,9 +3280,10 @@ export class NEditor {
 
   /** The editable host the selection sits in, when both ends share one. */
   #selectionTarget(): (ResolvedTarget & { range: OffsetRange }) | null {
-    const selection = this.#selection();
+    // Read through the shadow boundary where the browser retargets it.
+    const selection = readSelection(this.#root);
 
-    if (!selection || selection.rangeCount === 0) {
+    if (!selection) {
       return null;
     }
 
@@ -3264,13 +3319,13 @@ export class NEditor {
   }
 
   #selectionRect(): DOMRect | null {
-    const selection = this.#selection();
+    const selection = readSelection(this.#root);
 
-    if (!selection || selection.rangeCount === 0) {
+    if (!selection) {
       return null;
     }
 
-    const rect = selection.getRangeAt(0).getBoundingClientRect();
+    const rect = selection.range.getBoundingClientRect();
 
     return rect.width > 0 || rect.height > 0 ? rect : null;
   }
@@ -3880,6 +3935,10 @@ export class NEditor {
     }
 
     host.setAttribute('role', 'combobox');
+    // A combobox is an input field and needs a name (WCAG 4.1.2). The host has
+    // none of its own -- its element supplies its role and content -- so it
+    // borrows the menu's for exactly as long as it is one.
+    host.setAttribute('aria-label', this.#labels.slashMenu);
     host.setAttribute('aria-expanded', 'true');
     host.setAttribute('aria-haspopup', 'listbox');
     host.setAttribute('aria-controls', this.#slashMenu.listId);
@@ -3902,6 +3961,7 @@ export class NEditor {
 
     for (const attribute of [
       'role',
+      'aria-label',
       'aria-expanded',
       'aria-haspopup',
       'aria-controls',
@@ -4189,7 +4249,9 @@ export class NEditor {
    */
   #placeCaretForDrop(target: ResolvedTarget, point: CaretPoint | null): void {
     if (point && target.content.contains(point.node)) {
-      this.#selection()?.collapse(point.node, point.offset);
+      // setBaseAndExtent, not collapse: the one WebKit honours inside a shadow
+      // root (see setSelectionRange).
+      this.#selection()?.setBaseAndExtent(point.node, point.offset, point.node, point.offset);
       return;
     }
 
@@ -4624,8 +4686,12 @@ export class NEditor {
       case 'ArrowUp':
         if (modifier && event.shiftKey) {
           event.preventDefault();
+          // Read before the move: it re-parents this very host, and a real
+          // browser drops the selection with it (happy-dom does not), so the
+          // offset read afterwards was 0 on the way up.
+          const offset = getCaretOffset(content);
           this.#moveVisible(new Set([block.id]), -1);
-          this.focus(block.id, getCaretOffset(content));
+          this.focus(block.id, offset);
         } else if (event.shiftKey && isCaretAtStart(content)) {
           // Shift-extending past the top of a block selects whole blocks: the
           // browser cannot carry a text selection into another editing host.
@@ -4640,8 +4706,12 @@ export class NEditor {
       case 'ArrowDown':
         if (modifier && event.shiftKey) {
           event.preventDefault();
+          // Read before the move: it re-parents this very host, and a real
+          // browser drops the selection with it (happy-dom does not), so the
+          // offset read afterwards was 0 on the way up.
+          const offset = getCaretOffset(content);
           this.#moveVisible(new Set([block.id]), 1);
-          this.focus(block.id, getCaretOffset(content));
+          this.focus(block.id, offset);
         } else if (event.shiftKey && isCaretAtEnd(content)) {
           event.preventDefault();
           this.#extendFromTextToBlocks(block.id, 1);
@@ -4866,6 +4936,10 @@ export class NEditor {
       return;
     }
 
+    if (!this.#pointerDown && this.#takeStrayCaretOut()) {
+      return;
+    }
+
     const target = this.#selectionTarget();
 
     // Armed formatting belongs to one exact caret position.
@@ -4880,13 +4954,51 @@ export class NEditor {
       this.#pending = null;
     }
 
-    if (this.#slashContext && target?.block.id !== this.#slashContext.blockId) {
+    // Another block, or back over the `/` itself: either way the caret has
+    // left the command. Only input re-read the query, so arrowing back over the
+    // slash left the menu open until the next edit.
+    if (
+      this.#slashContext &&
+      (target?.block.id !== this.#slashContext.blockId ||
+        target.range.start <= this.#slashContext.start)
+    ) {
       this.#closeSlashMenu();
     }
 
     this.#syncToolbar();
     this.#emitter.emit('selection', this.getSelectionState());
   };
+
+  /**
+   * Takes a caret out of this editor's text while blocks are selected.
+   *
+   * Every deliberate way to place a caret -- focus(), a click, Enter -- ends
+   * block selection first, so one that turns up while it is still live was put
+   * there by the browser: WebKit re-focuses a host and sets a range in it during
+   * a drag that is selecting blocks, and fires no selectionchange after the
+   * release to catch it by (the e2e finding F7). Run on selectionchange and on
+   * pointerup. Only a caret in this editor's own hosts: another editor's is
+   * none of its business.
+   */
+  #takeStrayCaretOut(): boolean {
+    if (this.#selected.size === 0) {
+      return false;
+    }
+
+    const reading = readSelection(this.#root);
+
+    if (
+      !reading ||
+      !this.#root.contains(reading.anchorNode) ||
+      !this.#hostFromNode(reading.anchorNode)
+    ) {
+      return false;
+    }
+
+    this.#selection()?.removeAllRanges();
+    this.#root.focus({ preventScroll: true });
+    return true;
+  }
 
   /** Hides both floating toolbars; used when either takes over. */
   #hideTableToolbar(): void {

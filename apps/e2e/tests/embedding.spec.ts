@@ -1,16 +1,12 @@
 import { expect, EditorPage, MOD, test } from '../helpers/test.ts';
 import { writeClipboard } from '../helpers/clipboard.ts';
 
-const WEBKIT_SHADOW =
-  'FINDING F10: WebKit exposes no selection inside a shadow root to document.getSelection (and has no ShadowRoot.getSelection); the editor does not use getComposedRanges, so it cannot read the caret there';
-
 test.describe('19 · embedding', () => {
   test('E1 inside a shadow root: styles and portals live in the shadow tree and work', async ({
     editor,
     page,
-    browserName,
   }) => {
-    test.fail(browserName === 'webkit', WEBKIT_SHADOW);
+    // Was FINDING F10, fixed; see docs/e2e-progress.md.
     await editor.load({ mount: 'shadow', doc: 'paragraphs' });
     const placement = await page.evaluate(() => {
       const shadow = document.querySelector('e2e-shadow-host')!.shadowRoot!;
@@ -56,12 +52,8 @@ test.describe('19 · embedding', () => {
     await page.keyboard.press('Escape');
   });
 
-  test('E1b a drop inside the shadow root lands at the pointer', async ({
-    editor,
-    page,
-    browserName,
-  }) => {
-    test.fail(browserName === 'webkit', WEBKIT_SHADOW);
+  test('E1b a drop inside the shadow root lands at the pointer', async ({ editor, page }) => {
+    // Was FINDING F10, fixed; see docs/e2e-progress.md.
     await editor.load({ mount: 'shadow', doc: 'paragraphs' });
     await page.evaluate(() => window.__e2e.setDragPayload({ html: '<b>DROP</b>', text: 'DROP' }));
     const host = editor.content('p2');
@@ -76,9 +68,8 @@ test.describe('19 · embedding', () => {
   test('E1c inside a shadow root, Enter splits at the caret and Mod+B formats the selection', async ({
     editor,
     page,
-    browserName,
   }) => {
-    test.fail(browserName === 'webkit', WEBKIT_SHADOW);
+    // Was FINDING F10, fixed; see docs/e2e-progress.md.
     await editor.load({ mount: 'shadow', doc: 'paragraphs' });
     await editor.clickAt('p1', 5);
     await page.keyboard.press('Enter');

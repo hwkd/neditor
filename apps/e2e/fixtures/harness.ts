@@ -317,30 +317,11 @@ function checkInvariants(editor: NEditor): string[] {
 
   // What the writer emits, the reader reads back to the same thing. Markdown
   // cannot express an empty paragraph (a documented, registered known failure
-  // of the round trip), so those are left out on both sides.
-  //
-  // FINDING F1 (docs/e2e-progress.md): whitespace at either edge of a block's
-  // text is dropped by the reader, so " one" comes back as "one". Not in the
-  // unit registry; tolerated here, and pinned by an expected-failure spec in
-  // round-trip.spec.ts so a fix is noticed.
-  const expressible = lib
-    .normalizeDepths(
-      blocks.filter((block) => !(block.type === 'paragraph' && lib.isRichEmpty(block.content))),
-    )
-    .map((block) => {
-      if (block.type === 'code' || block.type === 'table') {
-        return block;
-      }
-
-      const text = lib.richToPlainText(block.content);
-      const start = text.length - text.trimStart().length;
-      const end = text.trimEnd().length;
-      return { ...block, content: lib.richSlice(block.content, start, Math.max(start, end)) };
-    })
-    .filter((block) => !(block.type === 'paragraph' && lib.isRichEmpty(block.content)))
-    // FINDING F4: an image with no source is written as `![]()`, which the
-    // reader cannot accept as an image and keeps as literal paragraph text.
-    .filter((block) => !(block.type === 'image' && !block.src));
+  // of the round trip), so those are left out on both sides. Nothing else is
+  // excused: edge whitespace (F1) and empty images (F4) round-trip now.
+  const expressible = lib.normalizeDepths(
+    blocks.filter((block) => !(block.type === 'paragraph' && lib.isRichEmpty(block.content))),
+  );
   const markdown = lib.toMarkdown({ blocks: expressible });
   const again = lib.toMarkdown({ blocks: lib.blocksFromMarkdown(markdown) });
 

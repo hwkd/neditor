@@ -116,12 +116,8 @@ test.describe('16 · tables', () => {
   test('TB5 F10 enters the toolbar; arrows and Home/End rove; Escape returns to the cell', async ({
     editor,
     page,
-    browserName,
   }) => {
-    test.fail(
-      browserName === 'webkit',
-      'FINDING F13: WebKit clears the document selection when focus moves to a toolbar button, so the editor decides the caret left the cell and hides the toolbar under the focus it just gave it',
-    );
+    // Was FINDING F13, fixed; see docs/e2e-progress.md.
     await editor.load({ doc: 'table' });
     await editor.placeCaret('tbl', 1, 1, { row: 2, column: 2 });
     // The toolbar follows the asynchronous selectionchange. F10 before it is

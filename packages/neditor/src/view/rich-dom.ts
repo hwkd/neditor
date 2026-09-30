@@ -643,10 +643,18 @@ export function blocksToHtml(doc: Document, blocks: readonly Block[]): string {
       }
 
       if (block.type === 'image') {
-        const image = doc.createElement('img');
-        image.setAttribute('src', block.src ?? '');
-        image.setAttribute('alt', block.alt ?? '');
-        element.append(image);
+        if (block.src) {
+          const image = doc.createElement('img');
+          image.setAttribute('src', block.src);
+          image.setAttribute('alt', block.alt ?? '');
+          element.append(image);
+        } else {
+          // An image block with no picture yet. `<img src="">` is a broken
+          // image in every other application and one the reader rightly
+          // ignores, so it lost the block; this marker is ours alone.
+          element.dataset.neditorImage = '';
+          element.dataset.neditorAlt = block.alt ?? '';
+        }
 
         if (!isRichEmpty(block.content)) {
           const caption = doc.createElement('figcaption');
@@ -1646,9 +1654,14 @@ function pushImage(out: Block[], element: Element, depth: number): boolean {
   const image = tagNameOf(element) === 'IMG' ? element : firstImage(element);
   const src = sanitizeImageUrl(image?.getAttribute('src') ?? '');
 
+  // Our own empty image block (see blocksToHtml) -- only ours: a foreign
+  // `<img>` with no usable source is still skipped, not made a placeholder.
+  const emptyOwn =
+    !src && !image && tagNameOf(element) === 'FIGURE' && element.hasAttribute('data-neditor-image');
+
   // An unusable source would only render as a broken block. The caller
   // recurses into the element instead, so a <figure> keeps its other children.
-  if (!src) {
+  if (!src && !emptyOwn) {
     return false;
   }
 
@@ -1658,8 +1671,8 @@ function pushImage(out: Block[], element: Element, depth: number): boolean {
     caption ? parseRichText(caption) : [],
     depthOf(element, depth),
   );
-  block.src = src;
-  block.alt = image?.getAttribute('alt') ?? '';
+  block.src = src ?? '';
+  block.alt = image?.getAttribute('alt') ?? element.getAttribute('data-neditor-alt') ?? '';
   out.push(block);
 
   return true;

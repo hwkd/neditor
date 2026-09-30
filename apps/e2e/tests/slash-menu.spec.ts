@@ -134,15 +134,8 @@ test.describe('05 · slash menu', () => {
     await agrees();
   });
 
-  test('SL5 a mouse click on an item applies the command', async ({
-    editor,
-    page,
-    browserName,
-  }) => {
-    test.fail(
-      browserName !== 'firefox',
-      'FINDING F3: every mouseenter rebuilds the whole list; Chromium re-sends mouseenter to the rebuilt item, so the list re-renders continuously under a resting pointer and mousedown lands on the list, not an option',
-    );
+  test('SL5 a mouse click on an item applies the command', async ({ editor, page }) => {
+    // Was FINDING F3, fixed; see docs/e2e-progress.md.
     await editor.load({ doc: 'empty' });
     await openMenu(editor);
     const box = (await options(editor).nth(2).boundingBox())!;
@@ -156,10 +149,7 @@ test.describe('05 · slash menu', () => {
     editor,
     page,
   }) => {
-    test.fail(
-      true,
-      'FINDING F3: the jitter fires mouseenter, the item is replaced, and mousedown/mouseup no longer share a target',
-    );
+    // Was FINDING F3, fixed; see docs/e2e-progress.md.
     await editor.load({ doc: 'empty' });
     await openMenu(editor);
     const box = (await options(editor).nth(2).boundingBox())!;

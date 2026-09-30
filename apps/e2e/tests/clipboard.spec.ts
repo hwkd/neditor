@@ -1,11 +1,9 @@
 import { expect, MOD, test } from '../helpers/test.ts';
-import { FIREFOX_BLOCK_CLIPBOARD, shape, writeClipboard } from '../helpers/clipboard.ts';
+import { shape, writeClipboard } from '../helpers/clipboard.ts';
 
 test.describe('11 · clipboard', () => {
   test.describe('block-mode copy round trips', () => {
-    test.beforeEach(({ browserName }) => {
-      test.fail(browserName === 'firefox', FIREFOX_BLOCK_CLIPBOARD);
-    });
+    // Was FINDING F8 in Firefox, fixed; see docs/e2e-progress.md.
 
     test('C1 copying every block and pasting into another editor reproduces the document', async ({
       editor,
@@ -202,9 +200,8 @@ test.describe('11 · clipboard', () => {
   test('C5 a paste over a block selection replaces it, as one undo step', async ({
     editor,
     page,
-    browserName,
   }) => {
-    test.fail(browserName === 'firefox', FIREFOX_BLOCK_CLIPBOARD);
+    // Was FINDING F8, fixed; see docs/e2e-progress.md.
     await editor.load({ doc: 'five' });
     await writeClipboard(page, { html: '<h3>new</h3><p>stuff</p>' });
     await page.evaluate(() => window.__e2e.editor.selectBlocks(['b', 'c']));

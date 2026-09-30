@@ -65,7 +65,7 @@ const TOGGLE_MARKER = /^([\u25B8\u25BE])(?:\s+|$)/;
  * URL has to go inside angle brackets to survive; the alt text may carry
  * escapes, since a bare `]` would close the label early.
  */
-const IMAGE_LINE = /^!\[((?:\\.|[^\]\n])*)\]\((?:<([^<>\n]*)>|([^)\s]+))\)$/;
+const IMAGE_LINE = /^!\[((?:\\.|[^\]\n])*)\]\((?:<([^<>\n]*)>|([^)\s]*))\)$/;
 
 /** A GFM table row; the leading pipe is what identifies one. */
 const TABLE_ROW = /^\|/;
@@ -195,7 +195,23 @@ const OPENERS = new Set(['*', '_', '~', '`', '<', '[']);
  * prose, which no other reader does; it is honoured at the one place the writer
  * emits it, the head of a bullet, and nowhere else.
  */
-const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!]/;
+const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!&]/;
+
+/**
+ * A numeric character reference, which the writer uses for whitespace at the
+ * edge of a block (leading whitespace is indentation, and every reader trims
+ * the rest). Decoded as CommonMark decodes it; an `&` that is meant literally
+ * arrives escaped.
+ */
+const NUMERIC_REFERENCE = /^&#(?:(\d{1,7})|[xX]([0-9a-fA-F]{1,6}));/;
+
+function decodeReference(match: RegExpExecArray): string | null {
+  const code = match[1] !== undefined ? Number(match[1]) : Number.parseInt(match[2] ?? '', 16);
+
+  return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff)
+    ? String.fromCodePoint(code)
+    : null;
+}
 
 /**
  * Stands in for an escaped character while rules are matched.
@@ -480,6 +496,17 @@ export function parseInlineMarkdown(text: string): RichText {
       index += 1;
       literal = next;
       projected = ESCAPED;
+    } else if (char === '&') {
+      // A decoded reference is text, never a delimiter -- the same opacity an
+      // escape gets, one placeholder per UTF-16 unit so offsets stay aligned.
+      const reference = NUMERIC_REFERENCE.exec(text.slice(index, index + 12));
+      const decoded = reference ? decodeReference(reference) : null;
+
+      if (reference && decoded !== null) {
+        index += reference[0].length - 1;
+        literal = decoded;
+        projected = ESCAPED.repeat(decoded.length);
+      }
     }
 
     pending += literal;
@@ -666,9 +693,12 @@ export function blocksFromMarkdown(text: string): Block[] {
     const image = IMAGE_LINE.exec(line);
 
     if (image) {
-      const src = sanitizeImageUrl(image[2] ?? image[3] ?? '');
+      // An empty destination is an image block with no picture yet -- the
+      // writer's own spelling of one. Anything else has to be a usable source.
+      const destination = image[2] ?? image[3] ?? '';
+      const src = destination === '' ? '' : sanitizeImageUrl(destination);
 
-      if (src) {
+      if (src !== null) {
         const block = createBlock('image', [], depth);
         block.src = src;
         block.alt = stripEscapes(image[1] ?? '');

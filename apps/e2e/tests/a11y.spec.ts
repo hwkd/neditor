@@ -31,10 +31,7 @@ test.describe('21 · accessibility', () => {
     });
 
     test('slash menu open', async ({ editor, page }) => {
-      test.fail(
-        true,
-        'FINDING F9: while the menu is open the host becomes role="combobox" with no accessible name (aria-input-field-name, WCAG 4.1.2)',
-      );
+      // Was FINDING F9, fixed; see docs/e2e-progress.md.
       await editor.load({ doc: 'empty' });
       await editor.placeCaret('p1', 0);
       await editor.type('/');

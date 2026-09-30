@@ -95,10 +95,7 @@ test.describe('25 · a document built through the UI round-trips', () => {
     page,
     editor,
   }) => {
-    test.fail(
-      true,
-      'FINDING F1: the reader trims leading and trailing whitespace of every text block',
-    );
+    // Was FINDING F1, fixed; see docs/e2e-progress.md.
     await editor.load({ doc: 'empty' });
     const back = await page.evaluate(() => {
       const { lib } = window.__e2e;
@@ -117,10 +114,7 @@ test.describe('25 · a document built through the UI round-trips', () => {
     page,
     editor,
   }) => {
-    test.fail(
-      true,
-      'FINDING F4: an empty image is written as ![]() and read back as a paragraph of literal text',
-    );
+    // Was FINDING F4, fixed; see docs/e2e-progress.md.
     await editor.load({ doc: 'empty' });
     const back = await page.evaluate(() => {
       const { lib } = window.__e2e;

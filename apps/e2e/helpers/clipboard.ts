@@ -28,12 +28,3 @@ export async function writeClipboard(
 export function shape(doc: NEditorDocument): unknown[] {
   return doc.blocks.map(({ id: _id, ...rest }: Block) => rest);
 }
-
-/**
- * FINDING F8. Firefox dispatches clipboard events at <body> when the focused
- * element is not editable, and in block-selection mode focus sits on the
- * editor root (tabindex=-1), whose listeners therefore never run: copy, cut
- * and paste over selected blocks all silently do nothing in Firefox.
- */
-export const FIREFOX_BLOCK_CLIPBOARD =
-  'FINDING F8: Firefox targets clipboard events at <body> in block-selection mode, so the root’s copy/cut/paste handlers never run';

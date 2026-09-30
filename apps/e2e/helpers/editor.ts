@@ -169,7 +169,7 @@ export class EditorPage {
     return this.page.evaluate(() => [...window.__e2e.announcements]);
   }
 
-  /** The harness's invariant check, for tests that must assert it in-body (e.g. under `test.fail`). */
+  /** The harness's invariant check, for tests that assert it in-body rather than after the test. */
   async invariants(): Promise<string[]> {
     return this.page.evaluate(() => window.__e2e.checkInvariants());
   }

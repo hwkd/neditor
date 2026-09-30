@@ -92,6 +92,30 @@ const CORPUS: Record<string, Block[]> = {
   'text with brackets': [b({ content: t('array[0] and [x](y)') })],
   'soft break': [b({ content: t('line one\nline two') })],
   'empty paragraph between': [b({ content: t('A') }), b({ content: [] }), b({ content: t('B') })],
+  // F1 (e2e finding): the reader trims every line, so whitespace at either edge
+  // of a block's text was lost -- and Enter mid-sentence leaves exactly that.
+  'leading space': [b({ content: t(' one') })],
+  'trailing space': [b({ content: t('one ') })],
+  'tab-led paragraph': [b({ content: t('\tTab') })],
+  'edge spaces in a heading': [b({ type: 'heading1', content: t(' Title ') })],
+  'bullet with a leading space': [b({ type: 'bulleted_list', content: t(' one') })],
+  'bold run after a leading space': [
+    b({ content: [{ text: ' ' }, { text: 'bold', marks: ['bold'] }] }),
+  ],
+  'edge whitespace in a table cell': [
+    b({
+      type: 'table',
+      rows: [
+        [t(' a '), t('b')],
+        [t('c'), t(' ')],
+      ],
+    }),
+  ],
+  // The escape that makes the one above possible must not eat this.
+  'literal numeric reference': [b({ content: t('write &#32; or &#x20; for a space') })],
+  // F4 (e2e finding): an image with no source came back as literal "![]()".
+  'empty image': [b({ type: 'image', src: '', alt: '' })],
+  'empty image with alt': [b({ type: 'image', src: '', alt: 'pending' })],
   'long block with bold': [
     b({ content: [{ text: 'x'.repeat(2100) }, { text: 'bold', marks: ['bold'] }] }),
   ],
@@ -196,5 +220,18 @@ describe('round-trip coverage is not silently shrinking', () => {
     ]) {
       expect(CORPUS, `registry names "${name}", which is not in the corpus`).toHaveProperty(name);
     }
+  });
+});
+
+describe('an empty image is ours to write, not a reading of foreign markup', () => {
+  // F4 made `<figure data-neditor-image>` read back as an empty image block.
+  // The marker is what licenses it: a page's own `<img src="">` or a figure
+  // with no usable picture must still produce nothing, not a placeholder.
+  test('a foreign image with no usable source still produces no block', () => {
+    expect(blocksFromHtml(document, '<figure><img src=""></figure>')).toEqual([]);
+    expect(blocksFromHtml(document, '<p><img src="javascript:alert(1)"></p>')).toEqual([]);
+    expect(blocksFromMarkdown('![x](javascript:alert(1))').map((block) => block.type)).toEqual([
+      'paragraph',
+    ]);
   });
 });

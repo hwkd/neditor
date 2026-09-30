@@ -164,6 +164,37 @@ describe('keyboard reachability', () => {
     expect(active?.tabIndex).toBe(0);
   });
 
+  /**
+   * F13 (e2e finding, WebKit). Focusing a toolbar button clears WebKit's
+   * document selection. The next selectionchange found no caret in a cell, so
+   * the editor hid the table toolbar -- under the focus it had just given it --
+   * and focus fell to <body>. happy-dom keeps the range, so the clearing WebKit
+   * does is done here by hand, exactly as it happens there.
+   */
+  test('the table toolbar stays while focus is in it, even with no selection left behind', () => {
+    const editor = mount([block({ type: 'table', rows: [[[{ text: 'A' }], [{ text: 'B' }]]] })]);
+    const cell = editor.element.querySelector<HTMLElement>('[data-cell="0:1"]')!;
+    cell.focus();
+    getSelection()?.collapse(cell.firstChild, 1);
+    document.dispatchEvent(new Event('selectionchange'));
+    const toolbar = document.querySelector<HTMLElement>('.neditor-table-toolbar')!;
+    expect(toolbar.hidden).toBe(false);
+
+    press(cell, 'F10');
+    const button = document.activeElement as HTMLElement;
+    expect(button.classList.contains('neditor-table-toolbar__button')).toBe(true);
+
+    getSelection()?.removeAllRanges();
+    document.dispatchEvent(new Event('selectionchange'));
+
+    expect(toolbar.hidden).toBe(false);
+    expect(document.activeElement).toBe(button);
+
+    // And it still acts on the cell it was entered from.
+    button.click();
+    expect(editor.getDocument().blocks[0]?.rows).toHaveLength(2);
+  });
+
   test('arrows rove within the toolbar and Escape returns to the cell', () => {
     const editor = mount([block({ type: 'table', rows: [[[{ text: 'A' }]]] })]);
     const cell = editor.element.querySelector<HTMLElement>('[data-cell="0:0"]')!;
@@ -400,6 +431,54 @@ describe('the slash menu is announced', () => {
     expect(content.getAttribute('aria-expanded')).toBe(null);
     expect(content.getAttribute('aria-activedescendant')).toBe(null);
     expect(content.getAttribute('role')).toBe(null);
+    expect(content.getAttribute('aria-label')).toBe(null);
+  });
+
+  /**
+   * F9 (e2e finding; axe `aria-input-field-name`, WCAG 4.1.2). The host keeps
+   * no role or name of its own -- its element supplies both -- but for as long
+   * as the menu makes it a combobox it is an input field, and an input field
+   * needs a name. It borrows the menu's, which the labels option translates.
+   */
+  test('while it is a combobox the editable has a name, in the labels language', () => {
+    const editor = mount([block({})], { labels: { slashMenu: 'Types de bloc' } });
+    const content = editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
+    content.focus();
+    typeSlash(content);
+
+    expect(content.getAttribute('role')).toBe('combobox');
+    expect(content.getAttribute('aria-label')).toBe('Types de bloc');
+  });
+  /**
+   * F5 (e2e observation). Only an input event re-read the query, so arrowing
+   * the caret back over the `/` left the menu open -- and its combobox wiring
+   * on a host whose caret was no longer in the command at all -- until the
+   * next keystroke happened to be an edit.
+   */
+  test('moving the caret back over the slash closes the menu', () => {
+    const editor = mount([block({})]);
+    const content = editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
+    content.focus();
+    typeSlash(content);
+    expect(document.querySelector('.neditor-slash-menu')?.hasAttribute('hidden')).toBe(false);
+
+    getSelection()?.collapse(content.firstChild, 0);
+    document.dispatchEvent(new Event('selectionchange'));
+
+    expect(document.querySelector('.neditor-slash-menu')?.hasAttribute('hidden')).toBe(true);
+    expect(content.getAttribute('role')).toBe(null);
+  });
+
+  test('a caret still after the slash keeps it open', () => {
+    const editor = mount([block({})]);
+    const content = editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
+    content.focus();
+    typeSlash(content);
+
+    getSelection()?.collapse(content.firstChild, 1);
+    document.dispatchEvent(new Event('selectionchange'));
+
+    expect(document.querySelector('.neditor-slash-menu')?.hasAttribute('hidden')).toBe(false);
   });
 });
 

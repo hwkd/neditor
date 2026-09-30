@@ -282,7 +282,9 @@ The long press was verified with synthetic pointer events, not on hardware; on a
 real device it shares the gesture with the browser's own long-press text
 selection, so check it on your target platforms before relying on it.
 
-Dragging from one block's text into another selects whole blocks as you go.
+Dragging from one block's text into another with a mouse or pen selects whole
+blocks as you go. A finger doing the same is the browser's scroll, so touch
+never starts one; a long press is the touch way into block selection.
 Every block is its own `contenteditable`, and browsers confine a selection to a
 single editing host, so the gesture is tracked directly rather than read back
 from a DOM range that never spans blocks.
@@ -629,12 +631,13 @@ another application.
 Callouts and toggles have no Markdown of their own, so both degrade to something
 readable that still parses back:
 
-| Block   | Markdown                               | HTML                                              |
-| ------- | -------------------------------------- | ------------------------------------------------- |
-| Callout | `> [!💡] text` — the icon is bracketed | `<blockquote data-neditor-callout="💡">`          |
-| Toggle  | `- ▸ text` collapsed, `- ▾ text` open  | `<details>` / `<details open>` with a `<summary>` |
-| Image   | `![alt](src)` — the caption is dropped | `<figure><img><figcaption>`                       |
-| Table   | a GFM table                            | `<table>` with `<thead>` / `<tbody>`              |
+| Block                    | Markdown                               | HTML                                              |
+| ------------------------ | -------------------------------------- | ------------------------------------------------- |
+| Callout                  | `> [!💡] text` — the icon is bracketed | `<blockquote data-neditor-callout="💡">`          |
+| Toggle                   | `- ▸ text` collapsed, `- ▾ text` open  | `<details>` / `<details open>` with a `<summary>` |
+| Image                    | `![alt](src)` — the caption is dropped | `<figure><img><figcaption>`                       |
+| Image with no source yet | `![alt]()`                             | `<figure data-neditor-image>` (no broken `<img>`) |
+| Table                    | a GFM table                            | `<table>` with `<thead>` / `<tbody>`              |
 
 Elsewhere a callout still reads as a quote and a toggle as a list item; a
 `<details>` pasted from anywhere else becomes a toggle, with its body nested one
@@ -665,6 +668,11 @@ writes is what `blocksFromMarkdown` reads back:
 - An alt text or callout icon containing `[` or `]` is escaped, and unescaped on
   the way back, so a `]` cannot close the label early and leak the rest of the
   line into the document as markup.
+- Whitespace at either edge of a block's text is written as a numeric
+  character reference (`&#32;`), because leading spaces are indentation and
+  every reader trims the rest. Splitting "Alpha one" with `Enter` leaves
+  " one", and without this a Markdown copy or save read it back as "one". A
+  literal `&#32;` in your text is escaped, so it comes back as typed.
 
 ## Headless use
 

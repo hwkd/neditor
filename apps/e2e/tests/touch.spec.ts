@@ -144,10 +144,7 @@ test.describe('23 · touch', () => {
     editor,
     page,
   }) => {
-    test.fail(
-      true,
-      'FINDING F11: the pointermoves Chromium delivers before pointercancel can cross a block edge; the text drag selects blocks, and pointercancel ends the drag without undoing the selection it made',
-    );
+    // Was FINDING F11, fixed; see docs/e2e-progress.md.
     await editor.load({ doc: 'long' });
     const finger = await Finger.attach(page);
     const box = (await editor.content('p6').boundingBox())!;
