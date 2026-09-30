@@ -798,6 +798,7 @@ describe('audit 5', () => {
   test.each([
     ['see https://a.test/x_y now', 'see https://a.test/x_y now'],
     ['www.a.test/a_b_c', 'www.a.test/a_b_c'],
+    ['HTTPS://A.TEST/x_y and Www.a.test/x_y', 'HTTPS://A.TEST/x_y and Www.a.test/x_y'],
     ['snake_case and https://a.test/x_y', 'snake\\_case and https://a.test/x_y'],
     // Not between letters: still escaped, so CommonMark does not read emphasis.
     ['https://a.test/_x_/', 'https://a.test/\\_x\\_/'],

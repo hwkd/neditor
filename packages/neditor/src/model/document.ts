@@ -986,7 +986,7 @@ function bareUrls(text: string): Array<readonly [number, number]> {
     return [];
   }
 
-  return [...text.matchAll(new RegExp(`(?:${BARE_URL_START.source})\\S*`, 'g'))].map(
+  return [...text.matchAll(new RegExp(`(?:${BARE_URL_START.source})\\S*`, 'gi'))].map(
     (match) => [match.index, match.index + match[0].length] as const,
   );
 }

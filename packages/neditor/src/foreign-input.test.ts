@@ -573,6 +573,14 @@ describe('typing a line and pasting it give the same result', () => {
     ['https://a.test/_y_', [{ text: 'https://a.test/_y_' }]],
     ['www.a.test/__init__', [{ text: 'www.a.test/__init__' }]],
     ['(https://a.test/_y_)', [{ text: '(https://a.test/_y_)' }]],
+    // A protocol URL is linked after punctuation too, quoted or not.
+    ['"https://a.test/__init__.py"', [{ text: '"https://a.test/__init__.py"' }]],
+    ['see:https://a.test/_y_', [{ text: 'see:https://a.test/_y_' }]],
+    ['a=https://a.test/__init__', [{ text: 'a=https://a.test/__init__' }]],
+    ["'https://a.test/_y_'", [{ text: "'https://a.test/_y_'" }]],
+    // And whatever its case.
+    ['HTTPS://a.test/_y_', [{ text: 'HTTPS://a.test/_y_' }]],
+    ['WWW.a.test/_y_', [{ text: 'WWW.a.test/_y_' }]],
     // Opened before it: a span, as in CommonMark and GFM, which leaves a
     // trailing `_` out of the link.
     ['_see https://example.com_', [{ text: 'see https://example.com', marks: ['italic'] }]],

@@ -199,24 +199,37 @@ test-first, each fix reverted to watch its test fail.
 | E5  | Inaccurate docs             | The CHANGELOG listed the mid-line reference slowdown as a fixed bug; it was introduced and removed on this branch.                                                                                                                      | Dropped.                                                                                                                                                                                                                                                          |
 
 **Open, by decision (E2's remainder).** GFM's autolink extension ends a bare URL only at whitespace or
-`<`, so anything else written against one is taken into the link: an escaped `~` or `*`
-(`https://a.test/~x` is written `\~x`), and the `&#32;` that protects a trailing space when a block
-ends with a URL. CommonMark readers, and this one, read all of these correctly. The escape-free
+`<`, so anything else written against one is taken into the link: the backslash of a line break that
+follows a URL directly (`https://a.test/docs\` + newline links to `docs%5C`, and the commonest case --
+a URL, then Shift+Enter), an escaped `~` or `*` (`https://a.test/~x` is written `\~x`), and the `&#32;`
+that protects a trailing space when a block ends with a URL. CommonMark readers, and this one, read all of these correctly. The escape-free
 spelling is an angle autolink (`<https://…>`), which would have to be read back as plain text, and
-that changes what typing `<https://…>` does -- a design decision, not a fix to slip into this branch.
+that changes what typing `<https://…>` does; the break needs a spelling that does not touch the URL,
+and the two-space form is one this reader currently splits into two paragraphs. Both are design
+decisions, not fixes to slip into this branch.
 
 ## Audit 6 (2026-09-30)
 
 An independent review of fa68993: four findings, all in that commit, none elsewhere on the branch.
 
-| #   | Kind                      | What                                                                                                                                                                             | Resolution                                                                                                                                                             |
-| --- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| F1  | **Regression (fa68993)**  | E2 refused every `_` closer in a token holding a URL, so `_see https://a.test_`, `__see www.a.test__` and `_awww.cute_` stopped being emphasis -- a fix wider than its evidence. | Only a span whose opener sits at or after the URL's start is refused, and a URL starts only where GFM would link one (opening the token, or after `*`, `_`, `~`, `(`). |
-| F2  | **Test defect (fa68993)** | The three parity cases for it passed with the rule removed: typing and pasting share `matchInlineRule`, so they agree either way.                                                | Absolute assertions on what both produce, for the cases that must not be spans and the ones that must. Each mutation of the rule fails some of them.                   |
-| F3  | **Regression (fa68993)**  | E3 encoded the spaces before a trailing break inside a tag, against its own comment, which put `&#32;` against a URL where there had been a space.                               | Encoded from the first break on; the spaces before it stay.                                                                                                            |
-| F4  | **Regression (fa68993)**  | The URL check ran before the pattern, per `_`: a line of underscores parsed nine times slower.                                                                                   | Asked only after a `_` rule has matched. Measured back at the previous cost (82 ms for 20,000 `a_`); not pinned by a test, since the cost was a constant factor.       |
+| #   | Kind                      | What                                                                                                                                                                             | Resolution                                                                                                                                                       |
+| --- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| F1  | **Regression (fa68993)**  | E2 refused every `_` closer in a token holding a URL, so `_see https://a.test_`, `__see www.a.test__` and `_awww.cute_` stopped being emphasis -- a fix wider than its evidence. | Only a span whose opener sits at or after the URL's start is refused. (Where a URL may start was then drawn too tightly: G1.)                                    |
+| F2  | **Test defect (fa68993)** | The three parity cases for it passed with the rule removed: typing and pasting share `matchInlineRule`, so they agree either way.                                                | Absolute assertions on what both produce, for the cases that must not be spans and the ones that must. Each mutation of the rule fails some of them.             |
+| F3  | **Regression (fa68993)**  | E3 encoded the spaces before a trailing break inside a tag, against its own comment, which put `&#32;` against a URL where there had been a space.                               | Encoded from the first break on; the spaces before it stay.                                                                                                      |
+| F4  | **Regression (fa68993)**  | The URL check ran before the pattern, per `_`: a line of underscores parsed nine times slower.                                                                                   | Asked only after a `_` rule has matched. Measured back at the previous cost (82 ms for 20,000 `a_`); not pinned by a test, since the cost was a constant factor. |
 
 `_a https://a.test/x_y` italicises again, as `_a snake_case` does here and on `main`: a `_` followed
 by a letter closes a span in this reader where CommonMark would not let it. That is how typing works --
 the rule fires before the next character exists -- and the writer escapes every `_` that could open,
 so the editor's own Markdown is unaffected.
+
+## Audit 7 (2026-09-30)
+
+An independent review of 5007f55.
+
+| #   | Kind                     | What                                                                                                                                                                                                                | Resolution                                                                                                                                              |
+| --- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| G1  | **Regression (5007f55)** | F1 let a URL start only opening its token or after `*`, `_`, `~`, `(`. That is GFM's rule for `www.`, not for a protocol: `"https://a.test/__init__.py"` and `see:https://a.test/_y_` lost their underscores again. | `https://` and `http://` start a URL after any character that is not a letter; `www.` keeps the narrow rule. Quoted and punctuated inputs are asserted. |
+| G2  | Docs, pre-existing gap   | The open GFM item did not name its commonest case: a line break straight after a bare URL, whose backslash GFM takes into the link.                                                                                 | Named in the open item above and in the CHANGELOG. Not fixed, for the reason given there.                                                               |
+| G3  | Gap from fa68993         | The bare-URL handling was case-sensitive; GFM's is not (`HTTPS://…`, `Www.…`).                                                                                                                                      | Case-insensitive in the reader and the writer.                                                                                                          |

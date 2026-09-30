@@ -96,7 +96,7 @@ const INLINE_RULES: readonly InlineRule[] = [
 export const INLINE_SPAN_LIMIT = 2000;
 
 /** What opens a bare URL. Shared with the writer, which must agree on where one is. */
-export const BARE_URL_START = /https?:\/\/|www\./;
+export const BARE_URL_START = /https?:\/\/|www\./i;
 
 /**
  * Whether the text ends inside a link destination whose `)` has not arrived.
@@ -174,8 +174,15 @@ function linkOpener(window: string, angled: boolean): number {
   return -1;
 }
 
-/** A bare URL's start where GFM would link one: opening a token, or after `*`, `_`, `~` or `(`. */
-const BARE_URL_IN_TOKEN = new RegExp(`(?:^|[*_~(])(${BARE_URL_START.source})`);
+/**
+ * A bare URL's start inside a token, where a GFM reader would link one.
+ *
+ * `www.` only opening the token or after `*`, `_`, `~` or `(` -- `awww.cute` is
+ * a word. A protocol is linked after any character that is not a letter, which
+ * is what lets a quoted or punctuated URL through (`"https://…"`, `see:https://…`):
+ * holding it to the `www.` rule italicised those again. Either case, as GFM reads them.
+ */
+const BARE_URL_IN_TOKEN = /(?:^|[^a-z])(https?:\/\/)|(?:^|[*_~(])(www\.)/i;
 
 /**
  * Whether a span whose opening delimiter is at `opener` opens inside a bare
@@ -197,7 +204,9 @@ function opensInBareUrl(window: string, opener: number): boolean {
 
   const url = opener < token ? null : BARE_URL_IN_TOKEN.exec(window.slice(token));
 
-  return url !== null && opener >= token + url.index + url[0].length - (url[1] ?? '').length;
+  return (
+    url !== null && opener >= token + url.index + url[0].length - (url[1] ?? url[2] ?? '').length
+  );
 }
 
 export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null {

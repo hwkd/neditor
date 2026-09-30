@@ -31,9 +31,11 @@ that changes what you store or what other applications receive is listed first.
     or `*a****b*****c**`, which CommonMark's rule of three leaves literal).
   - A `_` between two letters or digits inside a bare URL is written bare
     (`https://a.test/x_y`): GFM links a bare URL and took the escape's
-    backslash into it. Any other escaped character written against a bare URL
-    (`https://a.test/~x`, a URL ending a block before a trailing space) is
-    still taken into the link by GFM readers; CommonMark readers are
+    backslash into it. Anything else this writer puts directly against a bare
+    URL is still taken into the link by GFM readers: the backslash of a line
+    break made with `Shift`+`Enter` straight after a URL (the commonest case),
+    another escaped character (`https://a.test/~x`), and the `&#32;` for a
+    trailing space when a block ends with a URL. CommonMark readers are
     unaffected.
   - A formatted run written as HTML that ends a block with a line break keeps
     the break (and anything after it) inside the tag as `&#10;`; the closing tag alone on a line ended
