@@ -1134,12 +1134,14 @@ const DESTINATION_UNSAFE = /[()<>\s]/;
  * needs no escape and the reader's pattern for the form can tell where the
  * destination ends.
  *
- * Inside either form three things are escaped, all of which the reader takes
+ * Inside either form four things are escaped, all of which the reader takes
  * back out of the content (`parseInlineMarkdown`): a backslash is doubled, or
  * it and an escapable character after it are an escape (`?q=a\_b` came back as
  * `?q=a_b`, and one ending the URL escaped the `)`); a `|` would end a table
- * cell, in this reader and in GFM; and an `&` that begins a reference is
- * decoded by other readers even here, so `?a=1&amp;b` reached them as `?a=1&b`.
+ * cell, in this reader and in GFM; two backticks would close a code span
+ * inside the destination (`?q=`y`` came back as `?q=y`); and an `&` that
+ * begins a reference is decoded by other readers even here, so `?a=1&amp;b`
+ * reached them as `?a=1&b`.
  */
 function destinationToMarkdown(url: string): string {
   // A model that predates `sanitizeImageUrl` unwrapping base64 may still hold it wrapped.
@@ -1147,6 +1149,7 @@ function destinationToMarkdown(url: string): string {
   const escaped = source
     .replaceAll('\\', '\\\\')
     .replaceAll('|', '\\|')
+    .replaceAll('`', '\\`')
     .replace(REFERENCE_AMPERSAND, '\\&');
 
   if (!DESTINATION_UNSAFE.test(source)) {

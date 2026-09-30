@@ -50,9 +50,10 @@ that changes what you store or what other applications receive is listed first.
     one that opens with `=` is escaped, so it is not a setext heading
     underline.
   - In a link or image destination, a backslash is doubled, a `|` is written
-    `\|`, and an `&` that begins a reference is written `\&`: the first was
-    read back as an escape, the second ended a table cell, and other readers
-    decoded the third.
+    `\|`, a backtick `` \` ``, and an `&` that begins a reference `\&`: the
+    first was read back as an escape, the second ended a table cell, two of the
+    third closed a code span and were dropped from the URL, and other readers
+    decoded the fourth.
   - A block marker at the start of a line after a soft break is escaped
     (`\# not a heading`), and so is a `!` opening a paragraph with `![`.
 - **Markdown.** An image's caption is written after the image, following a hard
@@ -127,3 +128,7 @@ that changes what you store or what other applications receive is listed first.
 - An image whose `data:` source was line-wrapped base64 came back from Markdown
   as a paragraph of text. `sanitizeImageUrl` now returns such a source
   unwrapped.
+- A link written in the `<…>` form whose URL holds a `)` and no `https:`
+  (`mailto:team@example.com?subject=Feedback%20(v2)`) was read back, and typed,
+  as a link to `https://%3Cmailto:…`. A destination that opens with `<` is only
+  ever the angle form.

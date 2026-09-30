@@ -673,9 +673,12 @@ writes is what `blocksFromMarkdown` reads back:
   a snippet that itself contains ` ``` ` comes back as one code block rather
   than three.
 - A link or image destination holding a paren, a space or an angle bracket is
-  written in the `<…>` form rather than backslash-escaped. The reader matches
-  its rules against a projection in which an escaped character is opaque, so it
-  could never have found such a URL again.
+  written in the `<…>` form, where a paren needs no escape and the end of the
+  destination is unambiguous. In either form a backslash is doubled and a `|`,
+  a backtick and an `&` that begins a reference are backslash-escaped: the pipe
+  would end a table cell, two backticks would close a code span, and other
+  readers decode the reference. A relative URL holding a space or an angle
+  bracket comes back percent-encoded (`/a b` as `/a%20b`).
 - An alt text or callout icon containing `[` or `]` is escaped, and unescaped on
   the way back, so a `]` cannot close the label early and leak the rest of the
   line into the document as markup.

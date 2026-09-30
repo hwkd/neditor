@@ -942,3 +942,40 @@ describe('audit 10', () => {
     expect(throughMarkdown(blocks)[0]?.src).toBe('https://a.test/?q=a\\_b');
   });
 });
+
+describe('audit 12', () => {
+  // Every escape the writer puts in a destination has to leave it a link to
+  // the rule that decides there is one, which looks at the projection.
+  test.each([
+    // `\&` in the host: the placeholder made the URL unparseable.
+    ['https://a&amp;b.test/x', '[x](https://a\\&amp;b.test/x)'],
+    // A backtick in a query is not percent-encoded by the URL parser, and two
+    // of them closed a code span inside the destination.
+    ['https://a.test/?q=`y`', '[x](https://a.test/?q=\\`y\\`)'],
+    // The angle form with a `)` in it: the plain rule fired at that paren with
+    // `<mailto:…` for a destination, which was "fixed up" into an https URL.
+    [
+      'mailto:team@example.com?subject=Feedback%20(v2)',
+      '[x](<mailto:team@example.com?subject=Feedback%20(v2)>)',
+    ],
+  ])('a link to %s is written %s', (href, markdown) => {
+    const blocks = [b({ content: [{ text: 'x', link: href }] })];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  test('a destination that opens with "<" and does not close is not a link', () => {
+    expect(blocksFromMarkdown('[x](<mailto:a@b.test?s=(v2)')[0]?.content).toEqual(
+      t('[x](<mailto:a@b.test?s=(v2)'),
+    );
+  });
+
+  // An escaped character is a placeholder to the rules, and it stands for
+  // punctuation: `www.` after one is a URL, as it is after the character itself.
+  test.each(['\\[1\\]www.a.test/_y_', '\\(www.a.test/_y_'])(
+    '%s keeps its underscores',
+    (markdown) => {
+      expect(blocksFromMarkdown(markdown)[0]?.content).toEqual(t(markdown.replaceAll('\\', '')));
+    },
+  );
+});

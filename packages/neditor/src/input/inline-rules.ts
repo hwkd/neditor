@@ -81,7 +81,10 @@ const INLINE_RULES: readonly InlineRule[] = [
   // The angle-bracket form first: it is how a destination holding a `)` — the
   // character that would otherwise close the link — is written.
   { closer: ')', pattern: /\[([^\]]+)\]\(<([^<>\n]*)>\)$/, isLink: true, angled: true },
-  { closer: ')', pattern: /\[([^\]]+)\]\(([^)\s]+)\)$/, isLink: true },
+  // Never one that opens with `<`: that is the form above, not yet closed. Its
+  // destination may hold a `)`, and this rule fired at it --
+  // `[x](<mailto:a@b.test?s=(v2)>)` linked to `https://%3Cmailto:a@b.test/…`.
+  { closer: ')', pattern: /\[([^\]]+)\]\(([^)\s<][^)\s]*)\)$/, isLink: true },
 ];
 
 /**
@@ -185,7 +188,8 @@ function linkOpener(window: string, angled: boolean): number {
  * A bare URL's start in the part of a token that precedes a span's opener.
  *
  * A protocol anywhere in it; `www.` opening the token or after `*`, `_`, `~`,
- * `(`, `[` or `]`, so `awww.cute` is a word. Either case.
+ * `(`, `[` or `]` -- or the placeholder the Markdown reader puts where one of
+ * them was escaped -- so `awww.cute` is a word. Either case.
  *
  * This is not GFM's autolink grammar, and each attempt to make it so took
  * underscores out of real URLs: refusing a `_` straight after the scheme broke
@@ -199,7 +203,11 @@ function linkOpener(window: string, angled: boolean): number {
  * with its underscores (`http://_a_`, `xhttps://a.test/_y_`), which loses
  * nothing, rather than a URL losing characters, which does.
  */
-const BARE_URL_IN_TOKEN = /https?:\/\/|(?:^|[*_~([\]])www\./i;
+const ESCAPED_PLACEHOLDER = String.fromCharCode(0);
+const BARE_URL_IN_TOKEN = new RegExp(
+  `https?:\\/\\/|(?:^|[*_~([\\]${ESCAPED_PLACEHOLDER}])www\\.`,
+  'i',
+);
 
 /**
  * Whether a span whose opening delimiter is at `opener` opens inside a bare
@@ -240,8 +248,9 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
   // read: `https://a.test/_y_` came back as `https://a.test/y`, from the
   // editor's own Markdown and while typing alike (the e2e audit's F15).
   // Code spans are left alone: they take precedence over links in CommonMark,
-  // so `` `](` `` is code, and a URL never carries a backtick (the URL parser
-  // percent-encodes it), so one cannot close inside a destination we wrote.
+  // so `` `](` `` is code. The writer escapes a backtick in a destination (the
+  // URL parser percent-encodes one in a path but not in a query), so a code
+  // span cannot close inside a destination we wrote.
   const inDestination = inOpenDestination(window);
 
   for (const rule of INLINE_RULES) {
@@ -308,7 +317,12 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
     let link: string | undefined;
 
     if (rule.isLink) {
-      const href = sanitizeUrl(match[2] ?? '');
+      // From Markdown the text is a projection, in which an escaped character
+      // is a NUL. One in a host made the URL unparseable, so the writer's own
+      // `[x](https://a\&amp;b.test/)` was not a link. It stands for a
+      // character, so it is tested as one; the reader then takes the real
+      // href from the content. Typed text never holds a NUL.
+      const href = sanitizeUrl((match[2] ?? '').replaceAll(ESCAPED_PLACEHOLDER, 'a'));
 
       // An unsafe or unparseable URL leaves the literal text alone.
       if (!href) {
