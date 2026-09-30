@@ -979,3 +979,31 @@ describe('audit 12', () => {
     },
   );
 });
+
+describe('audit 13', () => {
+  // A closed angle form whose URL is refused is not a link, and neither is
+  // anything inside it: the plain rule used to retry from a `[` in the URL.
+  test.each(['[y](<.[x](/q>)', '[y](<javascript:void[x](//evil.test/>)'])(
+    '%s is not a link',
+    (markdown) => {
+      expect(blocksFromMarkdown(markdown)[0]?.content).toEqual(t(markdown));
+    },
+  );
+
+  // An unclosed one is just text, and a link after it is a link, as in CommonMark.
+  test('a link after an unclosed angle form is still a link', () => {
+    expect(blocksFromMarkdown('[y](<a[x](/q)')[0]?.content).toEqual([
+      { text: '[y](<a' },
+      { text: 'x', link: '/q' },
+    ]);
+  });
+
+  test('an image destination that opens with "<" and does not close is not an image', () => {
+    const block = blocksFromMarkdown('![a](<u:p@b.test/x.png)')[0];
+    expect(block?.type).toBe('paragraph');
+  });
+
+  test('an image with no destination yet is still an image', () => {
+    expect(blocksFromMarkdown('![a]()')[0]?.type).toBe('image');
+  });
+});

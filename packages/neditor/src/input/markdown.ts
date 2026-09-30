@@ -66,7 +66,7 @@ const TOGGLE_MARKER = /^([\u25B8\u25BE])(?:\s+|$)/;
  * URL has to go inside angle brackets to survive; the alt text may carry
  * escapes, since a bare `]` would close the label early.
  */
-const IMAGE_LINE = /^!\[((?:\\.|[^\]\n])*)\]\((?:<([^<>\n]*)>|([^)\s]*))\)$/;
+const IMAGE_LINE = /^!\[((?:\\.|[^\]\n])*)\]\((?:<([^<>\n]*)>|((?:[^)\s<][^)\s]*)?))\)$/;
 
 /** A GFM table row; the leading pipe is what identifies one. */
 const TABLE_ROW = /^\|/;
@@ -636,7 +636,7 @@ export function parseInlineMarkdown(text: string): RichText {
       continue;
     }
 
-    const match = matchInlineRule(matchable);
+    const match = matchInlineRule(matchable, { projection: true });
 
     if (!match) {
       continue;

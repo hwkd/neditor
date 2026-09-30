@@ -188,8 +188,9 @@ function linkOpener(window: string, angled: boolean): number {
  * A bare URL's start in the part of a token that precedes a span's opener.
  *
  * A protocol anywhere in it; `www.` opening the token or after `*`, `_`, `~`,
- * `(`, `[` or `]` -- or the placeholder the Markdown reader puts where one of
- * them was escaped -- so `awww.cute` is a word. Either case.
+ * `(`, `[` or `]` -- or the placeholder the Markdown reader puts where a
+ * character was escaped or a reference decoded, neither of which is a letter
+ * -- so `awww.cute` is a word. Either case.
  *
  * This is not GFM's autolink grammar, and each attempt to make it so took
  * underscores out of real URLs: refusing a `_` straight after the scheme broke
@@ -236,7 +237,16 @@ function opensInBareUrl(window: string, opener: number): boolean {
   return BARE_URL_IN_TOKEN.test(window.slice(token, opener));
 }
 
-export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null {
+export function matchInlineRule(
+  textBeforeCaret: string,
+  options: {
+    /**
+     * The text is the Markdown reader's projection, in which a NUL stands for
+     * an escaped character. Never set for typed text, where a NUL is a NUL.
+     */
+    readonly projection?: boolean;
+  } = {},
+): InlineRuleMatch | null {
   // One character past the window, so the lookbehinds see what really precedes
   // a candidate opening delimiter rather than the cut.
   const offset = Math.max(0, textBeforeCaret.length - INLINE_SPAN_LIMIT - 1);
@@ -317,14 +327,26 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
     let link: string | undefined;
 
     if (rule.isLink) {
-      // From Markdown the text is a projection, in which an escaped character
-      // is a NUL. One in a host made the URL unparseable, so the writer's own
+      // In the reader's projection an escaped character is a NUL. One in a
+      // host made the URL unparseable, so the writer's own
       // `[x](https://a\&amp;b.test/)` was not a link. It stands for a
-      // character, so it is tested as one; the reader then takes the real
-      // href from the content. Typed text never holds a NUL.
-      const href = sanitizeUrl((match[2] ?? '').replaceAll(ESCAPED_PLACEHOLDER, 'a'));
+      // character, so there it is tested as one, and the reader then takes
+      // the real href from the content. Only there: typing applies this href
+      // as it is, and a literal NUL in a block's text must not become a link
+      // to a host the text does not hold.
+      const destination = match[2] ?? '';
+      const href = sanitizeUrl(
+        options.projection ? destination.replaceAll(ESCAPED_PLACEHOLDER, 'a') : destination,
+      );
 
-      // An unsafe or unparseable URL leaves the literal text alone.
+      // An unsafe or unparseable URL leaves the literal text alone -- all of
+      // it, when it is a closed angle form: the plain rule below is anchored
+      // only at the caret, and would retry from a `[` inside the refused URL
+      // (`[y](<javascript:void[x](//evil.test/>)` linked `x`).
+      if (!href && rule.angled) {
+        return null;
+      }
+
       if (!href) {
         continue;
       }

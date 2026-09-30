@@ -266,3 +266,13 @@ describe('emphasis needs a delimiter that can actually open or close', () => {
     expect(runs.some((run) => (run.marks ?? []).includes('code'))).toBe(true);
   });
 });
+
+// The placeholder is the Markdown reader's. In typed text a NUL is a NUL: it is
+// not stood in for, so a link is never made to a host the text does not hold.
+test("a NUL in typed text is not read as the reader's placeholder", () => {
+  const nul = String.fromCharCode(0);
+  expect(matchInlineRule(`[x](https://bank${nul}.test/)`)).toBeNull();
+  expect(
+    matchInlineRule(`[x](https://bank${nul}.test/)`, { projection: true })?.link,
+  ).toBeDefined();
+});

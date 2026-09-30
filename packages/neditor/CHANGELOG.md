@@ -112,7 +112,8 @@ that changes what you store or what other applications receive is listed first.
 - Typing or pasting a bare URL with `_x_` in it (`https://a.test/_y_`)
   italicised the `y` and deleted the underscores. A `_` span that opens inside
   a bare URL (`http://` or `https://` anywhere in a word, or `www.` at its
-  start or after `*`, `_`, `~`, `(`, `[` or `]`; up to the next whitespace) is no
+  start or after `*`, `_`, `~`, `(`, `[`, `]` or, in pasted Markdown, any
+  backslash-escaped character; up to the next whitespace) is no
   longer one, wherever it closes; a span that
   opens before the URL (`_see https://a.test_`) still is. The test is broader
   than GFM's autolink rule on purpose, so `http://_a_` and a link label that
@@ -121,8 +122,9 @@ that changes what you store or what other applications receive is listed first.
 - A pasted link whose destination held a backslash escape
   (`[wiki](https://en.wikipedia.org/wiki/Foo_\(bar\))`) linked to a URL with a
   NUL where the escaped character was, and an image's destination kept the
-  backslash. The escape is now resolved in both. (Which text is a link at all
-  is unchanged: `[x](\#top)` still is not one.)
+  backslash. The escape is now resolved in both, and a destination with an
+  escape in its host (`[x](https://exa\_mple.test/)`), which was not read as
+  a link at all, now is.
 - A link in a table cell whose URL holds a `|` split the cell in two and lost
   the link.
 - An image whose `data:` source was line-wrapped base64 came back from Markdown
@@ -130,5 +132,6 @@ that changes what you store or what other applications receive is listed first.
   unwrapped.
 - A link written in the `<…>` form whose URL holds a `)` and no `https:`
   (`mailto:team@example.com?subject=Feedback%20(v2)`) was read back, and typed,
-  as a link to `https://%3Cmailto:…`. A destination that opens with `<` is only
-  ever the angle form.
+  as a link to `https://%3Cmailto:…`. A link or image destination that opens
+  with `<` is only ever the angle form, and a closed one whose URL is refused
+  is text, with no link made out of a `[…](` inside it.
