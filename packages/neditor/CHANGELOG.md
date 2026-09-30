@@ -60,7 +60,8 @@ that changes what you store or what other applications receive is listed first.
 - **Markdown.** An image's caption is written after the image, following a hard
   break, instead of being dropped. A backtick or `<` in its alt text (or in a
   callout's icon) is escaped, so other readers cannot pair it with one in the
-  caption. An image with no source yet is written
+  caption, and a line break there is written as a space: written raw it split
+  the image line and the image came back as two paragraphs. An image with no source yet is written
   `![alt]()` instead of being lost.
 - **Markdown reader.** Numeric character references are decoded at the edges
   of a block's text, where this writer puts them, and nowhere else. `<strong>`,

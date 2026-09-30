@@ -1124,7 +1124,10 @@ function escapeContinuations(markdown: string): string {
 const LABEL_ESCAPE = /[\\[\]`<]/g;
 
 function escapeMarkdownLabel(text: string): string {
-  return text.replace(LABEL_ESCAPE, (char) => `\\${char}`);
+  // A label is one line. An alt attribute pasted from HTML can be wrapped, and
+  // written raw the break split the image line in two: the block came back as
+  // two paragraphs. The break means a space there, so that is what is written.
+  return text.replace(/\s*[\r\n]+\s*/g, ' ').replace(LABEL_ESCAPE, (char) => `\\${char}`);
 }
 
 /** Characters a destination cannot hold bare: the first `)` would close it. */

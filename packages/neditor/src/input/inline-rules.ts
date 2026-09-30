@@ -113,9 +113,16 @@ export const BARE_URL_START = /https?:\/\/|www\./i;
  *
  * Only the last `](` can be the open one, so the pattern runs on the tail from
  * there -- run unanchored over the window, it retried from every `](` in it and
- * a pasted line of them took seconds. Neither spelling of a destination holds
- * whitespace (the writer percent-encodes it in the `<…>` form too), which is
- * what keeps an unclosed `](<` from swallowing the rest of a line of prose.
+ * a pasted line of them took seconds. Neither spelling of a destination the
+ * writer emits holds whitespace (it percent-encodes it in the `<…>` form too),
+ * and stopping at it is what keeps an unclosed `](<` from swallowing the rest
+ * of a line of prose.
+ *
+ * The cost is foreign Markdown: the angled link rule itself admits a space, so
+ * in `[a](<https://a.test/my docs/__init__.py>)` the text after the space is
+ * not protected and `__init__` is emboldened out of the URL. Telling that
+ * destination from prose needs the `>)` that has not been typed yet; the
+ * reader could look ahead and typing cannot, and the two are kept identical.
  */
 function inOpenDestination(window: string): boolean {
   const at = window.lastIndexOf('](');

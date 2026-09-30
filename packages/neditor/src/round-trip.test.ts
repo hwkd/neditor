@@ -1091,3 +1091,35 @@ describe('audit 15', () => {
     ]);
   });
 });
+
+describe('audit 16', () => {
+  // An alt attribute pasted from HTML can be wrapped. Written raw, the break
+  // split the image line in two and the image came back as two paragraphs.
+  test.each(['A chart of revenue\nby quarter', 'a\r\n  b', 'a\rb'])(
+    'an alt text holding %j keeps its image',
+    (alt) => {
+      const blocks = [b({ type: 'image', src: 'https://a.test/x.png', alt })];
+      const back = throughMarkdown(blocks);
+      expect(back).toHaveLength(1);
+      expect(back[0]?.type).toBe('image');
+      expect(back[0]?.alt).toBe(alt.replace(/\s*[\r\n]+\s*/g, ' '));
+    },
+  );
+
+  test('a callout icon holding a line break keeps its callout', () => {
+    const blocks = [b({ type: 'callout', icon: 'a\nb', content: t('text') })];
+    const back = throughMarkdown(blocks);
+    expect(back).toHaveLength(1);
+    expect(back[0]?.type).toBe('callout');
+    expect(back[0]?.icon).toBe('a b');
+  });
+
+  // The other edge of `inOpenDestination`'s plain form: a closed angle form
+  // that was refused is over, and emphasis after it is emphasis.
+  test('emphasis straight after a closed angle form that is not a link still closes', () => {
+    expect(blocksFromMarkdown('[a](<b>*x*')[0]?.content).toEqual([
+      { text: '[a](<b>' },
+      { text: 'x', marks: ['italic'] },
+    ]);
+  });
+});

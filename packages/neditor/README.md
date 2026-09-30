@@ -250,7 +250,8 @@ These convert the moment you type the closing delimiter:
 The HTML spellings the Markdown writer uses for formatting that starts or ends
 with a space convert too: `<u>underline</u>`, `<strong>`, `<em>`, `<s>` and
 `<code>`. Inside a link destination only the link itself and a code span close, so `_x_`
-in a URL is not italicised, and neither is a `_x_` that opens inside a bare URL, up to the next
+in a URL is not italicised (up to the first space, if the destination is a pasted `<…>` one
+that holds any -- this editor never writes one), and neither is a `_x_` that opens inside a bare URL, up to the next
 whitespace; `_see https://a.test_`, which opens before it, still is. A bare URL here is
 `http://` or `https://` anywhere in a word, or `www.` at its start or after `*`, `_`, `~`,
 `(`, `[` or `]` (or, in pasted Markdown, after any backslash-escaped character), in either
@@ -680,9 +681,12 @@ writes is what `blocksFromMarkdown` reads back:
   two backticks would close a code span, a `](` reads as a link of its own
   inside the URL, and other readers decode the reference. A relative URL holding a space or an angle
   bracket comes back percent-encoded (`/a b` as `/a%20b`).
-- An alt text or callout icon containing `[` or `]` is escaped, and unescaped on
-  the way back, so a `]` cannot close the label early and leak the rest of the
-  line into the document as markup.
+- In an alt text or a callout icon, `[`, `]`, `\`, a backtick and `<` are
+  escaped, and unescaped on the way back: a `]` would close the label early and
+  leak the rest of the line into the document as markup, and other readers
+  pair a backtick or a `<` with one in the caption and lose the image. A line
+  break in one (an alt attribute pasted from wrapped HTML) is written as a
+  space, because a label is a single line.
 - Whitespace and newlines at either edge of a block's text are written as
   numeric character references (`&#32;`, `&#10;`), because leading spaces are
   indentation and every reader trims the rest. Splitting "Alpha one" with
