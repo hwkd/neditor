@@ -180,21 +180,22 @@ test.describe('09 · gutter & block drag', () => {
     expect(await editor.ids()).toEqual(['before', 'after', 'tg', 'child1', 'child2']);
   });
 
-  test('G10 dragging the block you are typing in leaves one mode, so typing on does not destroy it', async ({
+  test('G10 dragging the block you are typing in leaves block mode whole, with no caret behind', async ({
     editor,
-    page,
   }) => {
-    test.fail(
-      true,
-      'FINDING F12: dragging the block that holds the caret leaves focus and the caret in its host while the block is block-selected, so the next keystroke replaces the whole block',
-    );
+    // Was FINDING F12: the drag selected the block without taking focus, so the
+    // caret stayed live in the moved block while it was block-selected, and the
+    // next keystroke replaced a block the reader could see a caret in. The
+    // drop keeps the block selected (as G5 does for a selection), so it must
+    // leave block mode whole: focus on the root, no caret in any host.
     await editor.load({ doc: 'five' });
     await editor.clickAt('a', 3);
     await editor.dragBlock('a', 'd', 'after');
     expect(await editor.ids()).toEqual(['b', 'c', 'd', 'a', 'e']);
+    expect(await editor.selected()).toEqual(['a']);
+    await expect(editor.root).toBeFocused();
+    expect(await editor.selection()).toBeNull();
     expect(await editor.invariants()).toEqual([]);
-    await page.keyboard.type('x');
-    expect(await editor.texts()).toContain('Block A');
   });
 
   test('G9 no gutter with dragHandles:false or in read-only', async ({ editor }) => {

@@ -1815,14 +1815,16 @@ export class NEditor {
   /**
    * Enters (or updates) block selection.
    *
-   * `takeFocus` is false only while a drag-select is still in progress, where
-   * clearing the DOM selection would abort the very gesture that is building
-   * this selection.
+   * It always takes the caret out of the text: a DOM range left in a host while
+   * blocks are selected is a caret the reader can see and keystrokes that go
+   * somewhere else. `reveal` is false while a handle drag is in progress, where
+   * scrolling to the anchor would move the page under the pointer and change the
+   * gap it is aiming at.
    */
   #setBlockSelection(
     ids: readonly string[],
     anchorId?: string,
-    options: { takeFocus?: boolean } = {},
+    options: { reveal?: boolean } = {},
   ): void {
     // Selection anchors live in visible space. A block inside a collapsed
     // toggle is not something the reader can point at, and an invisible id in
@@ -1861,16 +1863,14 @@ export class NEditor {
     this.#hideTableToolbar();
     this.#closeSlashMenu();
 
-    if (options.takeFocus ?? true) {
-      // Blocks, not characters, are the subject now: drop the caret and let the
-      // root take the keystrokes.
-      this.#selection()?.removeAllRanges();
-      this.#root.focus({ preventScroll: true });
-      const anchor = this.#selectionAnchor;
+    // Blocks, not characters, are the subject now: drop the caret and let the
+    // root take the keystrokes.
+    this.#selection()?.removeAllRanges();
+    this.#root.focus({ preventScroll: true });
+    const anchor = this.#selectionAnchor;
 
-      if (anchor) {
-        this.#reveal(this.#renderer.getView(anchor)?.root);
-      }
+    if (anchor && (options.reveal ?? true)) {
+      this.#reveal(this.#renderer.getView(anchor)?.root);
     }
 
     this.#emitter.emit('blockselection', { ids: [...this.#selected] });
@@ -2208,7 +2208,12 @@ export class NEditor {
         );
 
         // Same escape as in text mode: a Tab that changes nothing moves focus.
+        // Leave block selection first. The next tab stop is often the first
+        // block's own host, and a caret placed there while the selection
+        // survived routed the next character to the selection -- replacing a
+        // block the reader could see a caret in.
         if (indented.every((next, index) => next.depth === this.#blocks[index]?.depth)) {
+          this.#clearBlockSelection();
           return;
         }
 
@@ -2701,7 +2706,10 @@ export class NEditor {
       drag.active = true;
       this.#gutter.setDragging(true);
       this.#root.dataset.dragging = 'true';
-      this.#setBlockSelection([...drag.ids], [...drag.ids][0], { takeFocus: false });
+      // Taking focus, not only selecting: a drag that started from the block
+      // holding the caret otherwise left that caret live in the moved block,
+      // and the next keystroke replaced the whole block.
+      this.#setBlockSelection([...drag.ids], [...drag.ids][0], { reveal: false });
     }
 
     const gap = this.#dropGapFor(event.clientY);

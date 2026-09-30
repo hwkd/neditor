@@ -87,14 +87,15 @@ test.describe('08 · block selection (keyboard)', () => {
     editor,
     page,
   }) => {
-    test.fail(
-      true,
-      'FINDING F6: the no-op Tab lets focus reach the first block host but keeps #selected, so the next character typed at the visible caret replaces the whole block',
-    );
+    // Was FINDING F6: focus reached the first block's host but the block
+    // selection survived, so the character typed at the visible caret
+    // replaced the whole block.
     await editor.load({ doc: 'five' });
     await page.evaluate(() => window.__e2e.editor.selectBlocks(['a']));
     await page.keyboard.press('Tab'); // nothing above `a` to nest under
     await expect(editor.root).not.toBeFocused();
+    expect(await editor.selected()).toEqual([]);
+    expect(await editor.invariants()).toEqual([]);
     await page.keyboard.type('x');
     // Whatever mode the editor lands in, typing must not destroy "Block A".
     expect((await editor.texts())[0]).toContain('Block A');

@@ -329,3 +329,81 @@ describe('undoing an edit made in block-selection mode leaves somewhere to type'
     expect(editor.getSelectionState()).not.toBeNull();
   });
 });
+
+describe('a gesture that leaves block mode, or enters it, leaves only one mode behind', () => {
+  /**
+   * The literal scenario from the e2e finding (F6): one block selected, Tab
+   * with nothing above it to nest under. The key is rightly not swallowed --
+   * the editor must not be a keyboard trap -- so the browser moves focus on,
+   * and the next tab stop is the first block's own host. Nothing ended block
+   * selection on the way, so the reader saw a caret in that block and the next
+   * character was routed to the invisible selection: it replaced the block.
+   * happy-dom performs no default action, so the focus move is done by hand,
+   * exactly as the browser does it after the unprevented keydown.
+   */
+  test('a Tab that changes nothing ends block selection before focus moves on', () => {
+    const editor = mount(abc());
+    editor.selectBlocks([idFor(editor, 'a')]);
+
+    const prevented = press(editor.element, 'Tab');
+
+    expect(prevented, 'the Tab must still be free to leave').toBe(false);
+    expect(editor.getSelectedBlocks()).toEqual([]);
+
+    hosts(editor)[0]!.focus();
+    press(hosts(editor)[0]!, 'x');
+
+    expect(texts(editor)).toEqual(['a', 'b', 'c']);
+  });
+
+  test('a Tab that does indent keeps the selection it indented', () => {
+    const editor = mount(abc());
+    editor.selectBlocks([idFor(editor, 'b')]);
+
+    expect(press(editor.element, 'Tab')).toBe(true);
+    expect(editor.getSelectedBlocks()).toEqual([idFor(editor, 'b')]);
+  });
+
+  /**
+   * F12: the handle drag entered block selection without taking focus, so when
+   * the dragged block was the one holding the caret, focus and the DOM range
+   * stayed in its host. The reader saw a caret in the block they had just
+   * moved, and the next keystroke replaced it. A handle drag has no native
+   * selection gesture to protect, so it enters block mode the whole way.
+   */
+  test('dragging the block that holds the caret takes the caret out of it', () => {
+    const editor = mount(abc());
+    const a = idFor(editor, 'a');
+    expect(editor.focus(a, 1)).toBe(true);
+
+    const view = editor.element.querySelectorAll('.neditor-block')[0]!;
+    view.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, pointerId: 7 }));
+    const handle = editor.element.querySelector('.neditor-gutter__handle')!;
+    handle.dispatchEvent(
+      new PointerEvent('pointerdown', {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 7,
+        button: 0,
+        clientY: 0,
+      }),
+    );
+    document.dispatchEvent(
+      new PointerEvent('pointermove', { bubbles: true, pointerId: 7, clientY: 400 }),
+    );
+
+    // Mid-drag: one mode already.
+    expect(editor.getSelectedBlocks()).toEqual([a]);
+    expect(document.activeElement).toBe(editor.element);
+    expect(document.getSelection()?.rangeCount ?? 0).toBe(0);
+
+    document.dispatchEvent(
+      new PointerEvent('pointerup', { bubbles: true, pointerId: 7, clientY: 400 }),
+    );
+
+    expect(texts(editor)).toEqual(['b', 'c', 'a']);
+    expect(editor.getSelectedBlocks()).toEqual([a]);
+    expect(document.activeElement).toBe(editor.element);
+    expect(editor.getSelectionState(), 'no caret is left for the reader to type at').toBeNull();
+  });
+});

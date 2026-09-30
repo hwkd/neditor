@@ -114,11 +114,13 @@ test.describe('23 · touch', () => {
     editor,
     page,
   }) => {
-    // The tap that offers the gutter also places the caret in the block being dragged.
-    test.fail(
-      true,
-      'FINDING F12: dragging the block that holds the caret leaves focus and the caret in its host while the block is block-selected, so the next keystroke replaces the whole block',
-    );
+    // The tap that offers the gutter also places the caret in the block being
+    // dragged -- the ordinary touch path to F12.
+    // Was FINDING F12: the drag selected the block without taking focus, so the
+    // caret stayed live in the moved block while it was block-selected, and the
+    // next keystroke replaced a block the reader could see a caret in. The
+    // drop keeps the block selected (as G5 does for a selection), so it must
+    // leave block mode whole: focus on the root, no caret in any host.
     await editor.load({ doc: 'five' });
     const finger = await Finger.attach(page);
     await tapBlock(editor, finger, 'a');
@@ -133,6 +135,8 @@ test.describe('23 · touch', () => {
 
     expect(await editor.ids()).toEqual(['b', 'c', 'd', 'a', 'e']);
     expect(await page.evaluate(() => window.scrollY)).toBe(scrollBefore);
+    expect(await editor.selected()).toEqual(['a']);
+    expect(await editor.selection()).toBeNull();
     expect(await editor.invariants()).toEqual([]);
   });
 
