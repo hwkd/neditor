@@ -95,7 +95,14 @@ const INLINE_RULES: readonly InlineRule[] = [
  */
 export const INLINE_SPAN_LIMIT = 2000;
 
-/** What opens a bare URL. Shared with the writer, which must agree on where one is. */
+/**
+ * What can open a bare URL, for the writer (`bareUrls` in `model/document.ts`).
+ *
+ * Deliberately looser than the reader's `BARE_URL_IN_TOKEN`, which also asks
+ * what comes before and after: the writer only uses it to leave a `_` between
+ * two letters or digits bare, and that one is no delimiter to any reader
+ * whether or not a URL is there.
+ */
 export const BARE_URL_START = /https?:\/\/|www\./i;
 
 /**
@@ -181,8 +188,14 @@ function linkOpener(window: string, angled: boolean): number {
  * a word. A protocol is linked after any character that is not a letter, which
  * is what lets a quoted or punctuated URL through (`"https://…"`, `see:https://…`):
  * holding it to the `www.` rule italicised those again. Either case, as GFM reads them.
+ *
+ * Not after `[`, though: a link's label is not autolinked, so a span in
+ * `[https://a.test/__init__](…)` is a span to every reader. And not with a `_`
+ * straight after it: `http://_a_` has no host, links nowhere, and is italic.
+ * (GFM's full rule -- no `_` in the last two segments of the host -- is not
+ * reproduced; `https://a.b_c.d/_y_` stays literal here.)
  */
-const BARE_URL_IN_TOKEN = /(?:^|[^a-z])(https?:\/\/)|(?:^|[*_~(])(www\.)/i;
+const BARE_URL_IN_TOKEN = /(?:^|[^a-z[])(https?:\/\/)(?!_)|(?:^|[*_~(])(www\.)(?!_)/i;
 
 /**
  * Whether a span whose opening delimiter is at `opener` opens inside a bare

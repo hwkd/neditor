@@ -593,6 +593,32 @@ describe('typing a line and pasting it give the same result', () => {
     // `www.` in the middle of a word opens no URL.
     ['_awww.cute_', [{ text: 'awww.cute', marks: ['italic'] }]],
     ['awww._x_', [{ text: 'awww.' }, { text: 'x', marks: ['italic'] }]],
+    // A protocol after a letter is no URL; after a digit it is. As micromark reads them.
+    ['xhttps://a.test/_y_', [{ text: 'xhttps://a.test/' }, { text: 'y', marks: ['italic'] }]],
+    ['XHTTPS://a.test/_y_', [{ text: 'XHTTPS://a.test/' }, { text: 'y', marks: ['italic'] }]],
+    ['1http://a.test/_y_', [{ text: '1http://a.test/_y_' }]],
+    // Nor is a scheme with no host after it: GFM links none of these.
+    [
+      'see http://_a_ now',
+      [{ text: 'see http://' }, { text: 'a', marks: ['italic'] }, { text: ' now' }],
+    ],
+    ['www._y_', [{ text: 'www.' }, { text: 'y', marks: ['italic'] }]],
+    // A link's label is not autolinked, so a span in it is a span, whichever
+    // way the URL in it is spelled.
+    [
+      '[https://a.test/__init__](https://a.test/)',
+      [
+        { text: 'https://a.test/', link: 'https://a.test/' },
+        { text: 'init', marks: ['bold'], link: 'https://a.test/' },
+      ],
+    ],
+    [
+      '[www.a.test/__init__](https://a.test/)',
+      [
+        { text: 'www.a.test/', link: 'https://a.test/' },
+        { text: 'init', marks: ['bold'], link: 'https://a.test/' },
+      ],
+    ],
   ])('a `_` span and a bare URL: %s', async (line, content) => {
     const { parseInlineMarkdown } = await import('./index.ts');
     const editor = mount([block({})]);
