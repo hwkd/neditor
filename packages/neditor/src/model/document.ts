@@ -961,10 +961,16 @@ const NUMERIC_REFERENCE_AMPERSAND = /&(?=#(?:\d+|[xX][0-9a-fA-F]+);)/g;
  * must not be read as syntax, so other readers render it correctly too.
  */
 function protectEdgeWhitespace(markdown: string): string {
+  // A newline at an edge arrives here as the soft-break marker, `\` + newline,
+  // and was lost the same way (the e2e audit's F14: Shift+Enter at the end of a
+  // block). One backslash before the newline is the marker; any before it are
+  // escaped literal backslashes, which these patterns never swallow.
   const encode = (run: string) =>
-    run.replace(/[^\S\n]/g, (char) => `&#${char.codePointAt(0) ?? 32};`);
+    run.replace(/\\\n|[^\S\n]/g, (token) =>
+      token === '\\\n' ? '&#10;' : `&#${token.codePointAt(0) ?? 32};`,
+    );
 
-  return markdown.replace(/^[^\S\n]+/, encode).replace(/[^\S\n]+$/, encode);
+  return markdown.replace(/^(?:\\\n|[^\S\n])+/, encode).replace(/(?:\\\n|[^\S\n])+$/, encode);
 }
 
 /** Stops a paragraph that begins with `#`, `-` or `1.` becoming that block. */

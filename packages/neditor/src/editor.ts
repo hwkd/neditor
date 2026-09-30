@@ -3937,8 +3937,10 @@ export class NEditor {
     host.setAttribute('role', 'combobox');
     // A combobox is an input field and needs a name (WCAG 4.1.2). The host has
     // none of its own -- its element supplies its role and content -- so it
-    // borrows the menu's for exactly as long as it is one.
-    host.setAttribute('aria-label', this.#labels.slashMenu);
+    // borrows the menu's for exactly as long as it is one. By reference, not
+    // aria-label: a to-do's checkbox is itself named by this host, and a label
+    // here renamed the checkbox "Block types"; a reference is not followed twice.
+    host.setAttribute('aria-labelledby', this.#slashMenu.listId);
     host.setAttribute('aria-expanded', 'true');
     host.setAttribute('aria-haspopup', 'listbox');
     host.setAttribute('aria-controls', this.#slashMenu.listId);
@@ -3961,7 +3963,7 @@ export class NEditor {
 
     for (const attribute of [
       'role',
-      'aria-label',
+      'aria-labelledby',
       'aria-expanded',
       'aria-haspopup',
       'aria-controls',
@@ -4691,7 +4693,8 @@ export class NEditor {
           // offset read afterwards was 0 on the way up.
           const offset = getCaretOffset(content);
           this.#moveVisible(new Set([block.id]), -1);
-          this.focus(block.id, offset);
+          // Back into the same host: a table's cell, not its block id (0:0).
+          this.#focusResolved(resolved, offset);
         } else if (event.shiftKey && isCaretAtStart(content)) {
           // Shift-extending past the top of a block selects whole blocks: the
           // browser cannot carry a text selection into another editing host.
@@ -4711,7 +4714,8 @@ export class NEditor {
           // offset read afterwards was 0 on the way up.
           const offset = getCaretOffset(content);
           this.#moveVisible(new Set([block.id]), 1);
-          this.focus(block.id, offset);
+          // Back into the same host: a table's cell, not its block id (0:0).
+          this.#focusResolved(resolved, offset);
         } else if (event.shiftKey && isCaretAtEnd(content)) {
           event.preventDefault();
           this.#extendFromTextToBlocks(block.id, 1);
@@ -4887,6 +4891,14 @@ export class NEditor {
 
   #handleFocusIn = (event: FocusEvent): void => {
     const resolved = this.#resolve(event.target);
+
+    // Focus moved into a block's text by the keyboard or a screen reader -- no
+    // pointer involved -- is the reader choosing that text, so the block
+    // selection ends rather than a stray-caret check taking it back (see
+    // #takeStrayCaretOut, which is for carets the browser puts back itself).
+    if (resolved && this.#selected.size > 0 && !this.#pointerDown) {
+      this.#clearBlockSelection();
+    }
 
     if (resolved) {
       this.#emitter.emit('focus', { blockId: resolved.block.id });

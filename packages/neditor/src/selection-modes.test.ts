@@ -480,9 +480,13 @@ describe('block-mode clipboard events find the editor wherever the browser sends
     const editor = mount(abc());
     editor.selectBlocks([idFor(editor, 'b')]);
 
-    clipboard('cut', editor.element);
+    // A second handling would paste over its own result: the same text, so
+    // the text cannot tell -- but two history entries, so one undo can.
+    clipboard('paste', editor.element, { 'text/plain': 'x' });
+    expect(texts(editor)).toEqual(['a', 'x', 'c']);
 
-    expect(texts(editor)).toEqual(['a', 'c']);
+    editor.undo();
+    expect(texts(editor)).toEqual(['a', 'b', 'c']);
   });
 });
 
@@ -495,12 +499,13 @@ describe('block selection made by a pointer stays the only mode', () => {
    * a caret that turns up inside a host while blocks are selected, with no
    * pointer down, is taken back out rather than left to contradict it.
    */
-  test('a caret the browser puts back after the gesture is removed again', () => {
+  test('a range the browser drops into a block, focus unmoved, is removed again', () => {
     const editor = mount(abc());
     editor.selectBlocks([idFor(editor, 'b'), idFor(editor, 'c')]);
 
+    // Focus stays on the root; only the selection moves. (Focus moved into a
+    // block without a pointer is the reader's choice -- the test below.)
     const c = hosts(editor)[2]!;
-    c.focus();
     getSelection()?.collapse(c.firstChild, 1);
     document.dispatchEvent(new Event('selectionchange'));
 
@@ -540,6 +545,30 @@ describe('block selection made by a pointer stays the only mode', () => {
 
     expect(document.activeElement).toBe(editor.element);
     expect(getSelection()?.rangeCount ?? 0).toBe(0);
+  });
+
+  /**
+   * Found auditing F7. Focus moved into a block by the keyboard or a screen
+   * reader -- no pointer involved -- is the reader choosing that text. Taking
+   * the caret back out for the stale block selection would leave the next
+   * printable key replacing a block the reader may not even be looking at.
+   */
+  test('focus moved into a block without a pointer ends block selection instead', () => {
+    const editor = mount(abc());
+    editor.selectBlocks([idFor(editor, 'b')]);
+    const button = document.createElement('button');
+    document.body.append(button);
+    button.focus();
+
+    const a = hosts(editor)[0]!;
+    a.focus();
+    getSelection()?.collapse(a.firstChild, 1);
+    document.dispatchEvent(new Event('selectionchange'));
+
+    expect(editor.getSelectedBlocks()).toEqual([]);
+    expect(document.activeElement).toBe(a);
+    press(a, 'x');
+    expect(texts(editor)).toEqual(['a', 'b', 'c']);
   });
 
   test("another editor's caret is not this editor's business", () => {

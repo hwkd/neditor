@@ -2,8 +2,9 @@ import { expect, test } from '../helpers/test.ts';
 
 /**
  * A smoke test of the Astro demo site in apps/web. playwright.config.ts starts
- * its dev server on :4391 (DEMO_URL overrides); if it cannot come up, these
- * skip rather than fail, so an Astro problem does not mask the library suite.
+ * its dev server on :4391, and a server that fails to start fails the whole
+ * run, as any web server in that config does. DEMO_URL points the spec at a
+ * demo running elsewhere; if that one is unreachable, these two skip.
  */
 const DEMO_URL = process.env.DEMO_URL ?? 'http://localhost:4391/';
 

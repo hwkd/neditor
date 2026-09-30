@@ -431,7 +431,7 @@ describe('the slash menu is announced', () => {
     expect(content.getAttribute('aria-expanded')).toBe(null);
     expect(content.getAttribute('aria-activedescendant')).toBe(null);
     expect(content.getAttribute('role')).toBe(null);
-    expect(content.getAttribute('aria-label')).toBe(null);
+    expect(content.getAttribute('aria-labelledby')).toBe(null);
   });
 
   /**
@@ -447,7 +447,25 @@ describe('the slash menu is announced', () => {
     typeSlash(content);
 
     expect(content.getAttribute('role')).toBe('combobox');
-    expect(content.getAttribute('aria-label')).toBe('Types de bloc');
+    const listbox = document.getElementById(content.getAttribute('aria-labelledby') ?? '');
+    expect(listbox?.getAttribute('role')).toBe('listbox');
+    expect(listbox?.getAttribute('aria-label')).toBe('Types de bloc');
+  });
+
+  /**
+   * Found auditing F9. A to-do's checkbox is named by its text host
+   * (aria-labelledby), so an aria-label on the host renamed the checkbox
+   * "Block types" for as long as the menu was open. aria-labelledby on the host
+   * instead is not followed a second time when the checkbox's name is computed.
+   */
+  test("naming the combobox does not rename a to-do's checkbox", () => {
+    const editor = mount([block({ type: 'todo', content: [{ text: 'buy milk' }] })]);
+    const content = editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
+    content.focus();
+    typeSlash(content);
+
+    expect(content.getAttribute('role')).toBe('combobox');
+    expect(content.hasAttribute('aria-label')).toBe(false);
   });
   /**
    * F5 (e2e observation). Only an input event re-read the query, so arrowing

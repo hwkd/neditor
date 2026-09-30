@@ -885,6 +885,8 @@ describe('a shadow-mounted editor reads its caret where the browser hides it', (
     text: Node,
     offset: number,
     shape: 'dictionary' | 'variadic',
+    end = offset,
+    direction = 'forward',
   ) {
     const retargeted = document.createRange();
     retargeted.setStart(host, 0);
@@ -895,7 +897,8 @@ describe('a shadow-mounted editor reads its caret where the browser hides it', (
       focusNode: host,
       anchorOffset: 0,
       focusOffset: 0,
-      isCollapsed: true,
+      isCollapsed: offset === end,
+      direction,
       getRangeAt: () => retargeted,
       removeAllRanges() {},
       addRange() {},
@@ -953,6 +956,58 @@ describe('a shadow-mounted editor reads its caret where the browser hides it', (
       }
     });
   }
+});
+
+describe('a shadow-mounted selection keeps its direction', () => {
+  // Found auditing F10: a composed range is a StaticRange, which has no
+  // direction, so a backward selection read as forward and anchored at the
+  // wrong end. Selection.direction says which end the reader started from.
+  test('a backward selection read through getComposedRanges anchors at its end', async () => {
+    const { readSelection } = await import('./view/selection.ts');
+    const outer = document.createElement('div');
+    document.body.append(outer);
+    const shadow = outer.attachShadow({ mode: 'open' });
+    const host = document.createElement('p');
+    host.innerHTML = 'Alpha <b>one</b>';
+    shadow.append(host);
+    Object.defineProperty(shadow, 'getSelection', { value: undefined, configurable: true });
+    const text = host.firstChild!;
+    const bold = host.querySelector('b')!.firstChild!;
+    const retargeted = document.createRange();
+    retargeted.setStart(outer, 0);
+    const original = window.getSelection;
+    window.getSelection = () =>
+      ({
+        rangeCount: 1,
+        anchorNode: outer,
+        focusNode: outer,
+        isCollapsed: false,
+        direction: 'backward',
+        getRangeAt: () => retargeted,
+        getComposedRanges: () => [
+          {
+            startContainer: text,
+            startOffset: 1,
+            endContainer: bold,
+            endOffset: 2,
+            collapsed: false,
+          },
+        ],
+      }) as unknown as Selection;
+
+    try {
+      const reading = readSelection(host)!;
+      expect(reading.range.startContainer).toBe(text);
+      expect(reading.range.endContainer).toBe(bold);
+      // Backward: the reader started at the end.
+      expect(reading.anchorNode).toBe(bold);
+      expect(reading.anchorOffset).toBe(2);
+      expect(reading.focusNode).toBe(text);
+      expect(reading.focusOffset).toBe(1);
+    } finally {
+      window.getSelection = original;
+    }
+  });
 });
 
 describe('a shadow-mounted editor places its caret where the browser will take it', () => {

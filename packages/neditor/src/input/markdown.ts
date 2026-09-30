@@ -205,6 +205,16 @@ const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!&]/;
  */
 const NUMERIC_REFERENCE = /^&#(?:(\d{1,7})|[xX]([0-9a-fA-F]{1,6}));/;
 
+/**
+ * Where references are decoded: the run at either edge of a block's text, and
+ * nowhere else, because that is the only place the writer puts them. Decoding
+ * them everywhere corrupted foreign text -- a link destination holding `&#38;`
+ * came back with a NUL in it, and a pasted code span holding `&#169;` came
+ * back as a copyright sign.
+ */
+const LEADING_REFERENCES = /^(?:&#(?:\d{1,7}|[xX][0-9a-fA-F]{1,6});)+/;
+const TRAILING_REFERENCES = /(?:&#(?:\d{1,7}|[xX][0-9a-fA-F]{1,6});)+$/;
+
 function decodeReference(match: RegExpExecArray): string | null {
   const code = match[1] !== undefined ? Number(match[1]) : Number.parseInt(match[2] ?? '', 16);
 
@@ -304,6 +314,9 @@ export function parseInlineMarkdown(text: string): RichText {
   if (text.length === 0) {
     return [];
   }
+
+  const leadingEnd = LEADING_REFERENCES.exec(text)?.[0].length ?? 0;
+  const trailingStart = text.length - (TRAILING_REFERENCES.exec(text)?.[0].length ?? 0);
 
   // What a rule can still reach, plus the character of context the lookbehinds
   // need. Text before it is cut from `matchable` for good.
@@ -496,7 +509,7 @@ export function parseInlineMarkdown(text: string): RichText {
       index += 1;
       literal = next;
       projected = ESCAPED;
-    } else if (char === '&') {
+    } else if (char === '&' && (index < leadingEnd || index >= trailingStart)) {
       // A decoded reference is text, never a delimiter -- the same opacity an
       // escape gets, one placeholder per UTF-16 unit so offsets stay aligned.
       const reference = NUMERIC_REFERENCE.exec(text.slice(index, index + 12));

@@ -25,8 +25,11 @@ function selectionOf(element: HTMLElement): Selection | null {
 export interface SelectionReading {
   /** Start to end, in document order. */
   range: Range;
+  /** Where the reader started, which for a backward selection is the end. */
   anchorNode: Node;
+  anchorOffset: number;
   focusNode: Node;
+  focusOffset: number;
   isCollapsed: boolean;
 }
 
@@ -75,11 +78,15 @@ export function readSelection(node: Node): SelectionReading | null {
         const range = doc.createRange();
         range.setStart(first.startContainer, first.startOffset);
         range.setEnd(first.endContainer, first.endOffset);
+        // A composed range has no direction; the selection still knows it.
+        const backward = (selection as Selection & { direction?: string }).direction === 'backward';
 
         return {
           range,
-          anchorNode: first.startContainer,
-          focusNode: first.endContainer,
+          anchorNode: backward ? first.endContainer : first.startContainer,
+          anchorOffset: backward ? first.endOffset : first.startOffset,
+          focusNode: backward ? first.startContainer : first.endContainer,
+          focusOffset: backward ? first.startOffset : first.endOffset,
           isCollapsed: range.collapsed,
         };
       }
@@ -93,7 +100,9 @@ export function readSelection(node: Node): SelectionReading | null {
   return {
     range: selection.getRangeAt(0),
     anchorNode: selection.anchorNode,
+    anchorOffset: selection.anchorOffset,
     focusNode: selection.focusNode,
+    focusOffset: selection.focusOffset,
     isCollapsed: selection.isCollapsed,
   };
 }

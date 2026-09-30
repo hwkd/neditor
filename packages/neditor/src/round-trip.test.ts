@@ -113,6 +113,17 @@ const CORPUS: Record<string, Block[]> = {
   ],
   // The escape that makes the one above possible must not eat this.
   'literal numeric reference': [b({ content: t('write &#32; or &#x20; for a space') })],
+  // Found auditing F1: decoding references everywhere corrupted hrefs.
+  'link whose href holds a numeric reference': [
+    b({ content: t('x', { link: 'https://a.test/?q=a&#38;b' }) }),
+  ],
+  'code span holding a numeric reference': [b({ content: t('&#169;', { marks: ['code'] }) })],
+  // F14 (found auditing F1): a newline at either edge of a block -- Shift+Enter
+  // at the end of one -- was dropped the same way edge spaces were.
+  'trailing newline': [b({ content: t('a\n') })],
+  'leading newline': [b({ content: t('\na') })],
+  'newlines and spaces at both edges': [b({ content: t(' \na b\n ') })],
+  'trailing literal backslash then newline': [b({ content: t('a\\\n') })],
   // F4 (e2e finding): an image with no source came back as literal "![]()".
   'empty image': [b({ type: 'image', src: '', alt: '' })],
   'empty image with alt': [b({ type: 'image', src: '', alt: 'pending' })],
@@ -233,5 +244,29 @@ describe('an empty image is ours to write, not a reading of foreign markup', () 
     expect(blocksFromMarkdown('![x](javascript:alert(1))').map((block) => block.type)).toEqual([
       'paragraph',
     ]);
+  });
+});
+
+describe('numeric references are decoded only where the writer puts them', () => {
+  // The writer emits references only at the edges of a block's text. Decoding
+  // them anywhere else changed foreign text: a pasted code span, a link.
+  test('mid-text, in code and in link destinations they stay literal', () => {
+    const [code] = blocksFromMarkdown('use `&#169;` here');
+    expect(code?.content).toEqual([
+      { text: 'use ' },
+      { text: '&#169;', marks: ['code'] },
+      { text: ' here' },
+    ]);
+
+    const [link] = blocksFromMarkdown('see [x](https://a.test/?q=a&#38;b) now');
+    expect(link?.content[1]).toEqual({ text: 'x', link: 'https://a.test/?q=a&#38;b' });
+
+    const [prose] = blocksFromMarkdown('a &#32; b');
+    expect(prose?.content).toEqual([{ text: 'a &#32; b' }]);
+  });
+
+  test('at the edges they are decoded', () => {
+    const [block] = blocksFromMarkdown('&#32;one&#10;');
+    expect(block?.content).toEqual([{ text: ' one\n' }]);
   });
 });

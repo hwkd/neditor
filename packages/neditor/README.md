@@ -668,11 +668,14 @@ writes is what `blocksFromMarkdown` reads back:
 - An alt text or callout icon containing `[` or `]` is escaped, and unescaped on
   the way back, so a `]` cannot close the label early and leak the rest of the
   line into the document as markup.
-- Whitespace at either edge of a block's text is written as a numeric
-  character reference (`&#32;`), because leading spaces are indentation and
-  every reader trims the rest. Splitting "Alpha one" with `Enter` leaves
-  " one", and without this a Markdown copy or save read it back as "one". A
-  literal `&#32;` in your text is escaped, so it comes back as typed.
+- Whitespace and newlines at either edge of a block's text are written as
+  numeric character references (`&#32;`, `&#10;`), because leading spaces are
+  indentation and every reader trims the rest. Splitting "Alpha one" with
+  `Enter` leaves " one", and `Shift`+`Enter` at the end of a block leaves a
+  trailing newline; without this a Markdown copy or save lost both. References
+  are read back only at those edges -- anywhere else, including code spans and
+  link destinations, `&#…;` stays the text it is -- and a literal one at an edge
+  is escaped, so it comes back as typed.
 
 ## Headless use
 
