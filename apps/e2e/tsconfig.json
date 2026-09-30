@@ -3,7 +3,14 @@
   "compilerOptions": {
     "lib": ["es2022", "dom", "dom.iterable"],
     "types": ["node"],
-    "noEmit": true
+    "noEmit": true,
+    // Type-check against the package source, not its built declarations: the
+    // CI check job runs before anything is built, and `dist/` would otherwise
+    // be missing and every imported type would silently become `any`. At run
+    // time the suite still imports the built package (see vite.config.ts).
+    "paths": {
+      "@neditor/core": ["../../packages/neditor/src/index.ts"]
+    }
   },
   "include": ["fixtures", "helpers", "tests", "playwright.config.ts", "vite.config.ts"]
 }

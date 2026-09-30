@@ -118,12 +118,16 @@ test.describe('16 · tables', () => {
     page,
     browserName,
   }) => {
-    test.skip(
-      browserName === 'webkit' && process.platform === 'darwin',
-      'WebKit on macOS hands F10 to the host and blurs the page under Playwright; verified on Linux WebKit in CI',
+    test.fail(
+      browserName === 'webkit',
+      'FINDING F13: WebKit clears the document selection when focus moves to a toolbar button, so the editor decides the caret left the cell and hides the toolbar under the focus it just gave it',
     );
     await editor.load({ doc: 'table' });
     await editor.placeCaret('tbl', 1, 1, { row: 2, column: 2 });
+    // The toolbar follows the asynchronous selectionchange. F10 before it is
+    // shown focuses a hidden button and drops focus -- a race no person can
+    // win, so wait for it the way a person would.
+    await expect(editor.portal('table-toolbar')).toBeVisible();
     const buttons = editor.portal('table-toolbar').getByRole('button');
     await page.keyboard.press('F10');
     await expect(buttons.nth(0)).toBeFocused();

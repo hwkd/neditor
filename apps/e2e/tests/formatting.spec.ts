@@ -138,6 +138,7 @@ test.describe('06 · formatting & toolbar', () => {
     await expect(toolbar).toBeVisible();
     await page.mouse.wheel(0, 150);
     await expect(toolbar).toBeHidden();
+    await editor.settleScroll();
 
     // A block still on screen after the scroll, so placing the caret does not
     // scroll again (which would, correctly, hide the toolbar once more).

@@ -1,3 +1,4 @@
+import { expect } from '@playwright/test';
 import type { FrameLocator, Locator, Page } from '@playwright/test';
 import type { Block, NEditorDocument, NEditorOptions, SelectionState } from '@neditor/core';
 
@@ -266,6 +267,28 @@ export class EditorPage {
           requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
         ),
     );
+  }
+
+  /**
+   * Wait until the page has stopped scrolling. A wheel scroll is animated in
+   * some engines and on slower machines outlasts two frames, and a scroll
+   * event that lands after the next step closes whatever that step opened.
+   */
+  async settleScroll(): Promise<void> {
+    let last = -1;
+
+    await expect
+      .poll(
+        async () => {
+          const now = await this.page.evaluate(() => window.scrollY);
+          const still = now === last;
+          last = now;
+          return still;
+        },
+        { intervals: [100] },
+      )
+      .toBe(true);
+    await this.settle();
   }
 
   /* --------------------------------- input --------------------------------- */
