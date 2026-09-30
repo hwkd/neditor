@@ -471,7 +471,10 @@ describe('audit 2: what other readers see, and what this one must not misread', 
     const line = `${']('.repeat(1000)}${' *'.repeat(1000)}`;
     const began = performance.now();
     blocksFromMarkdown(line.repeat(10));
-    expect(performance.now() - began).toBeLessThan(400);
+    // A budget, not a ratio: the check works on a bounded window, so what it
+    // cost was a constant factor (3.6 s here) rather than a growth rate. Set
+    // well clear of the ~50 ms it takes, which a loaded machine has tripled.
+    expect(performance.now() - began).toBeLessThan(1500);
   });
 });
 
@@ -548,6 +551,15 @@ describe('audit 3', () => {
       ],
       '**a*****b***',
     ],
+    // Except `***a***` then `*b*`, which micromark -- remark, and so most of
+    // the ecosystem -- reads as `<em><strong>a</strong>**b</em>`.
+    [
+      [
+        { text: 'a', marks: ['bold', 'italic'] },
+        { text: 'b', marks: ['italic'] },
+      ],
+      '***a***<em>b</em>',
+    ],
   ] as const)('%j is written %s', (content, markdown) => {
     const blocks = [b({ content: content as never })];
     expect(toMarkdown({ blocks })).toBe(markdown);
@@ -577,11 +589,179 @@ describe('audit 3', () => {
     expect(toMarkdown({ blocks })).toBe('a\\\n&#32;&#32;b');
     expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
   });
+});
 
-  test('a long soft-broken paragraph parses in linear time', () => {
-    const markdown = Array.from({ length: 20000 }, (_, index) => `line ${index} text\\`).join('\n');
+/**
+ * Best of three, so one slow run on a loaded machine does not decide it.
+ *
+ * Timed as a ratio between two sizes rather than against a budget: a budget is
+ * a statement about the machine, and the absolute version of this test failed
+ * on an unmodified tree while passing on code that was still quadratic.
+ */
+const bestOf = (work: () => void): number => {
+  let best = Infinity;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     const began = performance.now();
-    blocksFromMarkdown(markdown);
-    expect(performance.now() - began).toBeLessThan(1000);
+    work();
+    best = Math.min(best, performance.now() - began);
+  }
+
+  return best;
+};
+
+/**
+ * How much longer sixteen times the input takes: about 16x for linear work,
+ * about 256x for quadratic. The line is drawn wide between them, because
+ * allocation makes honest linear work come out at 30x or so at these sizes, and
+ * more when the whole suite is running beside it.
+ */
+const LINEAR = 90;
+const growth = (work: (size: number) => void, size: number): number => {
+  let least = Infinity;
+
+  // A loaded machine only ever makes the ratio worse, so the lowest of a few
+  // measurements is the honest one; quadratic work is over the line every time.
+  for (let attempt = 0; attempt < 3 && least >= LINEAR; attempt += 1) {
+    work(size);
+    const small = bestOf(() => work(size));
+    const large = bestOf(() => work(size * 16));
+    least = Math.min(least, large / Math.max(small, 1));
+  }
+
+  return least;
+};
+describe('audit 4', () => {
+  test('a long soft-broken paragraph parses in linear time', () => {
+    expect(
+      growth((size) => {
+        blocksFromMarkdown(
+          Array.from({ length: size }, (_, index) => `line ${index} text\\`).join('\n'),
+        );
+      }, 5000),
+    ).toBeLessThan(LINEAR);
+  });
+
+  test('a long run of references in the middle of a line parses in linear time', () => {
+    expect(
+      growth((size) => {
+        blocksFromMarkdown(`a ${'&#32;'.repeat(size)} b`);
+      }, 2500),
+    ).toBeLessThan(LINEAR);
+  });
+
+  test('a long run of backslashes before a link is written in linear time', () => {
+    expect(
+      growth((size) => {
+        toMarkdown({
+          blocks: [
+            b({ content: [{ text: '\\'.repeat(size) }, { text: 'x', link: 'https://a.test/' }] }),
+          ],
+        });
+      }, 4000),
+    ).toBeLessThan(LINEAR);
+  });
+
+  test('a long formatted run of short lines is written in linear time', () => {
+    expect(
+      growth((size) => {
+        toMarkdown({
+          blocks: [
+            b({
+              content: [
+                { text: Array.from({ length: size }, () => 'ab').join('\n'), marks: ['bold'] },
+              ],
+            }),
+          ],
+        });
+      }, 10000),
+    ).toBeLessThan(LINEAR);
+  });
+
+  // CommonMark decodes no reference inside a code span, and neither does this
+  // reader, so inline code about HTML needs no escape and no HTML fallback.
+  test.each(['&nbsp;', 'a &amp;&amp; b', '&#32;'])('code %j stays a backtick span', (text) => {
+    const blocks = [
+      b({ content: [{ text: 'use ' }, { text, marks: ['code'] }, { text: ' here' }] }),
+    ];
+    expect(toMarkdown({ blocks })).toBe(`use \`${text}\` here`);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  // A heading writes one span per line, and each line's delimiters meet the
+  // same neighbours a paragraph's would.
+  test.each([
+    [[{ text: 'a' }, { text: '(x)\ny', marks: ['bold'] }], '# a<strong>(x)</strong>\\\n**y**'],
+    [[{ text: 'y\n(x)', marks: ['bold'] }, { text: 'a' }], '# **y**\\\n<strong>(x)</strong>a'],
+    [
+      [
+        { text: '(', marks: ['bold'] },
+        { text: '(\nx', marks: ['bold', 'code'] },
+      ],
+      '# **(**<strong><code>(</code></strong>\\\n**`x`**',
+    ],
+  ] as const)('heading %j is written %s', (content, markdown) => {
+    expect(toMarkdown({ blocks: [b({ type: 'heading1', content: content as never })] })).toBe(
+      markdown,
+    );
+  });
+
+  // GFM: `~~` follows the same flanking rule, and against `**` it touches
+  // punctuation. Between letters that also keeps two runs' tildes from meeting;
+  // between punctuation they would, and `~~~~` is no delimiter at all.
+  test.each([
+    [
+      [{ text: 'a' }, { text: 'x', marks: ['bold', 'strikethrough'] }, { text: 'b' }],
+      'a<s><strong>x</strong></s>b',
+    ],
+    [
+      [{ text: 'a ' }, { text: 'x', marks: ['bold', 'strikethrough'] }, { text: ' b' }],
+      'a ~~**x**~~ b',
+    ],
+    [
+      [
+        { text: 'one', marks: ['strikethrough'] },
+        { text: 'two', marks: ['strikethrough', 'italic'] },
+      ],
+      '~~one~~<s><em>two</em></s>',
+    ],
+    [
+      [
+        { text: '(', marks: ['strikethrough'] },
+        { text: ')', marks: ['strikethrough', 'italic'] },
+      ],
+      '~~(~~<s><em>)</em></s>',
+    ],
+  ] as const)('%j is written %s', (content, markdown) => {
+    const blocks = [b({ content: content as never })];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  // CommonMark 4.2: a run of `#` after a space closes an ATX heading.
+  test.each([
+    ['a #', '# a \\#'],
+    ['#', '# \\#'],
+    ['a ##', '# a \\##'],
+    ['a#', '# a#'],
+  ])('heading %j is written %j', (text, markdown) => {
+    const blocks = [b({ type: 'heading1', content: t(text) })];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  // Inside a list item or a quote, every other reader starts a new block at a marker.
+  test.each([
+    ['bulleted_list', '1. x', '- 1\\. x'],
+    ['bulleted_list', '---', '- \\---'],
+    ['numbered_list', '- x', '1. \\- x'],
+    ['quote', '# x', '> \\# x'],
+    ['quote', '> x', '> \\> x'],
+  ] as const)('%s %j is written %j', (type, text, markdown) => {
+    const blocks = [b({ type, content: t(text) })];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    const back = throughMarkdown(blocks)[0];
+    expect(back?.type).toBe(type);
+    expect(back?.content).toEqual(start(blocks)[0]?.content);
   });
 });

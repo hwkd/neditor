@@ -214,7 +214,34 @@ const NUMERIC_REFERENCE = /^&#(?:(\d{1,7})|[xX]([0-9a-fA-F]{1,6}));/;
  * code span holding `&#169;` came back as a copyright sign.
  */
 const LINE_LEADING_REFERENCES = /(?:^|\n)((?:&#(?:\d{1,7}|[xX][0-9a-fA-F]{1,6});)+)/g;
-const TRAILING_REFERENCES = /(?:&#(?:\d{1,7}|[xX][0-9a-fA-F]{1,6});)+$/;
+const WHOLE_REFERENCE = /^&#(?:\d{1,7}|[xX][0-9a-fA-F]{1,6});$/;
+/** The longest a reference can be: `&#` + seven digits + `;`. */
+const REFERENCE_REACH = 10;
+
+/**
+ * Where the run of references that ends `text` starts, or -1 if none does.
+ *
+ * Walked back from the end one reference at a time. As a pattern ending in `$`
+ * it was retried from every `&` in the line, and each try read a whole run
+ * before failing: a long run of references in the middle of a line took a
+ * second to parse.
+ */
+function trailingReferences(text: string): number {
+  let start = text.length;
+
+  for (;;) {
+    const from = Math.max(0, start - REFERENCE_REACH);
+    const at = text.slice(from, start).lastIndexOf('&');
+
+    if (at === -1 || !WHOLE_REFERENCE.test(text.slice(from + at, start))) {
+      break;
+    }
+
+    start = from + at;
+  }
+
+  return start === text.length ? -1 : start;
+}
 
 /** The `[start, end)` spans of `text` whose references are the writer's, in order. */
 function decodableReferences(text: string): Array<readonly [number, number]> {
@@ -226,10 +253,11 @@ function decodableReferences(text: string): Array<readonly [number, number]> {
     spans.push([start, start + run.length]);
   }
 
-  const trailing = TRAILING_REFERENCES.exec(text);
+  const trailing = trailingReferences(text);
 
-  if (trailing && !spans.some(([start]) => start === trailing.index)) {
-    spans.push([trailing.index, text.length]);
+  // A run that is the whole of the last line is already there as a leading one.
+  if (trailing !== -1 && spans.at(-1)?.[1] !== text.length) {
+    spans.push([trailing, text.length]);
   }
 
   return spans;
@@ -259,9 +287,6 @@ const ESCAPED = '\u0000';
  * trailing backslashes is unambiguously the break marker it emits for `\n`.
  */
 function endsWithSoftBreak(line: string): boolean {
-  // Counted from the end, not matched: the line this is asked about is the
-  // joined block so far, and an unanchored `/\\+$/` rescanned all of it for
-  // every line joined, which made a long soft-broken paragraph quadratic.
   let count = 0;
 
   while (line.charCodeAt(line.length - 1 - count) === 92) {
@@ -278,7 +303,20 @@ function endsWithSoftBreak(line: string): boolean {
  */
 function joinSoftBreaks(lines: readonly string[]): string[] {
   const out: string[] = [];
+  // The lines of the block being joined, as they arrived. Collected and joined
+  // once: appending each line to the block so far, and then asking that ever
+  // longer string whether it ends in a break, was quadratic in a long
+  // soft-broken paragraph.
+  let pending: string[] = [];
   let fence = 0;
+
+  const flush = (): void => {
+    if (pending.length > 0) {
+      const last = pending.length - 1;
+      out.push(pending.map((line, index) => (index < last ? line.slice(0, -1) : line)).join('\n'));
+      pending = [];
+    }
+  };
 
   for (const line of lines) {
     const trimmed = line.trimStart();
@@ -288,6 +326,7 @@ function joinSoftBreaks(lines: readonly string[]): string[] {
         fence = 0;
       }
 
+      flush();
       out.push(line);
       continue;
     }
@@ -296,19 +335,21 @@ function joinSoftBreaks(lines: readonly string[]): string[] {
 
     if (opening?.[1]) {
       fence = opening[1].length;
+      flush();
       out.push(line);
       continue;
     }
 
-    const previous = out.at(-1);
+    const previous = pending.at(-1);
 
-    if (previous !== undefined && endsWithSoftBreak(previous)) {
-      out[out.length - 1] = `${previous.slice(0, -1)}\n${line}`;
-      continue;
+    if (previous === undefined || !endsWithSoftBreak(previous)) {
+      flush();
     }
 
-    out.push(line);
+    pending.push(line);
   }
+
+  flush();
 
   return out;
 }

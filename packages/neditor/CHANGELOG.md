@@ -21,11 +21,17 @@ that changes what you store or what other applications receive is listed first.
   - A formatted run or link containing a line break is written as one span,
     not one per line -- except in a heading, which every other reader ends at
     the line, so there each line is its own span and a mark on the break itself
-    is not kept.
+    is not kept. (A line break in a heading has no Markdown spelling: other
+    readers show the `\` and start a paragraph on the next line.)
   - A formatted run is also written as HTML where CommonMark's flanking rule
     would leave `**` or `*` literal: against punctuation with a letter on the
     far side (`word<strong>(x)</strong>`), around a code span next to a letter,
-    and where two runs' delimiters would touch between punctuation.
+    `~~` around `**` next to a letter, and where two runs' delimiters would
+    touch between punctuation (or as `***a****b*`, which micromark misreads).
+  - In a heading, a trailing run of `#` is escaped (`# a \#`): other readers
+    drop it as a closing sequence. In a list item or a quote, text that opens
+    with a block marker is escaped (`- 1\. x`, `> \# x`, `- \---`): other
+    readers started a nested list, a heading or a rule there.
   - Named entities in the text (`&amp;`, `&copy;`) are escaped, and so is a
     `!` straight before a link, which other readers took for an image.
   - Leading spaces after a soft break are written as `&#32;`, and a line after
@@ -84,3 +90,5 @@ that changes what you store or what other applications receive is listed first.
 - A long formatted run of lines with no spaces (a list of paths) was written as
   one span too long for the reader to close, and came back as raw markup; it is
   split at a line break.
+- Parsing a long soft-broken paragraph, or a long run of numeric references in
+  the middle of a line, took time quadratic in its length.

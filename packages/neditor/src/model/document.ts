@@ -988,6 +988,16 @@ function escapeLeadingMarker(text: string): string {
 }
 
 /**
+ * Escapes a run of `#` that would close an ATX heading.
+ *
+ * CommonMark 4.2: `# a #` is the heading "a" -- a trailing run of `#` after a
+ * space, or alone, is an optional closing sequence and is dropped.
+ */
+function escapeClosingSequence(text: string): string {
+  return text.replace(/(^|[ \t])(#+)$/, '$1\\$2');
+}
+
+/**
  * Escapes a block marker at the start of each line after a soft break.
  *
  * This reader rejoins those lines into one block, but every other one reads a
@@ -1089,28 +1099,17 @@ const MARK_DELIMITERS: ReadonlyArray<readonly [Mark, string, string]> = [
 const SAFE_SPAN = Math.floor(INLINE_SPAN_LIMIT * 0.75);
 
 /**
- * Splits at the last space at or before `SAFE_SPAN`, or nowhere if there is none.
+ * Where to cut a span that is too long: the last space or line break at or
+ * before `SAFE_SPAN`, or 0 if there is none.
  *
- * `emitted` is what the span will actually cost the reader -- the escaped text
- * plus its delimiters -- and it is what the limit applies to. Testing the raw
- * text against `SAFE_SPAN` instead split runs between 1501 and 1996 characters
- * that the reader would have read whole, putting an unmarked space into text
- * that had none.
+ * A line break too, because a long run of lines with no space in reach --
+ * paths, identifiers -- otherwise went out as one span the reader could not
+ * close, and came back as raw markup. A single unbroken token longer than the
+ * bound cannot be cut without changing the text, so it is written whole and
+ * does not round-trip. Nothing a person types looks like that.
  */
-function splitLongSpan(text: string, emitted: number): [string, string] | null {
-  if (emitted <= INLINE_SPAN_LIMIT) {
-    return null;
-  }
-
-  // At a space or a line break: a long run of lines with no space in reach --
-  // paths, identifiers -- otherwise went out as one span the reader could not
-  // close, and came back as raw markup.
-  const at = Math.max(text.lastIndexOf(' ', SAFE_SPAN), text.lastIndexOf('\n', SAFE_SPAN));
-
-  // A single unbroken token longer than the bound cannot be split without
-  // changing the text, so it is written whole and does not round-trip. Nothing
-  // a person types looks like that.
-  return at <= 0 ? null : [text.slice(0, at), text.slice(at)];
+function splitPoint(text: string): number {
+  return Math.max(text.lastIndexOf(' ', SAFE_SPAN), text.lastIndexOf('\n', SAFE_SPAN), 0);
 }
 
 /** What a run is written next to, and how the block it is in handles breaks. */
@@ -1127,6 +1126,8 @@ interface RunContext {
   splitLines?: boolean;
   /** Write HTML tags whatever the text: the run's delimiters would merge with a neighbour's. */
   tagged?: boolean;
+  /** The run is a piece already cut to length, or one that cannot be cut: do not split it. */
+  whole?: boolean;
 }
 
 const PUNCTUATION = /[\p{P}\p{S}]/u;
@@ -1137,10 +1138,12 @@ const SPACE = /\s/u;
  *
  * CommonMark's flanking rule, in the part that bites: a delimiter against
  * punctuation also needs whitespace or punctuation on its outer side, so
- * `word**(x)**` is literal asterisks there. Judged on the run's neighbours in
- * the text, which is conservative -- the character actually written beside a
- * delimiter may be another run's delimiter, punctuation -- and wrong only
- * towards writing HTML where `**` would have done.
+ * `word**(x)**` is literal asterisks there. `text` is what the delimiters
+ * enclose as written -- the caller passes a code run's backtick, or the `*` a
+ * `~~` wraps -- while `before` and `after` are the neighbouring runs' text,
+ * which is conservative on that side: the character actually written there may
+ * be another run's delimiter, punctuation, so this errs towards HTML where `**`
+ * would have done. Delimiters of two runs that touch are the caller's to catch.
  */
 function flanks(text: string, before: string, after: string): boolean {
   const first = text[0] ?? '';
@@ -1168,9 +1171,21 @@ function flanks(text: string, before: string, after: string): boolean {
  */
 function runToMarkdown(run: TextRun, context: RunContext = {}): string {
   if (context.splitLines && run.text.includes('\n')) {
-    return run.text
-      .split('\n')
-      .map((line) => runToMarkdown({ ...run, text: line }))
+    const lines = run.text.split('\n');
+
+    // Each line meets the run's own neighbour at the run's edge and the break
+    // everywhere else, and only the first can touch the run before it.
+    return lines
+      .map((line, index) =>
+        runToMarkdown(
+          { ...run, text: line },
+          {
+            before: index === 0 ? context.before : '',
+            after: index === lines.length - 1 ? context.after : '',
+            tagged: index === 0 && context.tagged,
+          },
+        ),
+      )
       .join('\\\n');
   }
 
@@ -1186,16 +1201,22 @@ function runToMarkdown(run: TextRun, context: RunContext = {}): string {
   // backtick span's content literally, so a code run that needed an escape, or
   // holds a line break (written `\` + newline), would show the backslash.
   const edged = /^\s|\s$/.test(run.text);
-  const literalCode = !marks.has('code') || (escaped === run.text && !run.text.includes('`'));
+  // A reference is not one of those escapes: nothing decodes `&nbsp;` inside a
+  // backtick span, here or in CommonMark, so code about HTML stays a span.
+  const bare = marks.has('code') && !/[\n`]/.test(run.text) && !run.text.match(INLINE_ESCAPE);
+  const literalCode = !marks.has('code') || bare;
   // Inside a link the delimiters sit against `[` and `]`, which always flank.
   const emphasis = marks.has('bold') || marks.has('italic') || marks.has('strikethrough');
   // Judged on what the delimiters will actually touch, which for a code run is
   // its backtick: `**`x`**1` is literal asterisks.
-  const inner = marks.has('code') ? '`' : run.text;
+  // `~~` outside `**` or `*` touches an asterisk, and GFM holds it to the same
+  // rule: `a~~**x**~~b` is literal tildes.
+  const stacked = marks.has('strikethrough') && (marks.has('bold') || marks.has('italic'));
+  const inner = marks.has('code') ? '`' : stacked ? '*' : run.text;
   const flanking =
     !emphasis || run.link !== undefined || flanks(inner, context.before ?? '', context.after ?? '');
   const tagged = context.tagged || edged || !literalCode || !flanking;
-  let core = escaped;
+  let core = bare && !tagged ? run.text : escaped;
 
   for (const [mark, open, close] of MARK_DELIMITERS) {
     if (marks.has(mark)) {
@@ -1211,15 +1232,43 @@ function runToMarkdown(run: TextRun, context: RunContext = {}): string {
   // cannot reach is one it leaves in the prose as literal characters. Measured
   // on what was actually emitted rather than on the raw text, so a run only
   // splits when it really is too long for the reader.
-  if ((run.marks?.length || run.link) && core.length > INLINE_SPAN_LIMIT) {
-    const split = splitLongSpan(run.text, core.length);
-
-    if (split) {
-      return split.map((part) => runToMarkdown({ ...run, text: part }, context)).join('');
-    }
+  if (core.length <= INLINE_SPAN_LIMIT || context.whole) {
+    return core;
   }
 
-  return core;
+  // Piece by piece rather than head-and-recurse: recursing on the tail escaped
+  // what was left of the run once per piece, which is quadratic in a long one.
+  // The limit applies to what is emitted -- the escaped text and its delimiters
+  // -- so a rest that might fit is written and measured; testing the raw text
+  // against `SAFE_SPAN` instead split runs the reader would have read whole.
+  const pieces: string[] = [];
+  let rest = run.text;
+  let written = core;
+
+  for (;;) {
+    if (written.length <= INLINE_SPAN_LIMIT) {
+      pieces.push(written);
+      break;
+    }
+
+    const at = splitPoint(rest);
+
+    if (at === 0) {
+      pieces.push(written);
+      break;
+    }
+
+    pieces.push(runToMarkdown({ ...run, text: rest.slice(0, at) }, context));
+    rest = rest.slice(at);
+    // Escaping never shortens, so a rest longer than the limit is known to be
+    // too long without being written.
+    written =
+      rest.length > INLINE_SPAN_LIMIT && splitPoint(rest) > 0
+        ? rest
+        : runToMarkdown({ ...run, text: rest }, { ...context, whole: true });
+  }
+
+  return pieces.join('');
 }
 
 /** A GFM table. Row 0 is the header, which the delimiter row follows. */
@@ -1236,6 +1285,26 @@ function tableToMarkdown(block: Block, indent: string): string {
   const [header, ...body] = rows;
 
   return header ? [line(header), divider, ...body.map(line)].join('\n') : `${indent}`;
+}
+
+/**
+ * True when `text` ends in `char` and that character is not escaped.
+ *
+ * Counted back from the end: a pattern like `(\\*)!$` retries from every
+ * backslash in a long run of them, which is quadratic.
+ */
+function endsUnescaped(text: string, char: string): boolean {
+  if (!text.endsWith(char)) {
+    return false;
+  }
+
+  let slashes = 0;
+
+  while (text.charCodeAt(text.length - 2 - slashes) === 92) {
+    slashes += 1;
+  }
+
+  return slashes % 2 === 0;
 }
 
 /** The character a run's delimiters sit against on one side: a code run's is its backtick. */
@@ -1269,20 +1338,30 @@ export function richToMarkdown(
       // lets it open as well as close, and the rule of three then leaves the
       // first span unclosed. Only measured between punctuation -- between
       // letters (`**a*****b***`) the same run resolves as written.
-      if (
-        written.startsWith('*') &&
-        /(?:^|[^\\])(?:\\\\)*\*$/.test(previous) &&
-        PUNCTUATION.test(innerEdge(content[index - 1], 'last')) &&
-        PUNCTUATION.test(innerEdge(run, 'first'))
-      ) {
+      // `~~(~~` then `~~*(*~~` needs no such condition: four tildes are not
+      // a strikethrough delimiter in GFM, whatever they stand between.
+      const touching =
+        (written.startsWith('~') && endsUnescaped(previous, '~')) ||
+        (written.startsWith('*') &&
+          endsUnescaped(previous, '*') &&
+          ((PUNCTUATION.test(innerEdge(content[index - 1], 'last')) &&
+            PUNCTUATION.test(innerEdge(run, 'first'))) ||
+            // And one pair between letters: `***a***` then `*b*`, which
+            // micromark closes as `<em><strong>a</strong>**b</em>` where
+            // commonmark.js reads it as written. The other five orders of
+            // bold, italic and both agree in both.
+            (previous.endsWith('***') && !written.startsWith('**'))));
+
+      if (touching) {
         written = runToMarkdown(run, { ...context, tagged: true });
       }
 
       // `!` straight before a link makes it an image in every other reader. An
       // even run of backslashes before it is escaped backslashes, not an escape.
-      const bang = content[index + 1]?.link ? /(\\*)!$/.exec(written) : null;
-
-      previous = bang && (bang[1] ?? '').length % 2 === 0 ? `${written.slice(0, -1)}\\!` : written;
+      previous =
+        content[index + 1]?.link && endsUnescaped(written, '!')
+          ? `${written.slice(0, -1)}\\!`
+          : written;
 
       return previous;
     })
@@ -1313,16 +1392,18 @@ export function toMarkdown(doc: NEditorDocument): string {
         body.length === 0 ? `${indent}${marker}` : `${indent}${marker} ${body}`;
 
       switch (block.type) {
-        // Only a paragraph can be mistaken for another block by its first
-        // characters; everywhere else the marker already disambiguates.
+        // To this reader only a paragraph can be mistaken for another block by
+        // its first characters. Every other reader also starts a block at a
+        // marker inside a list item or a quote (`- 1. x` is a nested list,
+        // `> # x` a heading), so their text is escaped the same way below.
         case 'paragraph':
           return `${indent}${escapeLeadingMarker(text)}`;
         case 'heading1':
-          return marked('#');
+          return marked('#', escapeClosingSequence(text));
         case 'heading2':
-          return marked('##');
+          return marked('##', escapeClosingSequence(text));
         case 'heading3':
-          return marked('###');
+          return marked('###', escapeClosingSequence(text));
         // A bullet is the one block whose text can still be misread, because a
         // toggle is written as a bullet led by a triangle. Escaped here and
         // nowhere else: `\▾` is not an escape any CommonMark reader honours,
@@ -1338,13 +1419,16 @@ export function toMarkdown(doc: NEditorDocument): string {
           // newline is written `\` + newline, so a bare `\s*` stopped at that
           // backslash, wrote no escape, and the triangle behind it was read as
           // a toggle marker.
-          return marked('-', text.replace(/^((?:\\\n|\s)*)([\u25B8\u25BE])/, '$1\\$2'));
+          return marked(
+            '-',
+            escapeLeadingMarker(text.replace(/^((?:\\\n|\s)*)([\u25B8\u25BE])/, '$1\\$2')),
+          );
         case 'numbered_list':
-          return marked(`${numbers.get(block.id) ?? 1}.`);
+          return marked(`${numbers.get(block.id) ?? 1}.`, escapeLeadingMarker(text));
         case 'todo':
           return marked(`- [${block.checked ? 'x' : ' '}]`);
         case 'quote':
-          return marked('>');
+          return marked('>', escapeLeadingMarker(text));
         // The icon is bracketed rather than merely leading, so a quote that
         // starts with an emoji stays a quote and an icon that is not an emoji
         // still names a callout. `[` is escaped in text, so the two can never

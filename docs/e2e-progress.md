@@ -149,6 +149,38 @@ to watch its test fail. CommonMark mismatches went from about 710 per 4,000 para
 | C4  | Interop                  | Two runs' delimiters touching between punctuation (`**(****`(`**`) form one delimiter run that the rule of three leaves unmatched.                             | The second run is written as HTML. Between letters (`**a*****b***`) CommonMark resolves it, so that case is left alone -- measured over all mark pairs.           |
 | C5  | Interop                  | Named entities (`&copy;`), a `!` straight before a link, `===` after a soft break and leading spaces after one were all read differently elsewhere.            | Escaped / written as `&#32;`; the reader decodes references at a line start after a break, where the writer now puts them.                                        |
 | C6  | Parity                   | Typing `**__a__**` toggled bold off again where pasting kept it; `one *two` + break + `three* four` differed too.                                              | Inline rules set a mark rather than toggle it. Parity cases added to `foreign-input.test.ts`.                                                                     |
-| C7  | Performance              | Checking for a soft break re-scanned trailing backslashes per line: quadratic on long soft-broken paragraphs.                                                  | Counted once from the end; a 20,000-line paragraph is pinned under a second.                                                                                      |
+| C7  | Performance              | Checking for a soft break re-scanned trailing backslashes per line: quadratic on long soft-broken paragraphs.                                                  | Counted once from the end; a 20,000-line paragraph is pinned under a second. **Corrected by D2:** this only cut the constant; the join was still quadratic.       |
 | C8  | Inaccurate docs          | The README said a delimiter cannot sit against a break (only emphasis delimiters cannot); several comments said every reader renders the HTML fallback.        | Corrected: readers that escape raw HTML (markdown-it's default) show the tags. A docstring orphaned above `SAFE_SPAN` moved back onto `runToMarkdown`.            |
 | C9  | Overclaim                | B10's element reflection was described as working across trees; it only reaches an ancestor tree.                                                              | Documented in the code, the CHANGELOG and B10.                                                                                                                    |
+
+## Audit 4 (2026-09-30)
+
+An independent review of 033b959, with micromark + GFM added as a second reference parser beside
+commonmark.js. Fixed test-first; each fix was reverted to watch its test fail (the tilde rule was
+removed as dead code on the strength of one such check, and restored when the GFM fuzzer produced the
+input that needs it). After the fixes: 0 mismatches in 16,000 paragraphs against commonmark.js, 0 in
+24,000 against micromark-GFM, 0 in 5,000 each of bullets, numbered items and quotes, 0 in 8,000
+single-line headings.
+
+| #   | Kind                        | What                                                                                                                                                    | Resolution                                                                                                                                                      |
+| --- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D1  | **Regression (033b959)**    | Escaping named entities made inline code holding one (`` `&nbsp;` ``) fall back to `<code>`, though nothing decodes a reference inside a backtick span. | A code run is written as a backtick span unless it holds a character that needs a backslash, a backtick or a line break; the span's content is written raw.     |
+| D2  | **Overclaim (033b959)**     | C7 called soft-break joining fixed; it was still quadratic (a rope flattened per line), and its test used a time budget that failed on a clean tree.    | Lines are collected and joined once. Performance tests assert growth between two sizes, not a budget -- except the one whose cost is a constant, which says so. |
+| D3  | **Regression (033b959)**    | Two quadratic paths in the writer: `(\\*)!$` over a run of backslashes, and splitting a long run by recursing on its tail.                              | Counted back from the end; split piece by piece.                                                                                                                |
+| D4  | **Incomplete (033b959)**    | Headings' per-line spans dropped the neighbours and the `tagged` retry, so the flanking and rule-of-three fixes did not apply there.                    | Each line gets the run's neighbour at the run's edge, and the first carries `tagged`.                                                                           |
+| D5  | Interop (GFM), pre-existing | `a~~**x**~~b` is literal tildes, and `~~(~~~~*)*~~` has four, which is no delimiter.                                                                    | `~~` around `*` is judged against the asterisk; touching tildes write the second run as HTML.                                                                   |
+| D6  | Interop, pre-existing       | `# a #` is the heading "a" elsewhere: a trailing `#` run is a closing sequence.                                                                         | Escaped.                                                                                                                                                        |
+| D7  | Interop, pre-existing       | A block marker opening a list item's or quote's text started a nested block elsewhere (`- 1. x`, `> # x`, `- ---`).                                     | `escapeLeadingMarker` on bullets, numbered items and quotes.                                                                                                    |
+| D8  | Interop (micromark)         | `***a****b*` is `<em><strong>a</strong>**b</em>` in micromark, which is what remark and Astro use; commonmark.js reads it as written.                   | That one order is written with HTML for the second run. The other five orders of bold, italic and both agree in both parsers and are left alone.                |
+| D9  | Regression (this branch)    | A long run of numeric references mid-line was quadratic to parse: the trailing-run pattern was retried from every `&`.                                  | Walked back from the end one reference at a time.                                                                                                               |
+
+Not fixed, recorded: on `main` as well, a single line of 80 KB or more with no completed span is
+quadratic to parse (the text a rule is matched against grows as a rope and is flattened per closing
+character). 320 KB on one line takes about 25 s. It is outside this branch's changes.
+
+Environment, not the editor: on this macOS host Playwright's WebKit build occasionally aborts with
+`-[NSTextInputContext textInputClientDidUpdateSelection]: unrecognized selector` (a native exception
+in its own text-input timer), which fails whichever test is running with "Target page, context or
+browser has been closed" -- seen on a different spec each time (formatting F6, structure-keys S4, popovers PO3), with the
+machine at a load average above 40 from other work. The
+crash is in AppKit code the Linux build CI runs does not have, and CI's runs have not shown it.
