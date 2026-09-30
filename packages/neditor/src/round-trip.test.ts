@@ -377,3 +377,86 @@ describe('inside a link destination only the link rule applies', () => {
     expect(matchInlineRule('[x](https://a.test/) and _y_')?.mark).toBe('italic');
   });
 });
+
+describe('audit 2: what other readers see, and what this one must not misread', () => {
+  // Checked against commonmark.js 0.31: `a**bold&#32;**b` is literal asterisks
+  // there -- the closer is preceded by punctuation and followed by a letter, so
+  // it is not right-flanking. Runs with edge whitespace are written as HTML
+  // tags, which every CommonMark reader renders as written.
+  test.each([
+    [
+      [{ text: 'a' }, { text: 'bold ', marks: ['bold'] }, { text: 'b' }],
+      'a<strong>bold </strong>b',
+    ],
+    [[{ text: 'a' }, { text: ' it', marks: ['italic'] }, { text: 'b' }], 'a<em> it</em>b'],
+    [[{ text: 'a' }, { text: 'x ', marks: ['strikethrough'] }, { text: 'b' }], 'a<s>x </s>b'],
+    [[{ text: 'a' }, { text: ' x ', marks: ['code'] }, { text: 'b' }], 'a<code> x </code>b'],
+    [[{ text: 'a' }, { text: ' ', marks: ['bold'] }, { text: 'b' }], 'a<strong> </strong>b'],
+    [[{ text: 'a ' }, { text: 'bold', marks: ['bold'] }, { text: ' b' }], 'a **bold** b'],
+  ] as const)('%j is written %s', (content, markdown) => {
+    const blocks = [b({ content: content as never })];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  test('a whitespace-only bold run is written once, not a reference per space', () => {
+    const blocks = [
+      b({ content: [{ text: 'a' }, { text: ' '.repeat(3000), marks: ['bold'] }, { text: 'b' }] }),
+    ];
+    expect(toMarkdown({ blocks }).length).toBeLessThan(3100);
+  });
+
+  test('a paragraph opening with "!" and a link is not read back as an image', () => {
+    const one = [b({ content: [{ text: '!' }, { text: 'a', link: 'https://i.test/x.png' }] })];
+    const two = [
+      b({
+        content: [
+          { text: '!' },
+          { text: 'a', link: 'https://i.test/x.png' },
+          { text: '\nsecond line' },
+        ],
+      }),
+    ];
+    expect(shape(throughMarkdown(one))).toEqual(shape(start(one)));
+    expect(shape(throughMarkdown(two))).toEqual(shape(start(two)));
+  });
+
+  test('"1." before a line break stays a paragraph', () => {
+    const blocks = [b({ content: t('1.\nnext') })];
+    expect(shape(throughMarkdown(blocks))).toEqual(shape(start(blocks)));
+  });
+
+  test('a continuation line that opens with a block marker is escaped for other readers', () => {
+    const blocks = [
+      b({ content: t('first\n# not a heading\n- not a list\n---') }),
+      b({ type: 'image', src: 'https://a.test/x.png', alt: 'cat', content: t('# caption') }),
+    ];
+    const markdown = toMarkdown({ blocks });
+    expect(markdown).toContain('\\# not a heading');
+    expect(markdown).toContain('\\- not a list');
+    expect(markdown).toContain('\\---');
+    expect(markdown).toContain('\\# caption');
+    expect(shape(throughMarkdown(blocks))).toEqual(shape(start(blocks)));
+  });
+
+  test('code spans holding an unclosed "](" are still code', () => {
+    for (const line of ['a `](` b', 'x `[a](b` y', '`see ](x`']) {
+      const runs = blocksFromMarkdown(line)[0]?.content ?? [];
+      expect(runs.some((run) => run.marks?.includes('code'))).toBe(true);
+    }
+  });
+
+  test('an unclosed "](<" does not suppress emphasis for the rest of the line', () => {
+    // A destination never holds whitespace -- the writer percent-encodes it in
+    // the angled form too -- so a space ends the question.
+    const runs = blocksFromMarkdown('see [a](<b and *y*')[0]?.content ?? [];
+    expect(runs.at(-1)).toEqual({ text: 'y', marks: ['italic'] });
+  });
+
+  test('the open-destination check is linear', () => {
+    const line = `${']('.repeat(1000)}${' *'.repeat(1000)}`;
+    const began = performance.now();
+    blocksFromMarkdown(line.repeat(10));
+    expect(performance.now() - began).toBeLessThan(400);
+  });
+});

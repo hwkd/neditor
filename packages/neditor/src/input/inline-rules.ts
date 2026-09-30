@@ -67,6 +67,14 @@ const INLINE_RULES: readonly InlineRule[] = [
   // Markdown has no underline, so `toMarkdown` writes the HTML tag; this is
   // what reads it back rather than leaving seven junk characters in the text.
   { closer: '>', pattern: /<u>([^<\n]+)<\/u>$/, mark: 'underline' },
+  // `toMarkdown` writes a marked run whose text starts or ends with whitespace
+  // as HTML: `**bold **` is not emphasis in any dialect, and `a**bold&#32;**b`
+  // is literal asterisks in CommonMark (the closer is not right-flanking), but
+  // every reader renders `a<strong>bold </strong>b` as written.
+  { closer: '>', pattern: /<strong>([^<\n]+)<\/strong>$/, mark: 'bold' },
+  { closer: '>', pattern: /<em>([^<\n]+)<\/em>$/, mark: 'italic' },
+  { closer: '>', pattern: /<s>([^<\n]+)<\/s>$/, mark: 'strikethrough' },
+  { closer: '>', pattern: /<code>([^<\n]+)<\/code>$/, mark: 'code' },
   // The angle-bracket form first: it is how a destination holding a `)` — the
   // character that would otherwise close the link — is written.
   { closer: ')', pattern: /\[([^\]\n]+)\]\(<([^<>\n]*)>\)$/, isLink: true, angled: true },
@@ -84,8 +92,20 @@ const INLINE_RULES: readonly InlineRule[] = [
  */
 export const INLINE_SPAN_LIMIT = 2000;
 
-/** The text ends inside a link destination whose `)` has not arrived yet. */
-const OPEN_DESTINATION = /\]\((?:<[^<>\n]*|[^)\s<]*)$/;
+/**
+ * Whether the text ends inside a link destination whose `)` has not arrived.
+ *
+ * Only the last `](` can be the open one, so the pattern runs on the tail from
+ * there -- run unanchored over the window, it retried from every `](` in it and
+ * a pasted line of them took seconds. Neither spelling of a destination holds
+ * whitespace (the writer percent-encodes it in the `<…>` form too), which is
+ * what keeps an unclosed `](<` from swallowing the rest of a line of prose.
+ */
+function inOpenDestination(window: string): boolean {
+  const at = window.lastIndexOf('](');
+
+  return at !== -1 && /^\]\((?:<[^<>\s]*|[^)\s<]*)$/.test(window.slice(at));
+}
 
 export interface InlineRuleMatch {
   /** Offset of the opening delimiter. */
@@ -159,10 +179,13 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
   // underscores deleted -- before the `)` that makes it a destination was
   // read: `https://a.test/_y_` came back as `https://a.test/y`, from the
   // editor's own Markdown and while typing alike (the e2e audit's F15).
-  const inDestination = OPEN_DESTINATION.test(window);
+  // Code spans are left alone: they take precedence over links in CommonMark,
+  // so `` `](` `` is code, and a URL never carries a backtick (the URL parser
+  // percent-encodes it), so one cannot close inside a destination we wrote.
+  const inDestination = inOpenDestination(window);
 
   for (const rule of INLINE_RULES) {
-    if (inDestination && !rule.isLink) {
+    if (inDestination && !rule.isLink && rule.mark !== 'code') {
       continue;
     }
 

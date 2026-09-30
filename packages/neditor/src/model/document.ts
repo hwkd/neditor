@@ -925,7 +925,12 @@ const INLINE_ESCAPE = /[\\`*_[\]~|<>]/g;
  * marker let both through and destroyed the paragraph.
  */
 const LEADING_MARKER = /^(\s*)([#>+-])/;
-const LEADING_ORDINAL = /^(\s*)(\d+)([.)])(?=\s|$)/;
+// A soft break follows as `\` + newline, which the reader rejoins before
+// testing for a prefix: `1.` then Shift+Enter came back a numbered list.
+const LEADING_ORDINAL = /^(\s*)(\d+)([.)])(?=\s|$|\\\n)/;
+// `![…](…)` alone is an image line; a paragraph opening with a `!` and a
+// linked label came back as one, the text gone.
+const LEADING_BANG = /^(\s*)!(?=\[)/;
 
 /**
  * Escapes run text for Markdown.
@@ -975,7 +980,24 @@ function protectEdgeWhitespace(markdown: string): string {
 
 /** Stops a paragraph that begins with `#`, `-` or `1.` becoming that block. */
 function escapeLeadingMarker(text: string): string {
-  return text.replace(LEADING_ORDINAL, '$1$2\\$3').replace(LEADING_MARKER, '$1\\$2');
+  return text
+    .replace(LEADING_ORDINAL, '$1$2\\$3')
+    .replace(LEADING_MARKER, '$1\\$2')
+    .replace(LEADING_BANG, '$1\\!');
+}
+
+/**
+ * Escapes a block marker at the start of each line after a soft break.
+ *
+ * This reader rejoins those lines into one block, but every other one reads a
+ * continuation line that opens with `#`, `-`, `>` or `1.` as a new heading or
+ * list -- and `---` under a line as a heading underline. Image captions follow
+ * a hard break, so the same goes for them.
+ */
+function escapeContinuations(markdown: string): string {
+  return markdown
+    .replace(/(\\\n[^\S\n]*)(\d+)([.)])(?=\s|$|\\\n)/g, '$1$2\\$3')
+    .replace(/(\\\n[^\S\n]*)([#>+-])/g, '$1\\$2');
 }
 
 /**
@@ -1022,6 +1044,15 @@ function fenceFor(text: string): string {
   return '`'.repeat(Math.max(3, longest + 1));
 }
 
+/** The HTML spelling of each mark, for a run whose text has edge whitespace. */
+const MARK_TAGS: Record<Mark, string> = {
+  code: 'code',
+  bold: 'strong',
+  italic: 'em',
+  strikethrough: 's',
+  underline: 'u',
+};
+
 /** Delimiters applied from the innermost mark outwards. */
 const MARK_DELIMITERS: ReadonlyArray<readonly [Mark, string, string]> = [
   ['code', '`', '`'],
@@ -1035,14 +1066,14 @@ const MARK_DELIMITERS: ReadonlyArray<readonly [Mark, string, string]> = [
  * Wraps a run in its Markdown delimiters.
  *
  * Whitespace at the edge of a marked run stays inside the mark: it used to be
- * hoisted outside, and the mark on it was lost -- invisible for bold, a visible
- * gap in an underline, a strike, a code span or a link. Where it goes depends
- * on the innermost wrapper. A code span, `<u>` and a link's text hold it as it
- * is; `**`, `*` and `~~` cannot open or close against whitespace (`**bold **`
- * is not emphasis in any dialect), so there it is written as numeric
- * references, which the reader decodes against a delimiter. The wrappers
- * outside need nothing: the reader treats a matched span as opaque, as
- * CommonMark's flanking rule does.
+ * written outside the delimiters, and the mark on it was lost -- invisible for
+ * bold, a visible gap in an underline, a strike, a code span or a link. `**`,
+ * `*` and `~~` cannot open or close against whitespace, and CommonMark strips a
+ * space from each side of a code span, so such a run is written as HTML tags
+ * instead (`a<strong>bold </strong>b`), which every reader renders as written
+ * and this one reads back. (Numeric references inside `**` were tried first:
+ * `a**bold&#32;**b` is literal asterisks in CommonMark, whose closer there is
+ * not right-flanking.) A link's text holds the whitespace as it is.
  */
 /**
  * The longest text a single emphasis or link span is written across.
@@ -1097,18 +1128,13 @@ function runToMarkdown(run: TextRun): string {
     return escaped;
   }
 
-  const applied = MARK_DELIMITERS.filter(([mark]) => marks.has(mark));
-  const innermost = applied[0]?.[0];
-  const holdsWhitespace =
-    innermost === undefined || innermost === 'code' || innermost === 'underline';
-  const reference = (run: string) =>
-    run.replace(/[^\S\n]/g, (char) => `&#${char.codePointAt(0) ?? 32};`);
-  let core = holdsWhitespace
-    ? escaped
-    : escaped.replace(/^[^\S\n]+/, reference).replace(/[^\S\n]+$/, reference);
+  const edged = /^[^\S\n]|[^\S\n]$/.test(escaped);
+  let core = escaped;
 
-  for (const [, open, close] of applied) {
-    core = `${open}${core}${close}`;
+  for (const [mark, open, close] of MARK_DELIMITERS) {
+    if (marks.has(mark)) {
+      core = edged ? `<${MARK_TAGS[mark]}>${core}</${MARK_TAGS[mark]}>` : `${open}${core}${close}`;
+    }
   }
 
   if (run.link) {
@@ -1162,7 +1188,7 @@ export function toMarkdown(doc: NEditorDocument): string {
       const text =
         block.type === 'code'
           ? blockText(block)
-          : protectEdgeWhitespace(richToMarkdown(block.content));
+          : protectEdgeWhitespace(escapeContinuations(richToMarkdown(block.content)));
       // An empty block is a bare marker. The space after it is what makes the
       // marker readable, not what makes it a marker, and trailing whitespace
       // does not survive the trip back — ours trims it, and so does every other
@@ -1224,7 +1250,8 @@ export function toMarkdown(doc: NEditorDocument): string {
             block.src ?? '',
           )})`;
 
-          return text.length === 0 ? image : `${image}\\\n${text}`;
+          // The caption's first line follows a break too, so its marker is escaped.
+          return text.length === 0 ? image : `${image}\\\n${escapeLeadingMarker(text)}`;
         }
         case 'table':
           return tableToMarkdown(block, indent);

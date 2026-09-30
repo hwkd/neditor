@@ -334,15 +334,14 @@ describe('rich markdown serialization', () => {
 
   test('whitespace at the edge of a bold run keeps its mark without touching the delimiter', () => {
     // `**bold **` is not emphasis in any Markdown dialect, so the space cannot
-    // sit against the delimiter -- but hoisting it outside dropped its mark. It
-    // is written as a reference inside, and read back as the bold space it was.
+    // sit against the delimiter -- but hoisting it outside dropped its mark. The
+    // run is written as HTML, which every reader renders as written.
     const content = richSetMark(richFromPlainText('a bold b'), 2, 7, 'bold', true);
     const block = { ...createBlock('paragraph'), content };
     const markdown = toMarkdown({ blocks: [block] });
 
-    expect(markdown).toBe('a **bold&#32;**b');
-    const inner = /\*\*([^*]*)\*\*/.exec(markdown)?.[1] ?? '';
-    expect(inner.trim()).toBe(inner);
+    expect(markdown).toBe('a <strong>bold </strong>b');
+    expect(markdown).not.toMatch(/\*\*\s|\S\s\*\*/);
     expect(blocksFromMarkdown(markdown)[0]?.content).toEqual(content);
   });
 
@@ -949,11 +948,12 @@ describe('a span is split only when it is really too long to read back', () => {
         { id: 'p', type: 'paragraph', depth: 0, content: [{ text, marks: ['bold'] }] } as Block,
       ],
     });
-    expect(markdown.split('**').length - 1).toBeGreaterThan(2);
+    // (A piece that starts at a seam's space is written as <strong>.)
+    expect(markdown.split(/\*\*|<strong>/).length - 1).toBeGreaterThan(2);
 
     // The space at each seam used to be written outside the bold, so the run
     // came back as several with plain spaces between them. It keeps its mark
-    // now (as a reference inside the delimiter), and the pieces rejoin.
+    // now, and the pieces rejoin.
     const back = runsAfterRoundTrip(text);
 
     expect(back).toEqual([{ text, marks: ['bold'] }]);

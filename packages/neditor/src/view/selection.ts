@@ -27,9 +27,7 @@ export interface SelectionReading {
   range: Range;
   /** Where the reader started, which for a backward selection is the end. */
   anchorNode: Node;
-  anchorOffset: number;
   focusNode: Node;
-  focusOffset: number;
   isCollapsed: boolean;
 }
 
@@ -84,9 +82,7 @@ export function readSelection(node: Node): SelectionReading | null {
         return {
           range,
           anchorNode: backward ? first.endContainer : first.startContainer,
-          anchorOffset: backward ? first.endOffset : first.startOffset,
           focusNode: backward ? first.startContainer : first.endContainer,
-          focusOffset: backward ? first.startOffset : first.endOffset,
           isCollapsed: range.collapsed,
         };
       }
@@ -100,9 +96,7 @@ export function readSelection(node: Node): SelectionReading | null {
   return {
     range: selection.getRangeAt(0),
     anchorNode: selection.anchorNode,
-    anchorOffset: selection.anchorOffset,
     focusNode: selection.focusNode,
-    focusOffset: selection.focusOffset,
     isCollapsed: selection.isCollapsed,
   };
 }

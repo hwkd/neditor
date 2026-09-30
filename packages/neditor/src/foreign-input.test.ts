@@ -510,3 +510,49 @@ describe('a drop that carries nothing', () => {
     ).toContain('X');
   });
 });
+
+describe('typing a line and pasting it give the same result', () => {
+  /**
+   * The README's promise: inline parsing replays the rules typing uses, so the
+   * two cannot diverge. It is measured here the way it is used -- a character
+   * at a time into a live editor, against parseInlineMarkdown -- because a
+   * parse-only assertion held while an opaque-span projection in the reader
+   * (since removed) made 1% of random lines come out differently.
+   */
+  function typeCharByChar(host: HTMLElement, text: string): void {
+    for (const char of text) {
+      // Appended at the end, as a browser does after a rule has fired (the
+      // editor arms an empty mark set there, so what follows is plain).
+      host.append(document.createTextNode(char));
+      host.focus();
+      getSelection()?.collapse(host.lastChild, 1);
+      host.dispatchEvent(
+        new InputEvent('input', { inputType: 'insertText', data: char, bubbles: true }),
+      );
+    }
+  }
+
+  test.each([
+    'a **b** c',
+    '`x` and *y*',
+    '**a**_b_',
+    '`x`_y_',
+    '`a *b` c*',
+    '**a _b**_',
+    '<u>a *b</u> c*',
+    '[x](https://a.test/_y_)',
+    'a `](` b',
+    'see [a](<b and *y*',
+    'a<strong>b </strong>c',
+    '<em> i</em> and <s>x </s>',
+    'a<code> c </code>b',
+  ])('%s', async (line) => {
+    const { parseInlineMarkdown } = await import('./index.ts');
+    const editor = mount([block({})]);
+    const host = hosts(editor)[0]!;
+
+    typeCharByChar(host, line);
+
+    expect(editor.getDocument().blocks[0]!.content).toEqual(parseInlineMarkdown(line));
+  });
+});

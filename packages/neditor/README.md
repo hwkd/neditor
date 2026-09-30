@@ -247,6 +247,11 @@ These convert the moment you type the closing delimiter:
 
 `**bold**` `__bold__` `*italic*` `_italic_` `` `code` `` `~~strike~~` `[text](url)`
 
+The HTML spellings the Markdown writer uses for formatting that starts or ends
+with a space convert too: `<u>underline</u>`, `<strong>`, `<em>`, `<s>` and
+`<code>`. Inside a link destination only the link itself closes, so `_x_` in a
+URL is not italicised.
+
 ### Block Markdown
 
 Typing these at the start of a paragraph converts the block:
@@ -673,14 +678,20 @@ writes is what `blocksFromMarkdown` reads back:
   indentation and every reader trims the rest. Splitting "Alpha one" with
   `Enter` leaves " one", and `Shift`+`Enter` at the end of a block leaves a
   trailing newline; without this a Markdown copy or save lost both.
-- Whitespace at the edge of a formatted run keeps its formatting. A code span,
-  `<u>` and link text hold it as it is; `**`, `*` and `~~` cannot open or
-  close against whitespace, so inside them it is written as a reference too
-  (`**bold&#32;**`), which is still emphasis in CommonMark.
-- References are read back only where the writer puts them -- at a block's
-  edges and against an emphasis delimiter. Anywhere else, including code spans
-  and link destinations, `&#…;` stays the text it is, and a literal one in
-  your text is escaped, so it comes back as typed.
+- Whitespace at the edge of a formatted run keeps its formatting. `**`, `*`
+  and `~~` cannot open or close against whitespace, and CommonMark trims a
+  code span's edge spaces, so such a run is written as HTML --
+  `a<strong>bold </strong>b`, `<em>`, `<s>`, `<code>`, `<u>` -- which every
+  reader renders as written and this one reads back. Link text holds the
+  whitespace as it is.
+- A line after a soft break (or an image's caption) that opens with `#`, `-`,
+  `>`, `+` or `1.` has the marker escaped, so other readers do not start a
+  heading or a list there, and a paragraph opening with `![` has its `!`
+  escaped so it is not read back as an image.
+- References are read back only where the writer puts them, at the edges of a
+  block's text. Anywhere else, including code spans and link destinations,
+  `&#…;` stays the text it is, and a literal one at an edge is escaped, so it
+  comes back as typed.
 
 ## Headless use
 
