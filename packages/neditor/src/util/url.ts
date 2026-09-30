@@ -88,8 +88,10 @@ const SAFE_IMAGE_DATA =
 export function sanitizeImageUrl(input: string): string | null {
   const trimmed = input.trim();
 
+  // Line-wrapped base64 is accepted, and unwrapped: the breaks mean nothing to
+  // an `<img>`, and a source with whitespace in it has no Markdown spelling.
   if (SAFE_IMAGE_DATA.test(trimmed)) {
-    return trimmed;
+    return trimmed.replace(/\s+/g, '');
   }
 
   const url = sanitizeUrl(trimmed);

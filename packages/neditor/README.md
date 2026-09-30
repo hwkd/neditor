@@ -253,7 +253,7 @@ with a space convert too: `<u>underline</u>`, `<strong>`, `<em>`, `<s>` and
 URL is not italicised, and neither is a `_x_` that opens inside a bare URL, up to the next
 whitespace; `_see https://a.test_`, which opens before it, still is. A bare URL here is
 `http://` or `https://` anywhere in a word, or `www.` at its start or after `*`, `_`, `~`,
-`(` or `[`, in either case --
+`(`, `[` or `]`, in either case --
 broader than what GFM links, on purpose: underscores kept where another reader would have
 emphasised cost nothing, and underscores taken out of a URL do. A span may cross a line break made with `Shift`+`Enter`, as it may
 in CommonMark, but an emphasis delimiter (`*`, `_`, `~`) cannot sit against the break.

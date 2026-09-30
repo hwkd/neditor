@@ -49,6 +49,10 @@ that changes what you store or what other applications receive is listed first.
   - Leading spaces after a soft break are written as `&#32;`, and a line after
     one that opens with `=` is escaped, so it is not a setext heading
     underline.
+  - In a link or image destination, a backslash is doubled, a `|` is written
+    `\|`, and an `&` that begins a reference is written `\&`: the first was
+    read back as an escape, the second ended a table cell, and other readers
+    decoded the third.
   - A block marker at the start of a line after a soft break is escaped
     (`\# not a heading`), and so is a `!` opening a paragraph with `![`.
 - **Markdown.** An image's caption is written after the image, following a hard
@@ -107,7 +111,7 @@ that changes what you store or what other applications receive is listed first.
 - Typing or pasting a bare URL with `_x_` in it (`https://a.test/_y_`)
   italicised the `y` and deleted the underscores. A `_` span that opens inside
   a bare URL (`http://` or `https://` anywhere in a word, or `www.` at its
-  start or after `*`, `_`, `~`, `(` or `[`; up to the next whitespace) is no
+  start or after `*`, `_`, `~`, `(`, `[` or `]`; up to the next whitespace) is no
   longer one, wherever it closes; a span that
   opens before the URL (`_see https://a.test_`) still is. The test is broader
   than GFM's autolink rule on purpose, so `http://_a_` and a link label that
@@ -115,6 +119,11 @@ that changes what you store or what other applications receive is listed first.
   readers emphasise.
 - A pasted link whose destination held a backslash escape
   (`[wiki](https://en.wikipedia.org/wiki/Foo_\(bar\))`) linked to a URL with a
-  NUL where the escaped character was; an image's destination kept the
-  backslash. Both are read as CommonMark reads them. A link or image URL that
-  itself holds a backslash is written with it doubled.
+  NUL where the escaped character was, and an image's destination kept the
+  backslash. The escape is now resolved in both. (Which text is a link at all
+  is unchanged: `[x](\#top)` still is not one.)
+- A link in a table cell whose URL holds a `|` split the cell in two and lost
+  the link.
+- An image whose `data:` source was line-wrapped base64 came back from Markdown
+  as a paragraph of text. `sanitizeImageUrl` now returns such a source
+  unwrapped.

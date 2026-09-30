@@ -593,6 +593,8 @@ describe('typing a line and pasting it give the same result', () => {
     // `www.` in the middle of a word opens no URL.
     ['_awww.cute_', [{ text: 'awww.cute', marks: ['italic'] }]],
     ['awww._x_', [{ text: 'awww.' }, { text: 'x', marks: ['italic'] }]],
+    // micromark links `www.` after `]` as well.
+    ['[1]www.a.test/_y_', [{ text: '[1]www.a.test/_y_' }]],
     // A protocol counts whatever precedes it. After a letter no reader links
     // it, but a finished span leaves one there: `**see**https://…` is
     // `seehttps://…` by the time the `_` closes, and GFM links that URL.

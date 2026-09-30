@@ -185,7 +185,7 @@ function linkOpener(window: string, angled: boolean): number {
  * A bare URL's start in the part of a token that precedes a span's opener.
  *
  * A protocol anywhere in it; `www.` opening the token or after `*`, `_`, `~`,
- * `(` or `[`, so `awww.cute` is a word. Either case.
+ * `(`, `[` or `]`, so `awww.cute` is a word. Either case.
  *
  * This is not GFM's autolink grammar, and each attempt to make it so took
  * underscores out of real URLs: refusing a `_` straight after the scheme broke
@@ -199,7 +199,7 @@ function linkOpener(window: string, angled: boolean): number {
  * with its underscores (`http://_a_`, `xhttps://a.test/_y_`), which loses
  * nothing, rather than a URL losing characters, which does.
  */
-const BARE_URL_IN_TOKEN = /https?:\/\/|(?:^|[*_~([])www\./i;
+const BARE_URL_IN_TOKEN = /https?:\/\/|(?:^|[*_~([\]])www\./i;
 
 /**
  * Whether a span whose opening delimiter is at `opener` opens inside a bare

@@ -655,30 +655,34 @@ export function parseInlineMarkdown(text: string): RichText {
       continue;
     }
 
+    flush();
+
+    // The span may reach back over runs that were parked; they have to be in
+    // `content` before its offsets mean anything there.
+    recall(match.start);
+
     // The rule read the destination off the projection, where an escaped
-    // character is a placeholder: `[x](https://a.test/a\\_b)` linked to
+    // character is a placeholder: `[x](https://a.test/a\_b)` linked to
     // `a%00b`. The content holds what the escape stands for, which is how
-    // CommonMark reads a destination, so the href is taken from there.
+    // CommonMark reads a destination, so the href is taken from there -- and
+    // only now, with the whole span recalled: a destination can hold more
+    // finished code spans than are kept to hand, and read any earlier it was
+    // whatever tail was left, which could name another host.
     let link = match.link;
 
     if (link !== undefined && matchable.slice(innerEnd, match.end).includes(ESCAPED)) {
-      const closing = (richToPlainText(content) + pending).slice(-match.closeLength);
+      const closing = richToPlainText(content).slice(innerEnd - base, match.end - base);
       const href = sanitizeUrl(
         closing.startsWith('](<') ? closing.slice(3, -2) : closing.slice(2, -1),
       );
 
+      // Nothing has been changed yet: flushing and recalling only move runs.
       if (!href) {
         continue;
       }
 
       link = href;
     }
-
-    flush();
-
-    // The span may reach back over runs that were parked; they have to be in
-    // `content` before its offsets mean anything there.
-    recall(match.start);
 
     // Strip the closing delimiter first, so the opening offsets stay valid —
     // and apply the identical splice to the projection to keep them aligned.

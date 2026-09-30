@@ -880,16 +880,62 @@ describe('audit 10', () => {
     );
   });
 
-  // A backslash in a destination is doubled, or the reader takes it and the
-  // character after it for an escape.
-  test.each(['https://a.test/?q=a\\_b', 'https://a.test/?q=a\\'])(
-    'a link to %s round-trips',
+  // Backslashes, in both forms of a destination; a pipe, which would end a
+  // table cell; and an entity, which other readers decode even there.
+  test.each([
+    ['https://a.test/?q=a\\_b', '[x](https://a.test/?q=a\\\\_b)'],
+    ['https://a.test/?q=a\\', '[x](https://a.test/?q=a\\\\)'],
+    ['https://a.test/?q=(a\\)', '[x](<https://a.test/?q=(a\\\\)>)'],
+    ['https://a.test/?q=a|b', '[x](https://a.test/?q=a\\|b)'],
+    ['https://a.test/?q=a&amp;b', '[x](https://a.test/?q=a\\&amp;b)'],
+  ])('a link to %s is written %s', (href, markdown) => {
+    const blocks = [b({ content: [{ text: 'x', link: href }] })];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  test.each(['https://a.test/?q=a|b', 'https://a.test/?q=a\\|b'])(
+    'a link to %s in a table cell stays in its cell',
     (href) => {
-      const blocks = [b({ content: [{ text: 'x', link: href }] })];
-      expect(toMarkdown({ blocks })).toBe(`[x](${href.replaceAll('\\', '\\\\')})`);
-      expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+      const blocks = [
+        b({
+          type: 'table',
+          rows: [
+            [[{ text: 'x', link: href }], [{ text: 'z' }]],
+            [[{ text: '1' }], [{ text: '2' }]],
+          ] as never,
+        }),
+      ];
+      expect(throughMarkdown(blocks)[0]?.rows).toEqual(start(blocks)[0]?.rows);
     },
   );
+
+  // More runs inside the destination than the reader keeps to hand: the href
+  // was read before they were recalled, from whatever tail was left.
+  test('a destination holding many code spans and an escape keeps its link', () => {
+    const markdown = `[click](https://good.test/?${'`a`b'.repeat(20)}\`a\`//evil.test/${'`a`b'.repeat(15)}\\_c)`;
+    const content = blocksFromMarkdown(markdown)[0]?.content ?? [];
+    expect(new Set(content.map((run) => run.link))).toEqual(
+      new Set([`https://good.test/?${'ab'.repeat(20)}a//evil.test/${'ab'.repeat(15)}_c`]),
+    );
+  });
+
+  test('a destination that unescapes to nothing usable is not a link', () => {
+    // `/\x` is `//x` to a browser: a protocol-relative URL, which is refused.
+    // The projection shows `/` + placeholder + `x`, which passes on its own.
+    expect(blocksFromMarkdown('[x](/\\\\x)')[0]?.content).toEqual(t('[x](/\\x)'));
+  });
+
+  // Line-wrapped base64 is accepted as a source; percent-encoding the breaks
+  // wrote one the reader then refused, and the image came back as a paragraph.
+  test('an image whose data: source holds whitespace survives', () => {
+    const blocks = [
+      b({ type: 'image', src: 'data:image/png;base64,iVBORw0KGgo\nAAAA', alt: 'cat' }),
+    ];
+    const back = throughMarkdown(blocks)[0];
+    expect(back?.type).toBe('image');
+    expect(back?.src).toBe('data:image/png;base64,iVBORw0KGgoAAAA');
+  });
 
   test('an image whose source holds a backslash round-trips', () => {
     const blocks = [b({ type: 'image', src: 'https://a.test/?q=a\\_b', alt: 'a' })];

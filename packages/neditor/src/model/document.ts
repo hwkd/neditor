@@ -1130,22 +1130,33 @@ const DESTINATION_UNSAFE = /[()<>\s]/;
 /**
  * Writes a link or image destination.
  *
- * Anything holding a paren or a space goes in angle brackets rather than being
- * backslash-escaped: the reader matches its rules against a projection in which
- * an escaped character is opaque, so it could never read the URL back out.
+ * Anything holding a paren or whitespace goes in angle brackets, where a paren
+ * needs no escape and the reader's pattern for the form can tell where the
+ * destination ends.
+ *
+ * Inside either form three things are escaped, all of which the reader takes
+ * back out of the content (`parseInlineMarkdown`): a backslash is doubled, or
+ * it and an escapable character after it are an escape (`?q=a\_b` came back as
+ * `?q=a_b`, and one ending the URL escaped the `)`); a `|` would end a table
+ * cell, in this reader and in GFM; and an `&` that begins a reference is
+ * decoded by other readers even here, so `?a=1&amp;b` reached them as `?a=1&b`.
  */
 function destinationToMarkdown(url: string): string {
-  // A backslash is doubled in either form: bare, the reader (and CommonMark)
-  // takes it and an escapable character after it for an escape, so
-  // `?q=a\\_b` came back as `?q=a_b`, and one ending the URL escaped the `)`.
-  const escaped = url.replaceAll('\\', '\\\\');
+  // A model that predates `sanitizeImageUrl` unwrapping base64 may still hold it wrapped.
+  const source = /^data:/i.test(url) ? url.replace(/\s+/g, '') : url;
+  const escaped = source
+    .replaceAll('\\', '\\\\')
+    .replaceAll('|', '\\|')
+    .replace(REFERENCE_AMPERSAND, '\\&');
 
-  if (!DESTINATION_UNSAFE.test(url)) {
+  if (!DESTINATION_UNSAFE.test(source)) {
     return escaped;
   }
 
-  // `<` and `>` would close the bracketed form. A URL that reached us through
-  // `sanitizeUrl` has them percent-encoded already, so this is a no-op there.
+  // `<`, `>` and whitespace would end the bracketed form or the line, so they
+  // are percent-encoded. An absolute URL that came through `sanitizeUrl` has
+  // them encoded already; a relative one (`/a b`) does not, and comes back as
+  // `/a%20b` -- the same resource, but not the same string.
   return `<${escaped.replace(/[<>\s]/g, (char) => encodeURIComponent(char))}>`;
 }
 
