@@ -631,13 +631,13 @@ another application.
 Callouts and toggles have no Markdown of their own, so both degrade to something
 readable that still parses back:
 
-| Block                    | Markdown                               | HTML                                              |
-| ------------------------ | -------------------------------------- | ------------------------------------------------- |
-| Callout                  | `> [!💡] text` — the icon is bracketed | `<blockquote data-neditor-callout="💡">`          |
-| Toggle                   | `- ▸ text` collapsed, `- ▾ text` open  | `<details>` / `<details open>` with a `<summary>` |
-| Image                    | `![alt](src)` — the caption is dropped | `<figure><img><figcaption>`                       |
-| Image with no source yet | `![alt]()`                             | `<figure data-neditor-image>` (no broken `<img>`) |
-| Table                    | a GFM table                            | `<table>` with `<thead>` / `<tbody>`              |
+| Block                    | Markdown                                         | HTML                                              |
+| ------------------------ | ------------------------------------------------ | ------------------------------------------------- |
+| Callout                  | `> [!💡] text` — the icon is bracketed           | `<blockquote data-neditor-callout="💡">`          |
+| Toggle                   | `- ▸ text` collapsed, `- ▾ text` open            | `<details>` / `<details open>` with a `<summary>` |
+| Image                    | `![alt](src)`, then a hard break and the caption | `<figure><img><figcaption>`                       |
+| Image with no source yet | `![alt]()`                                       | `<figure data-neditor-image>` (no broken `<img>`) |
+| Table                    | a GFM table                                      | `<table>` with `<thead>` / `<tbody>`              |
 
 Elsewhere a callout still reads as a quote and a toggle as a list item; a
 `<details>` pasted from anywhere else becomes a toggle, with its body nested one
@@ -672,10 +672,15 @@ writes is what `blocksFromMarkdown` reads back:
   numeric character references (`&#32;`, `&#10;`), because leading spaces are
   indentation and every reader trims the rest. Splitting "Alpha one" with
   `Enter` leaves " one", and `Shift`+`Enter` at the end of a block leaves a
-  trailing newline; without this a Markdown copy or save lost both. References
-  are read back only at those edges -- anywhere else, including code spans and
-  link destinations, `&#…;` stays the text it is -- and a literal one at an edge
-  is escaped, so it comes back as typed.
+  trailing newline; without this a Markdown copy or save lost both.
+- Whitespace at the edge of a formatted run keeps its formatting. A code span,
+  `<u>` and link text hold it as it is; `**`, `*` and `~~` cannot open or
+  close against whitespace, so inside them it is written as a reference too
+  (`**bold&#32;**`), which is still emphasis in CommonMark.
+- References are read back only where the writer puts them -- at a block's
+  edges and against an emphasis delimiter. Anywhere else, including code spans
+  and link destinations, `&#…;` stays the text it is, and a literal one in
+  your text is escaped, so it comes back as typed.
 
 ## Headless use
 

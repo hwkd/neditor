@@ -206,14 +206,36 @@ const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!&]/;
 const NUMERIC_REFERENCE = /^&#(?:(\d{1,7})|[xX]([0-9a-fA-F]{1,6}));/;
 
 /**
- * Where references are decoded: the run at either edge of a block's text, and
- * nowhere else, because that is the only place the writer puts them. Decoding
- * them everywhere corrupted foreign text -- a link destination holding `&#38;`
+ * Where references are decoded: a run at either edge of a block's text, or
+ * against an emphasis delimiter (`*`, `_`, `~`) -- the two places the writer
+ * puts them, for edge whitespace of a block and of an emphasised run. Decoding
+ * them everywhere corrupted foreign text: a link destination holding `&#38;`
  * came back with a NUL in it, and a pasted code span holding `&#169;` came
  * back as a copyright sign.
  */
-const LEADING_REFERENCES = /^(?:&#(?:\d{1,7}|[xX][0-9a-fA-F]{1,6});)+/;
-const TRAILING_REFERENCES = /(?:&#(?:\d{1,7}|[xX][0-9a-fA-F]{1,6});)+$/;
+const REFERENCE_RUNS = /(?:&#(?:\d{1,7}|[xX][0-9a-fA-F]{1,6});)+/g;
+const EMPHASIS_DELIMITER = /[*_~]/;
+
+/** The `[start, end)` spans of `text` whose references are the writer's. */
+function decodableReferences(text: string): Array<readonly [number, number]> {
+  const spans: Array<readonly [number, number]> = [];
+
+  for (const match of text.matchAll(REFERENCE_RUNS)) {
+    const start = match.index;
+    const end = start + match[0].length;
+
+    if (
+      start === 0 ||
+      end === text.length ||
+      EMPHASIS_DELIMITER.test(text[start - 1] ?? '') ||
+      EMPHASIS_DELIMITER.test(text[end] ?? '')
+    ) {
+      spans.push([start, end]);
+    }
+  }
+
+  return spans;
+}
 
 function decodeReference(match: RegExpExecArray): string | null {
   const code = match[1] !== undefined ? Number(match[1]) : Number.parseInt(match[2] ?? '', 16);
@@ -315,8 +337,7 @@ export function parseInlineMarkdown(text: string): RichText {
     return [];
   }
 
-  const leadingEnd = LEADING_REFERENCES.exec(text)?.[0].length ?? 0;
-  const trailingStart = text.length - (TRAILING_REFERENCES.exec(text)?.[0].length ?? 0);
+  const decodable = text.includes('&#') ? decodableReferences(text) : [];
 
   // What a rule can still reach, plus the character of context the lookbehinds
   // need. Text before it is cut from `matchable` for good.
@@ -509,7 +530,7 @@ export function parseInlineMarkdown(text: string): RichText {
       index += 1;
       literal = next;
       projected = ESCAPED;
-    } else if (char === '&' && (index < leadingEnd || index >= trailingStart)) {
+    } else if (char === '&' && decodable.some(([start, end]) => index >= start && index < end)) {
       // A decoded reference is text, never a delimiter -- the same opacity an
       // escape gets, one placeholder per UTF-16 unit so offsets stay aligned.
       const reference = NUMERIC_REFERENCE.exec(text.slice(index, index + 12));
@@ -566,8 +587,15 @@ export function parseInlineMarkdown(text: string): RichText {
     // and apply the identical splice to the projection to keep them aligned.
     content = richDelete(content, innerEnd - base, match.end - base);
     content = richDelete(content, match.start - base, innerStart - base);
-    matchable = matchable.slice(0, innerEnd) + matchable.slice(match.end);
-    matchable = matchable.slice(0, match.start) + matchable.slice(innerStart);
+    // And the span's own text goes opaque to the rules around it, the way an
+    // escape is. An enclosing delimiter is flanked by the span, not by what is
+    // inside it -- `**<u> x </u>**` is bold in CommonMark -- and left visible,
+    // the space inside an underline or a code span refused the emphasis that
+    // wraps it.
+    matchable =
+      matchable.slice(0, match.start) +
+      ESCAPED.repeat(innerEnd - innerStart) +
+      matchable.slice(match.end);
     spliceOpens(innerEnd, match.end);
     spliceOpens(match.start, innerStart);
 
@@ -703,7 +731,11 @@ export function blocksFromMarkdown(text: string): Block[] {
 
     const depth = indentOf(raw);
 
-    const image = IMAGE_LINE.exec(line);
+    // An image's caption follows it after a hard break, as `toMarkdown` writes
+    // it -- which every other reader shows as the picture with its caption on
+    // the line below.
+    const breakAt = line.indexOf('\n');
+    const image = IMAGE_LINE.exec(breakAt === -1 ? line : line.slice(0, breakAt));
 
     if (image) {
       // An empty destination is an image block with no picture yet -- the
@@ -712,7 +744,8 @@ export function blocksFromMarkdown(text: string): Block[] {
       const src = destination === '' ? '' : sanitizeImageUrl(destination);
 
       if (src !== null) {
-        const block = createBlock('image', [], depth);
+        const caption = breakAt === -1 ? '' : line.slice(breakAt + 1);
+        const block = createBlock('image', parseInlineMarkdown(caption), depth);
         block.src = src;
         block.alt = stripEscapes(image[1] ?? '');
         blocks.push(block);

@@ -332,12 +332,18 @@ describe('rich markdown serialization', () => {
     expect(toMarkdown({ blocks: [block] })).toBe('see [**docs**](https://a.test/)');
   });
 
-  test('surrounding whitespace is hoisted outside the delimiters', () => {
-    // `**bold **` is not emphasis in any Markdown dialect.
+  test('whitespace at the edge of a bold run keeps its mark without touching the delimiter', () => {
+    // `**bold **` is not emphasis in any Markdown dialect, so the space cannot
+    // sit against the delimiter -- but hoisting it outside dropped its mark. It
+    // is written as a reference inside, and read back as the bold space it was.
     const content = richSetMark(richFromPlainText('a bold b'), 2, 7, 'bold', true);
     const block = { ...createBlock('paragraph'), content };
+    const markdown = toMarkdown({ blocks: [block] });
 
-    expect(toMarkdown({ blocks: [block] })).toBe('a **bold** b');
+    expect(markdown).toBe('a **bold&#32;**b');
+    const inner = /\*\*([^*]*)\*\*/.exec(markdown)?.[1] ?? '';
+    expect(inner.trim()).toBe(inner);
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual(content);
   });
 
   test('a code block is emitted literally, not re-escaped', () => {
@@ -932,14 +938,24 @@ describe('a span is split only when it is really too long to read back', () => {
     expect(back[0]?.marks).toEqual(['bold']);
   });
 
-  test('and one past the limit still splits', () => {
+  test('and one past the limit still splits, now without losing the mark on the seam', () => {
     const text = words(700);
 
     expect(text.length).toBeGreaterThan(2000);
 
+    // Still written as several spans, each short enough for the reader.
+    const markdown = toMarkdown({
+      blocks: [
+        { id: 'p', type: 'paragraph', depth: 0, content: [{ text, marks: ['bold'] }] } as Block,
+      ],
+    });
+    expect(markdown.split('**').length - 1).toBeGreaterThan(2);
+
+    // The space at each seam used to be written outside the bold, so the run
+    // came back as several with plain spaces between them. It keeps its mark
+    // now (as a reference inside the delimiter), and the pieces rejoin.
     const back = runsAfterRoundTrip(text);
 
-    expect(back.length).toBeGreaterThan(1);
-    expect(back.map((run) => run.text).join('')).toBe(text);
+    expect(back).toEqual([{ text, marks: ['bold'] }]);
   });
 });

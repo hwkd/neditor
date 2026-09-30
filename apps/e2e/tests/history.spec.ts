@@ -5,8 +5,12 @@ test.describe('13 · history', () => {
     editor,
     page,
   }) => {
-    await page.clock.install();
+    await page.clock.install({ time: 0 });
     await editor.load({ doc: 'empty' });
+    // Paused, so only runFor moves time. An installed clock otherwise keeps
+    // pace with the real one, and on a loaded machine the real gap between two
+    // type() calls alone crossed the 600 ms window and split the run.
+    await page.clock.pauseAt(10_000);
     await editor.placeCaret('p1', 0);
 
     await editor.type('one');

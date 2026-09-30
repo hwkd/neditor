@@ -1034,8 +1034,15 @@ const MARK_DELIMITERS: ReadonlyArray<readonly [Mark, string, string]> = [
 /**
  * Wraps a run in its Markdown delimiters.
  *
- * Surrounding whitespace is hoisted outside the delimiters, because `**bold **`
- * does not parse as emphasis in any Markdown dialect.
+ * Whitespace at the edge of a marked run stays inside the mark: it used to be
+ * hoisted outside, and the mark on it was lost -- invisible for bold, a visible
+ * gap in an underline, a strike, a code span or a link. Where it goes depends
+ * on the innermost wrapper. A code span, `<u>` and a link's text hold it as it
+ * is; `**`, `*` and `~~` cannot open or close against whitespace (`**bold **`
+ * is not emphasis in any dialect), so there it is written as numeric
+ * references, which the reader decodes against a delimiter. The wrappers
+ * outside need nothing: the reader treats a matched span as opaque, as
+ * CommonMark's flanking rule does.
  */
 /**
  * The longest text a single emphasis or link span is written across.
@@ -1084,20 +1091,24 @@ function runToMarkdown(run: TextRun): string {
   }
 
   const escaped = escapeMarkdownText(run.text);
-  const leading = /^[^\S\n]*/.exec(escaped)?.[0] ?? '';
-  const trailing = /[^\S\n]*$/.exec(escaped)?.[0] ?? '';
-  let core = escaped.slice(leading.length, escaped.length - trailing.length);
+  const marks = new Set(run.marks ?? []);
 
-  if (core.length === 0) {
+  if (escaped.length === 0 || (marks.size === 0 && !run.link)) {
     return escaped;
   }
 
-  const marks = new Set(run.marks ?? []);
+  const applied = MARK_DELIMITERS.filter(([mark]) => marks.has(mark));
+  const innermost = applied[0]?.[0];
+  const holdsWhitespace =
+    innermost === undefined || innermost === 'code' || innermost === 'underline';
+  const reference = (run: string) =>
+    run.replace(/[^\S\n]/g, (char) => `&#${char.codePointAt(0) ?? 32};`);
+  let core = holdsWhitespace
+    ? escaped
+    : escaped.replace(/^[^\S\n]+/, reference).replace(/[^\S\n]+$/, reference);
 
-  for (const [mark, open, close] of MARK_DELIMITERS) {
-    if (marks.has(mark)) {
-      core = `${open}${core}${close}`;
-    }
+  for (const [, open, close] of applied) {
+    core = `${open}${core}${close}`;
   }
 
   if (run.link) {
@@ -1117,7 +1128,7 @@ function runToMarkdown(run: TextRun): string {
     }
   }
 
-  return `${leading}${core}${trailing}`;
+  return core;
 }
 
 /** A GFM table. Row 0 is the header, which the delimiter row follows. */
@@ -1206,10 +1217,15 @@ export function toMarkdown(doc: NEditorDocument): string {
 
           return `${indent}${fence}\n${text}\n${indent}${fence}`;
         }
-        case 'image':
-          return `${indent}![${escapeMarkdownLabel(block.alt ?? '')}](${destinationToMarkdown(
+        // The caption follows after a hard break: every other reader shows the
+        // picture with the caption beneath it, and this one reads it back.
+        case 'image': {
+          const image = `${indent}![${escapeMarkdownLabel(block.alt ?? '')}](${destinationToMarkdown(
             block.src ?? '',
           )})`;
+
+          return text.length === 0 ? image : `${image}\\\n${text}`;
+        }
         case 'table':
           return tableToMarkdown(block, indent);
         case 'divider':

@@ -84,6 +84,9 @@ const INLINE_RULES: readonly InlineRule[] = [
  */
 export const INLINE_SPAN_LIMIT = 2000;
 
+/** The text ends inside a link destination whose `)` has not arrived yet. */
+const OPEN_DESTINATION = /\]\((?:<[^<>\n]*|[^)\s<]*)$/;
+
 export interface InlineRuleMatch {
   /** Offset of the opening delimiter. */
   readonly start: number;
@@ -151,8 +154,18 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
   const offset = Math.max(0, textBeforeCaret.length - INLINE_SPAN_LIMIT - 1);
   const window = offset === 0 ? textBeforeCaret : textBeforeCaret.slice(offset);
   const closer = textBeforeCaret.at(-1);
+  // Inside a link destination nothing but the link itself may close. Rules
+  // fire as each character arrives, so `_y_` in a URL was italicised -- and its
+  // underscores deleted -- before the `)` that makes it a destination was
+  // read: `https://a.test/_y_` came back as `https://a.test/y`, from the
+  // editor's own Markdown and while typing alike (the e2e audit's F15).
+  const inDestination = OPEN_DESTINATION.test(window);
 
   for (const rule of INLINE_RULES) {
+    if (inDestination && !rule.isLink) {
+      continue;
+    }
+
     // A rule that does not end in this character cannot match here, and running
     // it anyway is not free: the link patterns walk the window from every `[`
     // in it, which is most of the cost of parsing a line of stray brackets.

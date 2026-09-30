@@ -124,6 +124,98 @@ const CORPUS: Record<string, Block[]> = {
   'leading newline': [b({ content: t('\na') })],
   'newlines and spaces at both edges': [b({ content: t(' \na b\n ') })],
   'trailing literal backslash then newline': [b({ content: t('a\\\n') })],
+  // A11 (audit): whitespace at the edge of a marked run was written outside
+  // its delimiters, so the mark on it was lost -- invisible for bold, visible
+  // as a gap in an underline, a strike, a code span or a link.
+  'bold run with edge spaces, mid-text': [
+    b({ content: [{ text: 'a' }, { text: ' x ', marks: ['bold'] }, { text: 'b' }] }),
+  ],
+  'bold run with edge spaces, whole block': [b({ content: t(' x ', { marks: ['bold'] }) })],
+  'bold on a lone space': [
+    b({ content: [{ text: 'a' }, { text: ' ', marks: ['bold'] }, { text: 'b' }] }),
+  ],
+  'italic run with edge spaces, mid-text': [
+    b({ content: [{ text: 'a' }, { text: ' x ', marks: ['italic'] }, { text: 'b' }] }),
+  ],
+  'italic run with edge spaces, whole block': [b({ content: t(' x ', { marks: ['italic'] }) })],
+  'italic on a lone space': [
+    b({ content: [{ text: 'a' }, { text: ' ', marks: ['italic'] }, { text: 'b' }] }),
+  ],
+  'strikethrough run with edge spaces, mid-text': [
+    b({ content: [{ text: 'a' }, { text: ' x ', marks: ['strikethrough'] }, { text: 'b' }] }),
+  ],
+  'strikethrough run with edge spaces, whole block': [
+    b({ content: t(' x ', { marks: ['strikethrough'] }) }),
+  ],
+  'strikethrough on a lone space': [
+    b({ content: [{ text: 'a' }, { text: ' ', marks: ['strikethrough'] }, { text: 'b' }] }),
+  ],
+  'underline run with edge spaces, mid-text': [
+    b({ content: [{ text: 'a' }, { text: ' x ', marks: ['underline'] }, { text: 'b' }] }),
+  ],
+  'underline run with edge spaces, whole block': [
+    b({ content: t(' x ', { marks: ['underline'] }) }),
+  ],
+  'underline on a lone space': [
+    b({ content: [{ text: 'a' }, { text: ' ', marks: ['underline'] }, { text: 'b' }] }),
+  ],
+  'code run with edge spaces, mid-text': [
+    b({ content: [{ text: 'a' }, { text: ' x ', marks: ['code'] }, { text: 'b' }] }),
+  ],
+  'code run with edge spaces, whole block': [b({ content: t(' x ', { marks: ['code'] }) })],
+  'code on a lone space': [
+    b({ content: [{ text: 'a' }, { text: ' ', marks: ['code'] }, { text: 'b' }] }),
+  ],
+  'link text with edge spaces': [
+    b({ content: [{ text: 'a' }, { text: ' x ', link: 'https://a.test/' }, { text: 'b' }] }),
+  ],
+  'bold and underlined, edge spaces': [
+    b({ content: [{ text: 'a' }, { text: ' x ', marks: ['bold', 'underline'] }, { text: 'b' }] }),
+  ],
+  'bold link, edge spaces': [
+    b({
+      content: [
+        { text: 'a' },
+        { text: ' x ', marks: ['bold'], link: 'https://a.test/' },
+        { text: 'b' },
+      ],
+    }),
+  ],
+  'italic code, edge spaces': [
+    b({ content: [{ text: 'a' }, { text: ' x ', marks: ['code', 'italic'] }, { text: 'b' }] }),
+  ],
+  // F15 (found fixing A11): an emphasis rule fired inside a link destination
+  // before its `)` arrived, so `_y_` in a URL came back as `y`.
+  'link whose destination holds underscores': [
+    b({ content: t('x', { link: 'https://a.test/_y_/z' }) }),
+  ],
+  'link whose destination holds asterisks': [
+    b({ content: t('x', { link: 'https://a.test/*y*' }) }),
+  ],
+  'link whose destination holds backticks': [
+    b({ content: t('x', { link: 'https://a.test/`y`' }) }),
+  ],
+  // A11 (audit): the caption was not written to Markdown at all.
+  'image with a caption': [
+    b({ type: 'image', src: 'https://a.test/x.png', alt: 'cat', content: t('A cat') }),
+  ],
+  'image with a formatted caption': [
+    b({
+      type: 'image',
+      src: 'https://a.test/x.png',
+      alt: 'cat',
+      content: [
+        { text: 'See ' },
+        { text: 'this', marks: ['bold'] },
+        { text: ' ' },
+        { text: 'link', link: 'https://a.test/' },
+      ],
+    }),
+  ],
+  'image with a caption edged in spaces': [
+    b({ type: 'image', src: 'https://a.test/x.png', alt: 'cat', content: t(' cap ') }),
+  ],
+  'empty image with a caption': [b({ type: 'image', src: '', alt: '', content: t('coming soon') })],
   // F4 (e2e finding): an image with no source came back as literal "![]()".
   'empty image': [b({ type: 'image', src: '', alt: '' })],
   'empty image with alt': [b({ type: 'image', src: '', alt: 'pending' })],
@@ -147,16 +239,16 @@ function shape(blocks: readonly Block[]): unknown {
   return blocks.map((block) => ({
     type: block.type,
     depth: block.depth ?? 0,
-    text: (block.content ?? []).map((run) => run.text).join(''),
-    marks: (block.content ?? []).map((run) => (run.marks ?? []).join('+')).join('|'),
-    links: (block.content ?? []).map((run) => run.link ?? '').join('|'),
+    // The runs themselves, not a summary of them. Runs are canonical after
+    // normalizeDocument, so equal content is deeply equal -- and a summary
+    // ("some run was bold") could not see which characters carried a mark,
+    // which is how a mark falling off edge whitespace passed here unnoticed.
+    content: block.content ?? [],
     src: block.src ?? '',
     alt: block.alt ?? '',
     icon: block.icon ?? '',
     checked: block.checked ?? null,
-    rows: block.rows
-      ? block.rows.map((row) => row.map((cell) => cell.map((run) => run.text).join('')))
-      : null,
+    rows: block.rows ?? null,
   }));
 }
 
@@ -268,5 +360,20 @@ describe('numeric references are decoded only where the writer puts them', () =>
   test('at the edges they are decoded', () => {
     const [block] = blocksFromMarkdown('&#32;one&#10;');
     expect(block?.content).toEqual([{ text: ' one\n' }]);
+  });
+});
+
+describe('inside a link destination only the link rule applies', () => {
+  test('typing the closing underscore of a URL does not italicise it', async () => {
+    const { matchInlineRule } = await import('./index.ts');
+    expect(matchInlineRule('[x](https://a.test/_y_')).toBeNull();
+    expect(matchInlineRule('[x](<https://a.test/*y*')).toBeNull();
+    expect(matchInlineRule('[x](https://a.test/_y_)')?.link).toBe('https://a.test/_y_');
+  });
+
+  test('outside one, emphasis still fires', async () => {
+    const { matchInlineRule } = await import('./index.ts');
+    expect(matchInlineRule('see _y_')?.mark).toBe('italic');
+    expect(matchInlineRule('[x](https://a.test/) and _y_')?.mark).toBe('italic');
   });
 });
