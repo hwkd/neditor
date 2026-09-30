@@ -250,7 +250,8 @@ These convert the moment you type the closing delimiter:
 The HTML spellings the Markdown writer uses for formatting that starts or ends
 with a space convert too: `<u>underline</u>`, `<strong>`, `<em>`, `<s>` and
 `<code>`. Inside a link destination only the link itself closes, so `_x_` in a
-URL is not italicised. A span may cross a line break made with `Shift`+`Enter`, as it may
+URL is not italicised, and neither is one in a bare URL (`https://…` or `www.…`, up to the
+next whitespace). A span may cross a line break made with `Shift`+`Enter`, as it may
 in CommonMark, but an emphasis delimiter (`*`, `_`, `~`) cannot sit against the break.
 
 ### Block Markdown

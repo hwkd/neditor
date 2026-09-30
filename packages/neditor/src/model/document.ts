@@ -1,7 +1,7 @@
 import { sanitizeImageUrl } from '../util/url.ts';
 import { createBlockId } from './ids.ts';
 import type { Mark, RichText, TextRun } from './rich-text.ts';
-import { INLINE_SPAN_LIMIT } from '../input/inline-rules.ts';
+import { BARE_URL_START, INLINE_SPAN_LIMIT } from '../input/inline-rules.ts';
 import type { TableRows } from './table.ts';
 import {
   cloneTableRows,
@@ -940,10 +940,53 @@ const LEADING_BANG = /^(\s*)!(?=\[)/;
  * the trailing count stays unambiguous.
  */
 function escapeMarkdownText(text: string): string {
+  const urls = text.includes('_') ? bareUrls(text) : [];
+  let url = 0;
+
   return text
-    .replace(INLINE_ESCAPE, (char) => `\\${char}`)
+    .replace(INLINE_ESCAPE, (char, offset: number) => {
+      if (char === '_' && urls.length > 0) {
+        // Visited in order, so the lookup is a pointer that only moves on.
+        while (url < urls.length && urls[url]![1] <= offset) {
+          url += 1;
+        }
+
+        if (
+          url < urls.length &&
+          urls[url]![0] <= offset &&
+          ASCII_WORD.test(text[offset - 1] ?? '') &&
+          ASCII_WORD.test(text[offset + 1] ?? '')
+        ) {
+          return char;
+        }
+      }
+
+      return `\\${char}`;
+    })
     .replace(REFERENCE_AMPERSAND, '\\&')
     .replaceAll('\n', '\\\n');
+}
+
+const ASCII_WORD = /[A-Za-z0-9]/;
+
+/**
+ * The `[start, end)` spans of `text` that are bare URLs, in order.
+ *
+ * GFM links a bare URL and takes a backslash as part of it, so `x\\_y` there
+ * linked to `x%5C_y` and showed the backslash. A `_` between two letters or
+ * digits cannot open or close emphasis in CommonMark, and the reader takes no
+ * `_` inside a bare URL for a delimiter (`inBareUrl`), so that one is written
+ * bare. Any other `_`, and `*` and `~`, are still escaped: CommonMark would
+ * read them as emphasis, and that is the worse failure.
+ */
+function bareUrls(text: string): Array<readonly [number, number]> {
+  if (!BARE_URL_START.test(text)) {
+    return [];
+  }
+
+  return [...text.matchAll(new RegExp(`(?:${BARE_URL_START.source})\\S*`, 'g'))].map(
+    (match) => [match.index, match.index + match[0].length] as const,
+  );
 }
 
 /**
@@ -976,7 +1019,50 @@ function protectEdgeWhitespace(markdown: string): string {
       token === '\\\n' ? '&#10;' : `&#${token.codePointAt(0) ?? 32};`,
     );
 
-  return markdown.replace(/^(?:\\\n|[^\S\n])+/, encode).replace(/(?:\\\n|[^\S\n])+$/, encode);
+  const led = markdown.replace(/^(?:\\\n|[^\S\n])+/, encode);
+
+  // The trailing run is walked back from the end rather than matched: as a
+  // pattern ending in `$` it was retried from every character of a whitespace
+  // run in the middle of the text, which is quadratic in a long one.
+  // It is looked for behind the closing tags of a run written as HTML, too. A
+  // break left there puts `</strong>` alone on the last line, which micromark
+  // takes for an HTML block: inside a list item or a quote that ended the
+  // block early and showed the backslash.
+  let end = led.length;
+
+  for (;;) {
+    const tag = MARK_CLOSERS.find((candidate) => led.endsWith(candidate, end));
+
+    if (!tag) {
+      break;
+    }
+
+    end -= tag.length;
+  }
+
+  let start = end;
+  let broken = false;
+
+  for (;;) {
+    const char = led[start - 1] ?? '';
+
+    if (char === '\n') {
+      // Always preceded by the one backslash that marks it.
+      start -= 2;
+      broken = true;
+    } else if (char !== '' && /\s/.test(char)) {
+      start -= 1;
+    } else {
+      break;
+    }
+  }
+
+  // Spaces inside a tag are safe where they are; only a break needs moving.
+  if (start === end || (end < led.length && !broken)) {
+    return led;
+  }
+
+  return led.slice(0, start) + encode(led.slice(start, end)) + led.slice(end);
 }
 
 /** Stops a paragraph that begins with `#`, `-` or `1.` becoming that block. */
@@ -1077,6 +1163,8 @@ const MARK_TAGS: Record<Mark, string> = {
   strikethrough: 's',
   underline: 'u',
 };
+
+const MARK_CLOSERS = Object.values(MARK_TAGS).map((tag) => `</${tag}>`);
 
 /** Delimiters applied from the innermost mark outwards. */
 const MARK_DELIMITERS: ReadonlyArray<readonly [Mark, string, string]> = [
@@ -1307,6 +1395,33 @@ function endsUnescaped(text: string, char: string): boolean {
   return slashes % 2 === 0;
 }
 
+/** How many unescaped `*` a written run starts or ends with. */
+function asterisks(written: string, side: 'start' | 'end'): number {
+  let count = 0;
+
+  if (side === 'start') {
+    while (written[count] === '*') {
+      count += 1;
+    }
+
+    return count;
+  }
+
+  while (written[written.length - 1 - count] === '*') {
+    count += 1;
+  }
+
+  // The first of them is text if the run before it is an escape.
+  return count > 0 && !endsUnescaped(written.slice(0, written.length - count + 1), '*')
+    ? count - 1
+    : count;
+}
+
+/** CommonMark's rule of three, for two delimiter runs that can each open and close. */
+function unpairable(left: number, right: number): boolean {
+  return (left + right) % 3 === 0 && (left % 3 !== 0 || right % 3 !== 0);
+}
+
 /** The character a run's delimiters sit against on one side: a code run's is its backtick. */
 function innerEdge(run: TextRun | undefined, side: 'first' | 'last'): string {
   if (!run) {
@@ -1323,21 +1438,29 @@ export function richToMarkdown(
   options: { splitLines?: boolean } = {},
 ): string {
   let previous = '';
+  const contextAt = (index: number): RunContext => ({
+    before: content[index - 1]?.text.at(-1) ?? '',
+    after: content[index + 1]?.text[0] ?? '',
+    splitLines: options.splitLines,
+  });
+  // Each run is written once here and looked at twice: as the run after the
+  // one being decided, and then as that run itself.
+  let upcoming = content[0] ? runToMarkdown(content[0], contextAt(0)) : '';
 
   return content
     .map((run, index) => {
-      const context: RunContext = {
-        before: content[index - 1]?.text.at(-1) ?? '',
-        after: content[index + 1]?.text[0] ?? '',
-        splitLines: options.splitLines,
-      };
-      let written = runToMarkdown(run, context);
+      const context = contextAt(index);
+      const next = content[index + 1];
+      let written = upcoming;
+
+      upcoming = next ? runToMarkdown(next, contextAt(index + 1)) : '';
 
       // `**(**` then `**`(`**` is `**(****`(`**`: the two closing and opening
       // delimiters are one run of four to CommonMark, punctuation on both sides
       // lets it open as well as close, and the rule of three then leaves the
       // first span unclosed. Only measured between punctuation -- between
-      // letters (`**a*****b***`) the same run resolves as written.
+      // letters a pair of runs (`**a*****b***`) resolves as written, with the
+      // two exceptions below.
       // `~~(~~` then `~~*(*~~` needs no such condition: four tildes are not
       // a strikethrough delimiter in GFM, whatever they stand between.
       const touching =
@@ -1348,9 +1471,19 @@ export function richToMarkdown(
             PUNCTUATION.test(innerEdge(run, 'first'))) ||
             // And one pair between letters: `***a***` then `*b*`, which
             // micromark closes as `<em><strong>a</strong>**b</em>` where
-            // commonmark.js reads it as written. The other five orders of
+            // commonmark.js reads it as written. The other five pairs of
             // bold, italic and both agree in both.
-            (previous.endsWith('***') && !written.startsWith('**'))));
+            (previous.endsWith('***') && !written.startsWith('**')) ||
+            // And one chain: `*a*` + `***b***` + `**c**` is a run of four and
+            // then a run of five, each able to open and close, and CommonMark
+            // will not pair two such runs whose lengths sum to a multiple of
+            // three unless both lengths are. commonmark.js leaves `***b***`
+            // literal; of the chains of bold, italic and both up to four runs
+            // long, the ones that fail are exactly the ones with this sum.
+            unpairable(
+              asterisks(previous, 'end') + asterisks(written, 'start'),
+              asterisks(written, 'end') + asterisks(upcoming, 'start'),
+            )));
 
       if (touching) {
         written = runToMarkdown(run, { ...context, tagged: true });

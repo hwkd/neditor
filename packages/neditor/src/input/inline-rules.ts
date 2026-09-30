@@ -95,6 +95,9 @@ const INLINE_RULES: readonly InlineRule[] = [
  */
 export const INLINE_SPAN_LIMIT = 2000;
 
+/** What opens a bare URL. Shared with the writer, which must agree on where one is. */
+export const BARE_URL_START = /https?:\/\/|www\./;
+
 /**
  * Whether the text ends inside a link destination whose `)` has not arrived.
  *
@@ -171,6 +174,26 @@ function linkOpener(window: string, angled: boolean): number {
   return -1;
 }
 
+/**
+ * Whether the caret is inside a bare URL: `https://…` or `www.…` with no
+ * whitespace since.
+ *
+ * GFM links such a URL as it stands, underscores included, and the writer
+ * leaves a `_` between two letters or digits bare there -- escaped, the
+ * backslash became part of the link. So no `_` inside one is a delimiter, the
+ * same way nothing closes inside a link destination: typing
+ * `https://a.test/_y_` used to italicise the `y` and delete the underscores.
+ */
+function inBareUrl(window: string): boolean {
+  let start = window.length;
+
+  while (start > 0 && !/\s/.test(window[start - 1] ?? '')) {
+    start -= 1;
+  }
+
+  return BARE_URL_START.test(window.slice(start));
+}
+
 export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null {
   // One character past the window, so the lookbehinds see what really precedes
   // a candidate opening delimiter rather than the cut.
@@ -196,6 +219,10 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
     // it anyway is not free: the link patterns walk the window from every `[`
     // in it, which is most of the cost of parsing a line of stray brackets.
     if (rule.closer !== closer) {
+      continue;
+    }
+
+    if (closer === '_' && inBareUrl(window)) {
       continue;
     }
 

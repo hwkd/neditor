@@ -159,7 +159,7 @@ An independent review of 033b959, with micromark + GFM added as a second referen
 commonmark.js. Fixed test-first; each fix was reverted to watch its test fail (the tilde rule was
 removed as dead code on the strength of one such check, and restored when the GFM fuzzer produced the
 input that needs it). After the fixes: 0 mismatches in 16,000 paragraphs against commonmark.js, 0 in
-24,000 against micromark-GFM, 0 in 5,000 each of bullets, numbered items and quotes, 0 in 8,000
+24,000 against micromark-GFM (with no bare URLs among the fuzzer's atoms -- see E2), 0 in 5,000 each of bullets, numbered items and quotes, 0 in 8,000
 single-line headings.
 
 | #   | Kind                        | What                                                                                                                                                    | Resolution                                                                                                                                                      |
@@ -184,3 +184,23 @@ in its own text-input timer), which fails whichever test is running with "Target
 browser has been closed" -- seen on a different spec each time (formatting F6, structure-keys S4, popovers PO3), with the
 machine at a load average above 40 from other work. The
 crash is in AppKit code the Linux build CI runs does not have, and CI's runs have not shown it.
+
+## Audit 5 (2026-09-30)
+
+An independent review of a32a74d, which found no regression in that commit and five older gaps. Fixed
+test-first, each fix reverted to watch its test fail.
+
+| #   | Kind                        | What                                                                                                                                                                                                                                    | Resolution                                                                                                                                                                                                               |
+| --- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| E1  | Interop, pre-existing       | Chains of touching runs between letters: `*a*` + `***b***` + `**c**` leaves `***b***` literal in commonmark.js (runs of four and five, which the rule of three will not pair). D8's comments claimed all orders agreed; that was pairs. | The middle run is written as HTML when its two junctions cannot pair. All 42 chains of bold, italic and both up to four runs now agree in commonmark.js and micromark.                                                   |
+| E2  | Interop (GFM), pre-existing | GFM links a bare URL and takes a backslash into it: `https://a.test/x\_y` linked to `x%5C_y`. The "0 in 24,000 against micromark-GFM" figure held only without URLs among the atoms.                                                    | A `_` between letters or digits in a bare URL is written bare, and no `_` inside a bare URL is a delimiter to the reader or while typing (which also stops typing a URL eating its underscores). **Partly open**, below. |
+| E3  | Interop (micromark), branch | A run written as HTML and ending a list item or quote with a line break left `</strong>` alone on the last line: an HTML block to micromark, which ended the item early.                                                                | The break goes inside the tag as `&#10;`, and the reader decodes a reference in front of trailing closing tags.                                                                                                          |
+| E4  | Performance                 | `protectEdgeWhitespace`'s trailing pattern was retried from every character of an interior whitespace run: 5 s for 80,000 spaces.                                                                                                       | Walked back from the end.                                                                                                                                                                                                |
+| E5  | Inaccurate docs             | The CHANGELOG listed the mid-line reference slowdown as a fixed bug; it was introduced and removed on this branch.                                                                                                                      | Dropped.                                                                                                                                                                                                                 |
+
+**Open, by decision (E2's remainder).** GFM's autolink extension ends a bare URL only at whitespace or
+`<`, so anything else written against one is taken into the link: an escaped `~` or `*`
+(`https://a.test/~x` is written `\~x`), and the `&#32;` that protects a trailing space when a block
+ends with a URL. CommonMark readers, and this one, read all of these correctly. The escape-free
+spelling is an angle autolink (`<https://…>`), which would have to be read back as plain text, and
+that changes what typing `<https://…>` does -- a design decision, not a fix to slip into this branch.

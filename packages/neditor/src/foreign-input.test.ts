@@ -552,6 +552,10 @@ describe('typing a line and pasting it give the same result', () => {
     '<s><s>x</s></s>',
     '~~<s>a</s>~~',
     'one *two\nthree* four',
+    // No `_` inside a bare URL is a delimiter, typed or pasted.
+    'see https://a.test/_y_ and _z_',
+    '_a https://a.test/x_y',
+    'www.a.test/__init__ __b__',
   ])('%s', async (line) => {
     const { parseInlineMarkdown } = await import('./index.ts');
     const editor = mount([block({})]);

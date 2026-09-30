@@ -27,7 +27,17 @@ that changes what you store or what other applications receive is listed first.
     would leave `**` or `*` literal: against punctuation with a letter on the
     far side (`word<strong>(x)</strong>`), around a code span next to a letter,
     `~~` around `**` next to a letter, and where two runs' delimiters would
-    touch between punctuation (or as `***a****b*`, which micromark misreads).
+    touch between punctuation (or as `***a****b*`, which micromark misreads,
+    or `*a****b*****c**`, which CommonMark's rule of three leaves literal).
+  - A `_` between two letters or digits inside a bare URL is written bare
+    (`https://a.test/x_y`): GFM links a bare URL and took the escape's
+    backslash into it. Any other escaped character written against a bare URL
+    (`https://a.test/~x`, a URL ending a block before a trailing space) is
+    still taken into the link by GFM readers; CommonMark readers are
+    unaffected.
+  - A formatted run written as HTML that ends a block with a line break keeps
+    the break inside the tag as `&#10;`; the closing tag alone on a line ended
+    a list item early in micromark.
   - In a heading, a trailing run of `#` is escaped (`# a \#`): other readers
     drop it as a closing sequence. In a list item or a quote, text that opens
     with a block marker is escaped (`- 1\. x`, `> \# x`, `- \---`): other
@@ -90,5 +100,8 @@ that changes what you store or what other applications receive is listed first.
 - A long formatted run of lines with no spaces (a list of paths) was written as
   one span too long for the reader to close, and came back as raw markup; it is
   split at a line break.
-- Parsing a long soft-broken paragraph, or a long run of numeric references in
-  the middle of a line, took time quadratic in its length.
+- Parsing a long soft-broken paragraph took time quadratic in its length, and
+  so did writing a long run of spaces inside a block.
+- Typing or pasting a bare URL with `_x_` in it (`https://a.test/_y_`)
+  italicised the `y` and deleted the underscores. No `_` inside a bare URL
+  (`https://…` or `www.…`, up to the next whitespace) is a delimiter now.

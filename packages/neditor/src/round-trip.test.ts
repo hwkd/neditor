@@ -765,3 +765,74 @@ describe('audit 4', () => {
     expect(back?.content).toEqual(start(blocks)[0]?.content);
   });
 });
+
+describe('audit 5', () => {
+  const B = ['bold'] as const;
+  const I = ['italic'] as const;
+  const X = ['bold', 'italic'] as const;
+
+  // Pairs of touching runs resolve between letters; chains do not. `*a*` +
+  // `***b***` + `**c**` is a run of four then a run of five, both able to open
+  // and close, and four plus five is a multiple of three: CommonMark's rules 9
+  // and 10 leave `***b***` literal. Checked against commonmark.js and micromark.
+  test.each([
+    [[I, X, B], '*a*<em><strong>b</strong></em>**c**'],
+    [[B, I, X, B], '**a***b*<em><strong>c</strong></em>**d**'],
+    [[I, X, B, I], '*a*<em><strong>b</strong></em>**c***d*'],
+    [[I, X, B, X], '*a*<em><strong>b</strong></em>**c*****d***'],
+    // The chains that do resolve are left as delimiters.
+    [[B, X, B], '**a*****b*****c**'],
+    [[I, B, I], '*a***b***c*'],
+  ] as const)('the chain %j is written %s', (chain, markdown) => {
+    const blocks = [
+      b({ content: chain.map((marks, index) => ({ text: 'abcd'[index]!, marks: [...marks] })) }),
+    ];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  // GFM links a bare URL and takes a backslash as part of it: `x\_y` linked to
+  // `x%5C_y` and showed the backslash. A `_` between two letters or digits is
+  // no delimiter in CommonMark, so inside a URL it is written bare -- and the
+  // reader, like GFM, takes no `_` inside a bare URL for a delimiter.
+  test.each([
+    ['see https://a.test/x_y now', 'see https://a.test/x_y now'],
+    ['www.a.test/a_b_c', 'www.a.test/a_b_c'],
+    ['snake_case and https://a.test/x_y', 'snake\\_case and https://a.test/x_y'],
+    // Not between letters: still escaped, so CommonMark does not read emphasis.
+    ['https://a.test/_x_/', 'https://a.test/\\_x\\_/'],
+  ])('%j is written %j', (text, markdown) => {
+    const blocks = [b({ content: t(text) })];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  test('an underscore inside a bare URL never closes a span opened before it', () => {
+    expect(blocksFromMarkdown('_a https://a.test/x_y')[0]?.content).toEqual(
+      t('_a https://a.test/x_y'),
+    );
+  });
+
+  // A closing tag alone on the last line of a list item or a quote is an HTML
+  // block to micromark, which ends the item there. The break is written as a
+  // reference inside the tag, as one at the very edge of a block already is.
+  test.each(['bulleted_list', 'quote', 'paragraph'] as const)(
+    'a formatted run ending in a line break at the end of a %s keeps its tag on the line',
+    (type) => {
+      const blocks = [b({ type, content: [{ text: 'abc\n', marks: ['bold'] }] })];
+      expect(toMarkdown({ blocks })).toMatch(/<strong>abc&#10;<\/strong>$/);
+      expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+    },
+  );
+
+  test.each([
+    ['spaces', ' '],
+    ['line breaks', '\n'],
+  ])('a long run of %s inside a paragraph is written in linear time', (_name, unit) => {
+    expect(
+      growth((size) => {
+        toMarkdown({ blocks: [b({ content: t(`a${unit.repeat(size)}b`) })] });
+      }, 2500),
+    ).toBeLessThan(LINEAR);
+  });
+});

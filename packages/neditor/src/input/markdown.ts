@@ -226,8 +226,8 @@ const REFERENCE_REACH = 10;
  * before failing: a long run of references in the middle of a line took a
  * second to parse.
  */
-function trailingReferences(text: string): number {
-  let start = text.length;
+function trailingReferences(text: string, end: number): number {
+  let start = end;
 
   for (;;) {
     const from = Math.max(0, start - REFERENCE_REACH);
@@ -240,7 +240,25 @@ function trailingReferences(text: string): number {
     start = from + at;
   }
 
-  return start === text.length ? -1 : start;
+  return start === end ? -1 : start;
+}
+
+/** The closing tags the writer's HTML spelling of a mark ends in. */
+const CLOSING_TAGS = ['</strong>', '</em>', '</s>', '</u>', '</code>'];
+
+/** Where the closing tags that end `text` start: its length if there are none. */
+function beforeClosingTags(text: string): number {
+  let end = text.length;
+
+  for (;;) {
+    const tag = CLOSING_TAGS.find((candidate) => text.endsWith(candidate, end));
+
+    if (!tag) {
+      return end;
+    }
+
+    end -= tag.length;
+  }
 }
 
 /** The `[start, end)` spans of `text` whose references are the writer's, in order. */
@@ -253,11 +271,14 @@ function decodableReferences(text: string): Array<readonly [number, number]> {
     spans.push([start, start + run.length]);
   }
 
-  const trailing = trailingReferences(text);
+  // The writer puts a block's last line break inside the tags of a run written
+  // as HTML, so the end of the text is looked for behind any closing tags.
+  const end = beforeClosingTags(text);
+  const trailing = trailingReferences(text, end);
 
   // A run that is the whole of the last line is already there as a leading one.
-  if (trailing !== -1 && spans.at(-1)?.[1] !== text.length) {
-    spans.push([trailing, text.length]);
+  if (trailing !== -1 && spans.at(-1)?.[1] !== end) {
+    spans.push([trailing, end]);
   }
 
   return spans;
