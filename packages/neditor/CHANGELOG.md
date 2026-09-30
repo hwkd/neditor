@@ -16,6 +16,10 @@ that changes what you store or what other applications receive is listed first.
     HTML (`a<strong>bold </strong>b`, `<em>`, `<s>`, `<code>`, `<u>`), because
     `**`, `*` and `~~` cannot hold edge whitespace; before, the whitespace was
     moved outside and lost its formatting.
+  - A code run that needs escaping or holds a line break is written as
+    `<code>…</code>`: other readers showed the backslashes of `` `snake\_case` ``.
+  - A formatted run or link containing a line break is written as one span,
+    not one per line.
   - A block marker at the start of a line after a soft break is escaped
     (`\# not a heading`), and so is a `!` opening a paragraph with `![`.
 - **Markdown.** An image's caption is written after the image, following a hard
@@ -51,7 +55,9 @@ that changes what you store or what other applications receive is listed first.
   left the blocks selected behind a visible caret, so the next key replaced
   them.
 - The slash menu stayed open after arrowing back over the `/`, and its combobox
-  had no accessible name.
+  had no accessible name. With the popovers in another tree (`portalContainer`
+  outside the editor's shadow root), its `aria-controls` and
+  `aria-activedescendant` pointed at nothing; they use element references there.
 - A text selection could be left inside a block while blocks were selected
   (WebKit drags), and a touch swipe that became a scroll could leave blocks
   selected.

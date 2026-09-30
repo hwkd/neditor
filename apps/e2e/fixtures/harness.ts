@@ -66,6 +66,8 @@ function optionsFromQuery(): Partial<NEditorOptions> {
   if (theme === 'light' || theme === 'dark' || theme === 'auto') options.theme = theme;
   if (historyLimit) options.historyLimit = Number(historyLimit);
   if (params.get('labels') === 'fr') options.labels = FRENCH;
+  // Popovers in the page while the editor may be in a shadow root: another tree.
+  if (params.get('portal') === 'body') options.portalContainer = document.body;
 
   return options;
 }

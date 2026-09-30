@@ -109,8 +109,13 @@ describe('inline markdown rules', () => {
     expect(match?.end).toBe(prefix.length + 6);
   });
 
-  test('a delimiter spanning a newline does not fire', () => {
-    expect(matchInlineRule('*a\nb*')).toBe(null);
+  // A span may cross a soft break, as in CommonMark: the writer keeps a marked
+  // run with a line break in it whole, so the break keeps its mark (B11). A
+  // delimiter against the break itself is still against whitespace.
+  test('a span may cross a soft break, but not open or close against one', () => {
+    expect(matchInlineRule('*a\nb*')?.mark).toBe('italic');
+    expect(matchInlineRule('*a\n*')).toBe(null);
+    expect(matchInlineRule('*\nb*')).toBe(null);
   });
 
   describe('links', () => {

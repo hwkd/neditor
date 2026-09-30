@@ -571,6 +571,31 @@ describe('block selection made by a pointer stays the only mode', () => {
     expect(texts(editor)).toEqual(['a', 'b', 'c']);
   });
 
+  /**
+   * B11 (e2e audit 2). A focus that arrives just after a pointer is released is
+   * the browser finishing that gesture -- a long press ending, a tap's
+   * compatibility events -- not the reader choosing the text. It is left to the
+   * stray-caret check, which keeps the block selection the gesture made.
+   */
+  test('focus arriving just after a pointer release does not end block selection', () => {
+    const editor = mount(abc());
+    editor.selectBlocks([idFor(editor, 'b')]);
+    document.dispatchEvent(
+      new PointerEvent('pointerdown', { bubbles: true, pointerId: 6, pointerType: 'touch' }),
+    );
+    document.dispatchEvent(
+      new PointerEvent('pointerup', { bubbles: true, pointerId: 6, pointerType: 'touch' }),
+    );
+
+    const b = hosts(editor)[1]!;
+    b.focus();
+    getSelection()?.collapse(b.firstChild, 1);
+    document.dispatchEvent(new Event('selectionchange'));
+
+    expect(editor.getSelectedBlocks()).toEqual([idFor(editor, 'b')]);
+    expect(document.activeElement).toBe(editor.element);
+  });
+
   test("another editor's caret is not this editor's business", () => {
     const first = mount(abc());
     const second = mount(abc());

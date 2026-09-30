@@ -469,6 +469,17 @@ const DRAG_THRESHOLD_PX = 4;
 /** How long a touch must rest on a block before it selects it. */
 const LONG_PRESS_MS = 500;
 
+/**
+ * How long after a pointer is released a focus change still belongs to it.
+ *
+ * A browser finishing a gesture -- a long press ending, a tap's compatibility
+ * events -- can move focus into a block after the pointer is up. That is not
+ * the reader choosing the text, so it must not end the block selection the
+ * gesture made; a focus with no pointer near it (the keyboard, a screen reader)
+ * is, and does.
+ */
+const POINTER_FOCUS_GRACE_MS = 300;
+
 /** How far a touch may drift and still count as a press rather than a drag. */
 const LONG_PRESS_TOLERANCE_PX = 10;
 
@@ -579,6 +590,10 @@ export class NEditor {
   readonly #tableToolbar: TableToolbar;
   readonly #dropIndicator: HTMLElement;
   readonly #liveRegion: HTMLElement;
+  /** When a pointer was last released or cancelled; see POINTER_FOCUS_GRACE_MS. */
+  #pointerReleasedAt = Number.NEGATIVE_INFINITY;
+  /** The slash-menu combobox's name, in the host's own tree. */
+  readonly #slashLabel: HTMLElement;
   readonly #useGutter: boolean;
 
   /** True where Cmd is the shortcut modifier and Ctrl belongs to the system. */
@@ -888,6 +903,14 @@ export class NEditor {
     this.#liveRegion.setAttribute('role', 'status');
     this.#liveRegion.setAttribute('aria-live', 'polite');
     this.#root.append(this.#liveRegion);
+
+    // Hidden, and still read when referenced by aria-labelledby. It lives in
+    // the root so the reference always resolves, whatever tree the menu is in.
+    this.#slashLabel = this.#document.createElement('span');
+    this.#slashLabel.id = `neditor-slash-label-${Math.random().toString(36).slice(2, 9)}`;
+    this.#slashLabel.hidden = true;
+    this.#slashLabel.textContent = this.#labels.slashMenu;
+    this.#root.append(this.#slashLabel);
 
     if (this.#useGutter) {
       // Children of the root, not of a block: the renderer only reorders the
@@ -1490,6 +1513,7 @@ export class NEditor {
     this.#linkEditor.destroy();
     this.#gutter.destroy();
     this.#liveRegion.remove();
+    this.#slashLabel.remove();
     this.#iconPicker.destroy();
     this.#imageEditor.destroy();
     this.#tableToolbar.destroy();
@@ -2771,6 +2795,7 @@ export class NEditor {
    */
   #handlePointerCancel = (event: PointerEvent): void => {
     this.#cancelLongPress();
+    this.#pointerReleasedAt = this.#now();
 
     if (this.#drag && event.pointerId === this.#drag.pointerId) {
       this.#endDrag(null);
@@ -2783,6 +2808,7 @@ export class NEditor {
 
   #handlePointerUp = (event: PointerEvent): void => {
     this.#pointerDown = false;
+    this.#pointerReleasedAt = this.#now();
     this.#textDrag = null;
     this.#cancelLongPress();
     delete this.#root.dataset.selecting;
@@ -3938,17 +3964,52 @@ export class NEditor {
     // A combobox is an input field and needs a name (WCAG 4.1.2). The host has
     // none of its own -- its element supplies its role and content -- so it
     // borrows the menu's for exactly as long as it is one. By reference, not
-    // aria-label: a to-do's checkbox is itself named by this host, and a label
-    // here renamed the checkbox "Block types"; a reference is not followed twice.
-    host.setAttribute('aria-labelledby', this.#slashMenu.listId);
+    // aria-label (a to-do's checkbox is named by this host, and a label here
+    // renamed it), and to a label of its own rather than the listbox: Chromium
+    // names a combobox labelled by a listbox from the options' text, not from
+    // the listbox's aria-label ("T Text Just start writing...").
+    host.setAttribute('aria-labelledby', this.#slashLabel.id);
     host.setAttribute('aria-expanded', 'true');
     host.setAttribute('aria-haspopup', 'listbox');
-    host.setAttribute('aria-controls', this.#slashMenu.listId);
 
+    const menu = this.#slashMenu.element;
     const active = this.#slashMenu.activeOptionId;
 
-    if (active) {
-      host.setAttribute('aria-activedescendant', active);
+    this.#reference(host, 'aria-controls', menu.querySelector(`[id="${this.#slashMenu.listId}"]`));
+    this.#reference(
+      host,
+      'aria-activedescendant',
+      active ? menu.querySelector(`[id="${active}"]`) : null,
+    );
+  }
+
+  /**
+   * Points an ARIA relationship at an element, wherever it lives.
+   *
+   * An ID reference cannot cross a shadow boundary, and the menu is portalled
+   * into whatever tree the host passes as `portalContainer` -- with the editor
+   * in a shadow root and the popovers on the page, these IDs pointed at nothing.
+   * Across trees the element-reflection property is used where the browser has
+   * it, and no ID is written that could not resolve.
+   */
+  #reference(
+    host: HTMLElement,
+    attribute: 'aria-controls' | 'aria-activedescendant',
+    target: Element | null,
+  ): void {
+    const property =
+      attribute === 'aria-controls' ? 'ariaControlsElements' : 'ariaActiveDescendantElement';
+    const reflecting = host as unknown as Record<string, unknown>;
+
+    if (target && target.getRootNode() === host.getRootNode()) {
+      host.setAttribute(attribute, target.id);
+      return;
+    }
+
+    host.removeAttribute(attribute);
+
+    if (property in host) {
+      reflecting[property] = target ? (attribute === 'aria-controls' ? [target] : target) : null;
     }
   }
 
@@ -3961,15 +4022,13 @@ export class NEditor {
     this.#slashMenu.close();
     this.#slashContext = null;
 
-    for (const attribute of [
-      'role',
-      'aria-labelledby',
-      'aria-expanded',
-      'aria-haspopup',
-      'aria-controls',
-      'aria-activedescendant',
-    ]) {
+    for (const attribute of ['role', 'aria-labelledby', 'aria-expanded', 'aria-haspopup']) {
       content?.removeAttribute(attribute);
+    }
+
+    if (content) {
+      this.#reference(content, 'aria-controls', null);
+      this.#reference(content, 'aria-activedescendant', null);
     }
   }
 
@@ -4896,7 +4955,12 @@ export class NEditor {
     // pointer involved -- is the reader choosing that text, so the block
     // selection ends rather than a stray-caret check taking it back (see
     // #takeStrayCaretOut, which is for carets the browser puts back itself).
-    if (resolved && this.#selected.size > 0 && !this.#pointerDown) {
+    if (
+      resolved &&
+      this.#selected.size > 0 &&
+      !this.#pointerDown &&
+      this.#now() - this.#pointerReleasedAt > POINTER_FOCUS_GRACE_MS
+    ) {
       this.#clearBlockSelection();
     }
 
@@ -5010,6 +5074,10 @@ export class NEditor {
     this.#selection()?.removeAllRanges();
     this.#root.focus({ preventScroll: true });
     return true;
+  }
+
+  #now(): number {
+    return this.#document.defaultView?.performance.now() ?? Date.now();
   }
 
   /** Hides both floating toolbars; used when either takes over. */

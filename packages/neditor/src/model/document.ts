@@ -1109,18 +1109,6 @@ function splitLongSpan(text: string, emitted: number): [string, string] | null {
 }
 
 function runToMarkdown(run: TextRun): string {
-  // One span per line. A mark or a link is line-bounded in the reader -- every
-  // inline pattern excludes `\n`, so no rule can match a span that crosses one
-  // -- and writing `**one\<break>two**` whole therefore came back as literal
-  // asterisks sitting in the prose with the formatting gone. Reachable from
-  // Shift+Enter inside bold text, and from pasting `<b>one<br>two</b>`.
-  if (run.text.includes('\n')) {
-    return run.text
-      .split('\n')
-      .map((line) => runToMarkdown({ ...run, text: line }))
-      .join('\\\n');
-  }
-
   const escaped = escapeMarkdownText(run.text);
   const marks = new Set(run.marks ?? []);
 
@@ -1128,12 +1116,18 @@ function runToMarkdown(run: TextRun): string {
     return escaped;
   }
 
-  const edged = /^[^\S\n]|[^\S\n]$/.test(escaped);
+  // HTML where a delimiter cannot say it. Emphasis cannot open or close
+  // against whitespace -- a space or a line break -- and CommonMark takes a
+  // backtick span's content literally, so a code run that needed an escape, or
+  // holds a line break (written `\` + newline), would show the backslash.
+  const edged = /^\s|\s$/.test(run.text);
+  const literalCode = !marks.has('code') || (escaped === run.text && !run.text.includes('`'));
+  const tagged = edged || !literalCode;
   let core = escaped;
 
   for (const [mark, open, close] of MARK_DELIMITERS) {
     if (marks.has(mark)) {
-      core = edged ? `<${MARK_TAGS[mark]}>${core}</${MARK_TAGS[mark]}>` : `${open}${core}${close}`;
+      core = tagged ? `<${MARK_TAGS[mark]}>${core}</${MARK_TAGS[mark]}>` : `${open}${core}${close}`;
     }
   }
 

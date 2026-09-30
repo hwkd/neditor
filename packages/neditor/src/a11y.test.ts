@@ -447,9 +447,49 @@ describe('the slash menu is announced', () => {
     typeSlash(content);
 
     expect(content.getAttribute('role')).toBe('combobox');
-    const listbox = document.getElementById(content.getAttribute('aria-labelledby') ?? '');
-    expect(listbox?.getAttribute('role')).toBe('listbox');
-    expect(listbox?.getAttribute('aria-label')).toBe('Types de bloc');
+    // A label of its own, in the host's tree -- not the listbox, whose content
+    // Chromium reads instead of its aria-label ("T Text Just start writing..."),
+    // and which may live in another tree (see below).
+    const label = (content.getRootNode() as Document).getElementById(
+      content.getAttribute('aria-labelledby') ?? '',
+    );
+    expect(label?.textContent).toBe('Types de bloc');
+    expect(label?.getAttribute('role')).toBe(null);
+    expect(editor.element.lastElementChild?.classList.contains('neditor-live-region')).toBe(true);
+  });
+
+  /**
+   * B10 (e2e audit 2). An ID reference cannot cross a shadow boundary, so with
+   * the popovers portalled into another tree the combobox's aria-controls and
+   * aria-activedescendant pointed at nothing. Where they would not resolve they
+   * are not written as IDs.
+   */
+  test('with the popovers in another tree, no reference is left dangling', () => {
+    const outer = document.createElement('div');
+    document.body.append(outer);
+    const shadow = outer.attachShadow({ mode: 'open' });
+    const mountPoint = document.createElement('div');
+    shadow.append(mountPoint);
+    const editor = createEditor({
+      element: mountPoint,
+      portalContainer: document.body,
+      doc: { blocks: [block({})] },
+    });
+    editors.push(editor);
+    const content = mountPoint.querySelector<HTMLElement>('.neditor-block__content')!;
+    content.focus();
+    typeSlash(content);
+
+    expect(content.getAttribute('role')).toBe('combobox');
+
+    const dangling = ['aria-labelledby', 'aria-controls', 'aria-activedescendant'].filter(
+      (attribute) => {
+        const id = content.getAttribute(attribute);
+        return id !== null && id !== '' && shadow.getElementById(id) === null;
+      },
+    );
+    expect(dangling, "every ID reference resolves in the host's tree").toEqual([]);
+    expect(content.getAttribute('aria-labelledby')).not.toBeNull();
   });
 
   /**

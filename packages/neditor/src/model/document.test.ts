@@ -562,11 +562,12 @@ describe('a mark or link that spans a soft break', () => {
    * with the bold gone -- not a dropped mark but visible corruption. Reachable
    * with Shift+Enter inside bold text, and by pasting `<b>one<br>two</b>`.
    *
-   * The writer emits one span per line now. What that does not restore is the
-   * newline's own marks: it comes back as a bare run between two marked ones
-   * rather than inside a single marked run. That is invisible -- a newline has
-   * no formatting to see -- but it is not a byte-identical round trip, and the
-   * assertions below say so rather than implying otherwise.
+   * The writer then emitted one span per line, which left the newline's own
+   * mark behind: invisible, but not a byte-identical round trip. The reader's
+   * rules span a soft break now, as CommonMark's do, so the run is written
+   * whole and comes back whole -- including a newline at the run's edge, which
+   * is written as HTML (`<strong>b\` + newline + `</strong>`), since emphasis
+   * cannot close against whitespace.
    */
   const roundTrip = (content: TextRun[]): TextRun[] =>
     normalizeDocument({
@@ -586,22 +587,21 @@ describe('a mark or link that spans a soft break', () => {
     ['code', ['code'] as Mark[], undefined],
     ['underline', ['underline'] as Mark[], undefined],
   ])('%s survives the break, on both sides of it', (_name, marks) => {
-    const back = roundTrip([{ text: 'one\ntwo', marks }]);
-
-    expect(back.map((run) => run.text).join('')).toBe('one\ntwo');
-    expect(back.filter((run) => run.text === 'one' || run.text === 'two')).toHaveLength(2);
-
-    expect(
-      back.filter((run) => run.text !== '\n').map((run) => run.marks),
-      'every run but the break itself keeps the mark',
-    ).toEqual(back.filter((run) => run.text !== '\n').map(() => marks));
+    expect(roundTrip([{ text: 'one\ntwo', marks }])).toEqual([{ text: 'one\ntwo', marks }]);
+    expect(roundTrip([{ text: 'a' }, { text: 'b\n', marks }])).toEqual([
+      { text: 'a' },
+      { text: 'b\n', marks },
+    ]);
+    expect(roundTrip([{ text: '\nb', marks }, { text: 'a' }])).toEqual([
+      { text: '\nb', marks },
+      { text: 'a' },
+    ]);
   });
 
   test('a link survives it too, and keeps its destination', () => {
     const back = roundTrip([{ text: 'line one\nline two', link: 'https://example.com/docs' }]);
 
-    expect(back.map((run) => run.text).join('')).toBe('line one\nline two');
-    expect(back.filter((run) => run.link === 'https://example.com/docs')).toHaveLength(2);
+    expect(back).toEqual([{ text: 'line one\nline two', link: 'https://example.com/docs' }]);
   });
 
   test('no raw delimiter is left in the text', () => {

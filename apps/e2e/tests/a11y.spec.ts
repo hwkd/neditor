@@ -208,4 +208,76 @@ test.describe('21 · accessibility', () => {
     await page.keyboard.press('Escape');
     await expect(editor.liveRegion).toHaveText('Titre 1 sélectionné, Bonjour');
   });
+
+  test('A6 the browser names the slash combobox, and a to-do checkbox keeps its own name', async ({
+    editor,
+    page,
+    browserName,
+  }) => {
+    // Chromium's real accessibility tree, through the DevTools protocol: what a
+    // screen reader is given, not a recomputation (B10).
+    test.skip(browserName !== 'chromium', 'reads the browser accessibility tree over CDP');
+    await editor.load({ doc: 'lists' });
+    const cdp = await page.context().newCDPSession(page);
+    const names = async (role: string) => {
+      const { nodes } = (await cdp.send('Accessibility.getFullAXTree')) as {
+        nodes: Array<{ role?: { value?: string }; name?: { value?: string } }>;
+      };
+      return nodes.filter((node) => node.role?.value === role).map((node) => node.name?.value);
+    };
+
+    await editor.placeCaret('t1', 0);
+    await editor.type('/');
+    await expect(editor.portal('slash-menu')).toBeVisible();
+    expect(await names('combobox')).toEqual(['Block types']);
+    expect(await names('checkbox')).toEqual(['/Todo one', 'Todo two']);
+  });
+
+  test('A7 with the editor in a shadow root and its menus on the page, no reference dangles', async ({
+    editor,
+    page,
+    browserName,
+  }) => {
+    await editor.load({ mount: 'shadow', portal: 'body', doc: 'empty' });
+    await editor.placeCaret('p1', 0);
+    await editor.type('/');
+    await expect(editor.portal('slash-menu')).toBeVisible();
+    await page.keyboard.press('ArrowDown');
+
+    // Across trees the relationships are element references, not IDs -- every
+    // engine here supports them -- and they point at the real list and option.
+    const relations = await page.evaluate(() => {
+      const host = document
+        .querySelector('e2e-shadow-host')!
+        .shadowRoot!.querySelector('.neditor-block__content') as HTMLElement & {
+        ariaControlsElements?: Element[];
+        ariaActiveDescendantElement?: Element | null;
+      };
+      return {
+        controls: host.ariaControlsElements?.map((element) => element.getAttribute('role')),
+        active: host.ariaActiveDescendantElement?.getAttribute('aria-selected'),
+      };
+    });
+    expect(relations).toEqual({ controls: ['listbox'], active: 'true' });
+
+    if (browserName === 'chromium') {
+      const cdp = await page.context().newCDPSession(page);
+      const { nodes } = (await cdp.send('Accessibility.getFullAXTree')) as {
+        nodes: Array<{ role?: { value?: string }; properties?: Array<{ name: string }> }>;
+      };
+      const combobox = nodes.find((node) => node.role?.value === 'combobox');
+      expect(combobox?.properties?.map((property) => property.name)).toEqual(
+        expect.arrayContaining(['controls', 'activedescendant']),
+      );
+    }
+
+    // axe reads only the ID attributes, so it cannot see the element
+    // references above and reports the list as an unreachable scrolling region.
+    // Everything else it checks, including that no ID dangles, still applies.
+    const results = await new AxeBuilder({ page })
+      .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
+      .disableRules(['scrollable-region-focusable'])
+      .analyze();
+    expect(results.violations.map((violation) => violation.id)).toEqual([]);
+  });
 });

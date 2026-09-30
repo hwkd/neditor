@@ -684,6 +684,11 @@ writes is what `blocksFromMarkdown` reads back:
   `a<strong>bold </strong>b`, `<em>`, `<s>`, `<code>`, `<u>` -- which every
   reader renders as written and this one reads back. Link text holds the
   whitespace as it is.
+- A formatted run or a link that contains a line break is written whole
+  (`**one\` + newline + `two**`) and read back whole, as CommonMark allows.
+- CommonMark shows a backtick code span's content literally, backslashes
+  included, so a code run that needs any escaping (`snake_case`, `a<b`) or holds
+  a line break is written as `<code>…</code>`, where escapes are honoured.
 - A line after a soft break (or an image's caption) that opens with `#`, `-`,
   `>`, `+` or `1.` has the marker escaped, so other readers do not start a
   heading or a list there, and a paragraph opening with `![` has its `!`

@@ -44,9 +44,11 @@ interface InlineRule {
  * disappeared as they were typed.
  *
  * Written per delimiter because the class has to exclude that delimiter too.
+ * A span may cross a soft break, as it may in CommonMark: the writer keeps a
+ * run with a line break in it whole, so the break keeps the run's mark.
  */
 const body = (delimiter: string): string =>
-  `([^${delimiter}\\s\\n](?:[^${delimiter}\\n]*[^${delimiter}\\s\\n])?)`;
+  `([^${delimiter}\\s](?:[^${delimiter}]*[^${delimiter}\\s])?)`;
 
 const INLINE_RULES: readonly InlineRule[] = [
   // Bold before italic: `**x**` must not be read as an italic `*x*`.
@@ -63,22 +65,22 @@ const INLINE_RULES: readonly InlineRule[] = [
   // Backticks deliberately keep their spaces: a code span is delimited by
   // backtick runs rather than by flanking, so `` ` a ` `` really is code in
   // CommonMark. Emphasis is the construct with the flanking rule.
-  { closer: '`', pattern: /`([^`\n]+)`$/, mark: 'code' },
+  { closer: '`', pattern: /`([^`]+)`$/, mark: 'code' },
   // Markdown has no underline, so `toMarkdown` writes the HTML tag; this is
   // what reads it back rather than leaving seven junk characters in the text.
-  { closer: '>', pattern: /<u>([^<\n]+)<\/u>$/, mark: 'underline' },
+  { closer: '>', pattern: /<u>([^<]+)<\/u>$/, mark: 'underline' },
   // `toMarkdown` writes a marked run whose text starts or ends with whitespace
   // as HTML: `**bold **` is not emphasis in any dialect, and `a**bold&#32;**b`
   // is literal asterisks in CommonMark (the closer is not right-flanking), but
   // every reader renders `a<strong>bold </strong>b` as written.
-  { closer: '>', pattern: /<strong>([^<\n]+)<\/strong>$/, mark: 'bold' },
-  { closer: '>', pattern: /<em>([^<\n]+)<\/em>$/, mark: 'italic' },
-  { closer: '>', pattern: /<s>([^<\n]+)<\/s>$/, mark: 'strikethrough' },
-  { closer: '>', pattern: /<code>([^<\n]+)<\/code>$/, mark: 'code' },
+  { closer: '>', pattern: /<strong>([^<]+)<\/strong>$/, mark: 'bold' },
+  { closer: '>', pattern: /<em>([^<]+)<\/em>$/, mark: 'italic' },
+  { closer: '>', pattern: /<s>([^<]+)<\/s>$/, mark: 'strikethrough' },
+  { closer: '>', pattern: /<code>([^<]+)<\/code>$/, mark: 'code' },
   // The angle-bracket form first: it is how a destination holding a `)` — the
   // character that would otherwise close the link — is written.
-  { closer: ')', pattern: /\[([^\]\n]+)\]\(<([^<>\n]*)>\)$/, isLink: true, angled: true },
-  { closer: ')', pattern: /\[([^\]\n]+)\]\(([^)\s]+)\)$/, isLink: true },
+  { closer: ')', pattern: /\[([^\]]+)\]\(<([^<>\n]*)>\)$/, isLink: true, angled: true },
+  { closer: ')', pattern: /\[([^\]]+)\]\(([^)\s]+)\)$/, isLink: true },
 ];
 
 /**

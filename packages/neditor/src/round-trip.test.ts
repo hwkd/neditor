@@ -399,6 +399,20 @@ describe('audit 2: what other readers see, and what this one must not misread', 
     expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
   });
 
+  // B12. CommonMark takes a backtick code span's content literally, so the
+  // backslash escapes the writer put there were shown: `snake\_case` on GitHub.
+  // A code run that needs escaping is written as <code>, where they are honoured.
+  test.each([
+    ['snake_case', 'a<code>snake\\_case</code>b'],
+    ['a*b<c', 'a<code>a\\*b\\<c</code>b'],
+    ['one\ntwo', 'a<code>one\\\ntwo</code>b'],
+    ['plain', 'a`plain`b'],
+  ])('code %j is written %s', (text, markdown) => {
+    const blocks = [b({ content: [{ text: 'a' }, { text, marks: ['code'] }, { text: 'b' }] })];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
   test('a whitespace-only bold run is written once, not a reference per space', () => {
     const blocks = [
       b({ content: [{ text: 'a' }, { text: ' '.repeat(3000), marks: ['bold'] }, { text: 'b' }] }),
