@@ -1146,6 +1146,8 @@ describe('audit 17', () => {
     // Only the whitespace around a break goes: a label's own edges are kept.
     [' a\nb', ' a b'],
     ['a\nb ', 'a b '],
+    // A part between two breaks loses the whitespace on both its sides.
+    ['a\n x \nb', 'a x b'],
   ])('a label %j is written with %j', (alt, written) => {
     expect(toMarkdown({ blocks: [b({ type: 'image', src: '/x.png', alt })] })).toBe(
       `![${written}](/x.png)`,
@@ -1204,5 +1206,25 @@ describe('audit 17', () => {
     const back = throughMarkdown([b({ type: 'code', content: t(text) })]);
     expect(back).toHaveLength(1);
     expect(back[0]?.content).toEqual(t(expected));
+  });
+});
+
+describe('audit 19', () => {
+  // The carriage-return rewrite must carry the block's options with it: a
+  // heading writes one span per line, and written across the break the span's
+  // delimiters are left on both sides of it in every other reader.
+  test('a carriage return in a heading still splits the span per line', () => {
+    const blocks = [b({ type: 'heading1', content: [{ text: 'a\rb', marks: ['bold'] }] })];
+    expect(toMarkdown({ blocks })).toBe('# **a**\\\n**b**');
+  });
+
+  // The two bounds of an open destination, which is what keeps an unclosed
+  // `](` from switching emphasis off for the rest of the line: whitespace ends
+  // the plain form, and a `<` ends the angle form.
+  test.each([
+    ['[a](b and *x*', [{ text: '[a](b and ' }, { text: 'x', marks: ['italic'] }]],
+    ['[a](<b<c*x*', [{ text: '[a](<b<c' }, { text: 'x', marks: ['italic'] }]],
+  ])('%s still emphasises', (markdown, content) => {
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual(content);
   });
 });

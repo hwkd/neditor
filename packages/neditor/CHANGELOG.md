@@ -142,4 +142,5 @@ that changes what you store or what other applications receive is listed first.
 - A carriage return in a block's text, a table cell or a caption (pasted HTML
   can carry one as `&#13;`) was written raw. Every reader takes it for a line
   break, so the block came back split, and a table came back as paragraphs. It
-  is written as the line break it is read as.
+  is written as the line break it is read as -- in a code block too, where one
+  ending the text used to take the last line break with it.
