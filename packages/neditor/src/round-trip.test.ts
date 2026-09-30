@@ -1123,3 +1123,63 @@ describe('audit 16', () => {
     ]);
   });
 });
+
+describe('audit 17', () => {
+  // The pattern that collapsed a break in a label led with `\s*`, which was
+  // retried from every character of a whitespace run holding no break at all.
+  test('a long run of spaces in an alt text is written in linear time', () => {
+    expect(
+      growth((size) => {
+        toMarkdown({
+          blocks: [b({ type: 'image', src: 'https://a.test/x.png', alt: `a${' '.repeat(size)}b` })],
+        });
+      }, 2500),
+    ).toBeLessThan(LINEAR);
+  });
+
+  test.each([
+    ['a \n\t b', 'a b'],
+    ['\na', ' a'],
+    ['a\n', 'a '],
+    ['a\n\n \n b', 'a b'],
+    ['a  b', 'a  b'],
+  ])('a label %j is written with %j', (alt, written) => {
+    expect(toMarkdown({ blocks: [b({ type: 'image', src: '/x.png', alt })] })).toBe(
+      `![${written}](/x.png)`,
+    );
+  });
+
+  // A carriage return is a line break to every reader, this one included, so
+  // written raw it split the block -- and took a table apart.
+  test.each(['a\rb', 'a\r\nb'])('a paragraph holding %j stays one block', (text) => {
+    const back = throughMarkdown([b({ content: t(text) })]);
+    expect(back).toHaveLength(1);
+    expect(back[0]?.content).toEqual(t('a\nb'));
+  });
+
+  test('a table cell holding a carriage return keeps its table', () => {
+    const blocks = [
+      b({
+        type: 'table',
+        rows: [
+          [[{ text: 'a\rb' }], [{ text: 'c' }]],
+          [[{ text: 'd\r\ne' }], [{ text: 'f' }]],
+        ] as never,
+      }),
+    ];
+    const back = throughMarkdown(blocks);
+    expect(back).toHaveLength(1);
+    expect(back[0]?.rows).toEqual([
+      [[{ text: 'a\nb' }], [{ text: 'c' }]],
+      [[{ text: 'd\ne' }], [{ text: 'f' }]],
+    ]);
+  });
+
+  test('an image caption holding a carriage return stays with its image', () => {
+    const back = throughMarkdown([
+      b({ type: 'image', src: '/x.png', alt: 'x', content: t('a\rb') }),
+    ]);
+    expect(back).toHaveLength(1);
+    expect(back[0]?.content).toEqual(t('a\nb'));
+  });
+});

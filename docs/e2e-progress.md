@@ -366,3 +366,19 @@ combinations round-tripped, and other readers kept the image every time.
 | P2  | Defect, pre-existing  | An alt text or callout icon holding a line break (an `alt` attribute pasted from wrapped HTML) was written raw: the image line split in two and came back as two paragraphs. | The break is written as a space; a label is one line.                                                                                                                 |
 | P3  | Known limit, recorded | The angled link rule admits a space; `inOpenDestination` stops at one. In foreign `[a](<https://a.test/my docs/__init__.py>)` the text after the space is not protected.     | Not fixed: telling that destination from prose needs the `>)` typing has not reached, and the reader is kept identical to typing. Stated in the docstring and README. |
 | P4  | Test gap              | Nothing pinned that emphasis still closes straight after a closed, refused angle form (`[a](<b>*x*`).                                                                        | Asserted.                                                                                                                                                             |
+
+## Audit 17 (2026-09-30)
+
+An independent review of 7231aa3. No functional regression; two low findings.
+
+| #   | Kind                     | What                                                                                                                                                                                    | Resolution                                                                                                                               |
+| --- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Q1  | **Regression (7231aa3)** | P2's pattern led with `\s*` and was retried from every character of a whitespace run holding no break: an alt text of 80,000 spaces, which pasted HTML can supply, took 3.3 s to write. | Split on breaks and trimmed. A growth test pins it, and the label's behaviour is pinned case by case so the rewrite could not change it. |
+| Q2  | Defect, pre-existing     | A carriage return in run text -- a paragraph, a table cell, a caption -- was written raw. The reader splits on it: two paragraphs, or a table taken apart.                              | Written as the line break it is read as. It comes back as `\n`, as it already did in a code block.                                       |
+
+This is the fourth pattern of that shape written on this branch (D2's soft-break join, D9's trailing
+references, E4's edge whitespace, Q1), each found by the next audit rather than by the author. After
+Q1 the writer and the reader were swept instead: 35 character sequences repeated 2,000 and 16,000
+times through eight writer contexts (paragraph, bold, code, alt text, link destination, table cell,
+heading, bullet) and seven reader contexts, looking for growth above linear. None found; the two
+reader lines the sweep flagged measured linear, and equal to `main`, from 8,000 to 64,000.

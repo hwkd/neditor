@@ -1123,11 +1123,34 @@ function escapeContinuations(markdown: string): string {
  */
 const LABEL_ESCAPE = /[\\[\]`<]/g;
 
+/**
+ * A label is one line. An alt attribute pasted from HTML can be wrapped, and
+ * written raw the break split the image line in two: the block came back as
+ * two paragraphs. A break means a space there, so each run of breaks, with the
+ * whitespace around it, is written as one.
+ *
+ * Split and trimmed rather than matched: `\s*[\r\n]+\s*` is retried from every
+ * character of a whitespace run that holds no break at all, which made an alt
+ * text of 80,000 spaces take three seconds to write.
+ */
+function oneLine(text: string): string {
+  if (!/[\r\n]/.test(text)) {
+    return text;
+  }
+
+  const parts = text.split(/[\r\n]+/);
+  const last = parts.length - 1;
+
+  return parts
+    .map((part, index) =>
+      index === 0 ? part.trimEnd() : index === last ? part.trimStart() : part.trim(),
+    )
+    .filter((part, index) => index === 0 || index === last || part !== '')
+    .join(' ');
+}
+
 function escapeMarkdownLabel(text: string): string {
-  // A label is one line. An alt attribute pasted from HTML can be wrapped, and
-  // written raw the break split the image line in two: the block came back as
-  // two paragraphs. The break means a space there, so that is what is written.
-  return text.replace(/\s*[\r\n]+\s*/g, ' ').replace(LABEL_ESCAPE, (char) => `\\${char}`);
+  return oneLine(text).replace(LABEL_ESCAPE, (char) => `\\${char}`);
 }
 
 /** Characters a destination cannot hold bare: the first `)` would close it. */
@@ -1471,6 +1494,16 @@ export function richToMarkdown(
   content: readonly TextRun[],
   options: { splitLines?: boolean } = {},
 ): string {
+  // A carriage return is a line break to every reader, this one included:
+  // written raw it split the block in two, and took a table apart row by row.
+  // It is written as the break it is read as.
+  if (content.some((run) => run.text.includes('\r'))) {
+    return richToMarkdown(
+      content.map((run) => ({ ...run, text: run.text.replace(/\r\n?/g, '\n') })),
+      options,
+    );
+  }
+
   let previous = '';
   const contextAt = (index: number): RunContext => ({
     before: content[index - 1]?.text.at(-1) ?? '',

@@ -139,3 +139,7 @@ that changes what you store or what other applications receive is listed first.
   as a link to `https://%3Cmailto:…`. A link or image destination that opens
   with `<` is only ever the angle form, and a closed one whose URL is refused
   is text, with no link made out of a `[…](` inside it.
+- A carriage return in a block's text, a table cell or a caption (pasted HTML
+  can carry one as `&#13;`) was written raw. Every reader takes it for a line
+  break, so the block came back split, and a table came back as paragraphs. It
+  is written as the line break it is read as.
