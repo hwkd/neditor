@@ -705,8 +705,8 @@ writes is what `blocksFromMarkdown` reads back:
   included, so a code run that needs any escaping (`snake_case`, `a<b`) or holds
   a line break is written as `<code>…</code>`, where escapes are honoured.
 - A line after a soft break (or an image's caption) that opens with `#`, `-`,
-  `>`, `+`, `=` or `1.` has the marker escaped, so other readers do not start a
-  heading or a list there, and a `!` straight before a link is escaped so the
+  `>`, `+`, `=`, `:-` or `1.` has the marker escaped, so other readers do not
+  start a heading, a list or a table there, and a `!` straight before a link is escaped so the
   two are not read as an image.
 - References are read back only where the writer puts them, at the edges of a
   block's text and at the start of a line after a soft break. Anywhere else, including code spans and link destinations,

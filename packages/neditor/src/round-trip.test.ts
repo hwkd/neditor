@@ -1348,3 +1348,31 @@ describe('audit 20', () => {
     ]);
   });
 });
+
+describe('audit 21', () => {
+  // A GFM delimiter row needs no pipe: `:---` under a line makes that line a
+  // one-column table header. The `-`-led spellings were already escaped.
+  test.each([':---', ':-', ':-:'])('an image caption %j is not a table delimiter', (caption) => {
+    const blocks = [b({ type: 'image', src: '/x.png', alt: 'cat', content: t(caption) })];
+    expect(toMarkdown({ blocks })).toBe(`![cat](/x.png)\\\n:\\${caption.slice(1)}`);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(t(caption));
+  });
+
+  test('nor is the line after a soft break', () => {
+    const blocks = [b({ content: t('a\n:---') })];
+    expect(toMarkdown({ blocks })).toBe('a\\\n:\\---');
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(t('a\n:---'));
+  });
+
+  test('a colon that is not followed by a hyphen is left alone', () => {
+    expect(toMarkdown({ blocks: [b({ content: t('a\n:b') })] })).toBe('a\\\n:b');
+  });
+
+  // Only a triangle that opens a bullet's text can be taken for a toggle's
+  // marker, and the reader only unescapes one there.
+  test('a triangle inside a bullet is not escaped', () => {
+    const blocks = [b({ type: 'bulleted_list', content: t('press \u25BE now') })];
+    expect(toMarkdown({ blocks })).toBe('- press \u25BE now');
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(t('press \u25BE now'));
+  });
+});

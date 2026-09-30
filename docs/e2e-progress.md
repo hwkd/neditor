@@ -423,3 +423,16 @@ in the writer and the reader: 196 mutants. 180,000 mixed multi-block documents r
 Left as they are, by the reviewer's own classification: 16 surviving mutants that are equivalent, 13
 that change the Markdown written without any reader reading it differently, and 17 in code unchanged
 from `main`.
+
+## Audit 21 (2026-09-30)
+
+An independent review of 16d39ac: no regression (the dead-code removal is byte-identical on 600,000
+random blocks apart from the intended `\=`), and the 196 mutants re-run with no new survivor. Four low
+items.
+
+| #   | Kind                     | What                                                                                                                                                                                                                                                   | Resolution                                                                                                            |
+| --- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| U1  | Interop (GFM)            | A GFM delimiter row needs no pipe: a caption, or the last line of a soft-broken paragraph, reading `:---`, `:-` or `:-:` made the line above a one-column table's header. The caption case is this branch's; the paragraph case is the same on `main`. | `:-` opening a caption or a continuation line is written `:\-`.                                                       |
+| U2  | Test gap (16d39ac)       | The triangle escape's anchor was unpinned: unanchored, `press ▾ now` in a bullet is escaped and comes back with the backslash.                                                                                                                         | Asserted.                                                                                                             |
+| U3  | Stale comments (16d39ac) | Two test comments still described the prefix T3 removed, one of them saying the opposite of the code; the CHANGELOG still credited the `!` escape to the removed rule.                                                                                 | Reworded.                                                                                                             |
+| U4  | Dead code, T3 incomplete | The `(\s*)` prefix of `LEADING_MARKER` and `LEADING_ORDINAL` was dead for the same reason: every caller's text has been through `protectEdgeWhitespace`.                                                                                               | Anchored at the start. `toMarkdown` is byte-identical to the commit before on 180,000 whitespace-heavy random blocks. |

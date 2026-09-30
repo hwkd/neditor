@@ -408,9 +408,9 @@ describe('a bullet whose text opens with a toggle marker', () => {
     'stays a bullet and keeps its triangle: %j',
     (text) => {
       // The reader's bullet prefix consumes the marker AND the whitespace after
-      // it, so a triangle behind a space still arrives where a toggle's marker
-      // is read. Escaping only at offset 0 left these turning into toggles with
-      // the triangle eaten.
+      // it, so a triangle behind a raw space would arrive where a toggle's
+      // marker is read. The writer never leaves one there: leading whitespace
+      // is written as references, and the triangle is escaped only at offset 0.
       const back = normalizeDocument({
         blocks: blocksFromMarkdown(toMarkdown({ blocks: [bullet(text)] })),
       }).blocks[0]!;
@@ -448,8 +448,8 @@ describe('a bullet whose triangle sits behind a soft break', () => {
   });
 
   test.each(['\n▾ x', '\n\n▸ y', ' ▾ x', '▾ x'])('stays a bullet: %j', (text) => {
-    // escapeMarkdownText writes a leading newline as `\` + newline, so a bare
-    // `\s*` prefix stopped at that backslash and never escaped the triangle.
+    // A leading line break is written as a reference too (`&#10;`), so the
+    // triangle behind it is not at the start of the bullet's text either.
     const back = normalizeDocument({
       blocks: blocksFromMarkdown(toMarkdown({ blocks: [bullet(text)] })),
     }).blocks[0]!;

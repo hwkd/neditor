@@ -56,7 +56,8 @@ that changes what you store or what other applications receive is listed first.
     URL, the fourth made a link (or emphasis) out of part of the URL, and other
     readers decoded the fifth.
   - A block marker at the start of a line after a soft break is escaped
-    (`\# not a heading`), and so is a `!` opening a paragraph with `![`.
+    (`\# not a heading`). So are `=` and `:-` there: under a line, `===` is a
+    heading underline and `:---` a GFM table's delimiter row.
 - **Markdown.** An image's caption is written after the image, following a hard
   break, instead of being dropped. A caption that opens with `=` is escaped
   (under the image line, `===` made the image a heading elsewhere). A backtick

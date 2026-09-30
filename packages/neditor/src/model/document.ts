@@ -924,10 +924,10 @@ const INLINE_ESCAPE = /[\\`*_[\]~|<>]/g;
  * divider, and one reading `#` an empty heading, so requiring a space after the
  * marker let both through and destroyed the paragraph.
  */
-const LEADING_MARKER = /^(\s*)([#>+-])/;
+const LEADING_MARKER = /^([#>+-])/;
 // A soft break follows as `\` + newline, which the reader rejoins before
 // testing for a prefix: `1.` then Shift+Enter came back a numbered list.
-const LEADING_ORDINAL = /^(\s*)(\d+)([.)])(?=\s|$|\\\n)/;
+const LEADING_ORDINAL = /^(\d+)([.)])(?=\s|$|\\\n)/;
 
 /**
  * Escapes run text for Markdown.
@@ -1067,9 +1067,15 @@ function protectEdgeWhitespace(markdown: string): string {
   return led.slice(0, from) + encode(led.slice(from, end)) + led.slice(end);
 }
 
-/** Stops a paragraph that begins with `#`, `-` or `1.` becoming that block. */
+/**
+ * Stops text that begins with `#`, `-` or `1.` becoming that block.
+ *
+ * Anchored at the very start: every caller passes text that has been through
+ * `protectEdgeWhitespace`, so whitespace in front of a marker is already a
+ * reference and the marker behind it is no marker to any reader.
+ */
 function escapeLeadingMarker(text: string): string {
-  return text.replace(LEADING_ORDINAL, '$1$2\\$3').replace(LEADING_MARKER, '$1\\$2');
+  return text.replace(LEADING_ORDINAL, '$1\\$2').replace(LEADING_MARKER, '\\$1');
 }
 
 /**
@@ -1096,6 +1102,9 @@ function escapeContinuations(markdown: string): string {
       .replace(/(\\\n[^\S\n]*)(\d+)([.)])(?=\s|$|\\\n)/g, '$1$2\\$3')
       // `=` too: `===` under a line is a heading underline, as `---` is.
       .replace(/(\\\n[^\S\n]*)([#>+=-])/g, '$1\\$2')
+      // And `:-`: a GFM delimiter row needs no pipe, so `:---` under a line
+      // makes that line a one-column table's header.
+      .replace(/(\\\n[^\S\n]*:)(?=-)/g, '$1\\')
       // And the whitespace a line starts with, which every reader strips; the
       // reader here decodes references at the start of a line for this.
       .replace(
@@ -1640,11 +1649,14 @@ export function toMarkdown(doc: NEditorDocument): string {
           )})`;
 
           // The caption's first line follows a break too, so its marker is
-          // escaped -- and a `=`, as on any continuation line: `===` under the
-          // image line made the image a heading in every other reader.
+          // escaped -- and a `=` or a `:-`, as on any continuation line: `===`
+          // under the image line made the image a heading in every other
+          // reader, and `:---` made it a table header in GFM ones.
           return text.length === 0
             ? image
-            : `${image}\\\n${escapeLeadingMarker(text).replace(/^=/, '\\=')}`;
+            : `${image}\\\n${escapeLeadingMarker(text)
+                .replace(/^=/, '\\=')
+                .replace(/^:(?=-)/, ':\\')}`;
         }
         case 'table':
           return tableToMarkdown(block, indent);
