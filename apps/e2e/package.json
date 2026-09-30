@@ -1,0 +1,21 @@
+{
+  "name": "e2e",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vp dev --port 4390 --strictPort",
+    "e2e": "playwright test",
+    "e2e:ui": "playwright test --ui"
+  },
+  "dependencies": {
+    "@neditor/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "catalog:",
+    "@playwright/test": "catalog:",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

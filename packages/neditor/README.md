@@ -22,6 +22,11 @@ than a recommendation. Two things set it:
   to go back further, transpile the package or rewrite those three patterns
   with capture groups.
 
+These floors are derived from the language features the build uses; they are
+not tested. The end-to-end suite (`apps/e2e`) runs in current Chromium,
+Firefox and WebKit only, so an older engine above the floor is supported in
+principle but unverified.
+
 `Intl.Segmenter` is used to take the first grapheme of a callout icon, but it
 is feature-detected — Firefox below 125 keeps the whole string instead of
 cutting an emoji in half.
