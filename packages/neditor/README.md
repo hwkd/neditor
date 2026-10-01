@@ -22,6 +22,11 @@ than a recommendation. Two things set it:
   to go back further, transpile the package or rewrite those three patterns
   with capture groups.
 
+These floors are derived from the language features the build uses; they are
+not tested. The end-to-end suite (`apps/e2e`) runs in current Chromium,
+Firefox and WebKit only, so an older engine above the floor is supported in
+principle but unverified.
+
 `Intl.Segmenter` is used to take the first grapheme of a callout icon, but it
 is feature-detected — Firefox below 125 keeps the whole string instead of
 cutting an emoji in half.
@@ -242,6 +247,24 @@ These convert the moment you type the closing delimiter:
 
 `**bold**` `__bold__` `*italic*` `_italic_` `` `code` `` `~~strike~~` `[text](url)`
 
+The HTML spellings the Markdown writer uses for formatting that starts or ends
+with a space convert too: `<u>underline</u>`, `<strong>`, `<em>`, `<s>` and
+`<code>`. Inside a link destination only the link itself and a code span close, so `_x_`
+in a URL is not italicised (up to the first space, if the destination is a pasted `<…>` one
+that holds any -- this editor never writes one), and neither is a `_x_` that opens inside a bare URL, up to the next
+whitespace; `_see https://a.test_`, which opens before it, still is. A bare URL here is
+`http://` or `https://` anywhere in a word, or `www.` at its start or after `*`, `_`, `~`,
+`(`, `[` or `]` (or, in pasted Markdown, after any backslash-escaped character), in either
+case --
+broader than what GFM links, on purpose: underscores kept where another reader would have
+emphasised cost nothing, and underscores taken out of a URL do. A span may cross a line break made with `Shift`+`Enter`, as it may
+in CommonMark, but an emphasis delimiter (`*`, `_`, `~`) cannot sit against the break.
+
+An autolink, `<https://…>`, becomes the plain URL it holds when its `>` is typed, as
+the writer spells a bare URL that way; nothing closes inside one while it is open. A
+plain link destination may hold balanced parentheses, as CommonMark allows
+(`[wiki](https://en.wikipedia.org/wiki/Foo_(bar))`).
+
 ### Block Markdown
 
 Typing these at the start of a paragraph converts the block:
@@ -277,7 +300,9 @@ The long press was verified with synthetic pointer events, not on hardware; on a
 real device it shares the gesture with the browser's own long-press text
 selection, so check it on your target platforms before relying on it.
 
-Dragging from one block's text into another selects whole blocks as you go.
+Dragging from one block's text into another with a mouse or pen selects whole
+blocks as you go. A finger doing the same is the browser's scroll, so touch
+never starts one; a long press is the touch way into block selection.
 Every block is its own `contenteditable`, and browsers confine a selection to a
 single editing host, so the gesture is tracked directly rather than read back
 from a DOM range that never spans blocks.
@@ -624,12 +649,13 @@ another application.
 Callouts and toggles have no Markdown of their own, so both degrade to something
 readable that still parses back:
 
-| Block   | Markdown                               | HTML                                              |
-| ------- | -------------------------------------- | ------------------------------------------------- |
-| Callout | `> [!💡] text` — the icon is bracketed | `<blockquote data-neditor-callout="💡">`          |
-| Toggle  | `- ▸ text` collapsed, `- ▾ text` open  | `<details>` / `<details open>` with a `<summary>` |
-| Image   | `![alt](src)` — the caption is dropped | `<figure><img><figcaption>`                       |
-| Table   | a GFM table                            | `<table>` with `<thead>` / `<tbody>`              |
+| Block                    | Markdown                                         | HTML                                              |
+| ------------------------ | ------------------------------------------------ | ------------------------------------------------- |
+| Callout                  | `> [!💡] text` — the icon is bracketed           | `<blockquote data-neditor-callout="💡">`          |
+| Toggle                   | `- ▸ text` collapsed, `- ▾ text` open            | `<details>` / `<details open>` with a `<summary>` |
+| Image                    | `![alt](src)`, then a hard break and the caption | `<figure><img><figcaption>`                       |
+| Image with no source yet | `![alt]()`                                       | `<figure data-neditor-image>` (no broken `<img>`) |
+| Table                    | a GFM table                                      | `<table>` with `<thead>` / `<tbody>`              |
 
 Elsewhere a callout still reads as a quote and a toggle as a list item; a
 `<details>` pasted from anywhere else becomes a toggle, with its body nested one
@@ -653,13 +679,62 @@ writes is what `blocksFromMarkdown` reads back:
 - A code fence is one backtick longer than the longest run inside the block, so
   a snippet that itself contains ` ``` ` comes back as one code block rather
   than three.
+- A nested block is indented to its parent's content column: two spaces under
+  a bullet, three under `1. `, four under `10. `. A nested code block's body is
+  indented as far as its fence, which the reader strips again. (Nesting under a
+  quote, a callout or a paragraph has no CommonMark spelling: other readers
+  read those children as top-level blocks, or past two levels as indented
+  code; this reader reads them at their depth.)
+- A line break inside a heading or a table cell is written `<br>`, which every
+  reader renders as one, since neither may span lines. Markdown written by
+  earlier versions (`\` + newline in a heading) still reads back.
+- A bare `http://` or `https://` URL is written as an autolink, `<https://…>`,
+  because GFM links a bare URL up to the next space and took in whatever was
+  written against it -- an escape's backslash, a line break's, a trailing
+  space's reference. GFM's trailing punctuation stays outside it. A URL
+  holding `*`, a backtick, a bracket or `~~` (or a `~` in struck text) keeps
+  the escaped spelling, because an autolink's text is plain once it closes;
+  so does a `www.` URL, which has no autolink spelling. GFM readers still link
+  those with the backslashes in.
 - A link or image destination holding a paren, a space or an angle bracket is
-  written in the `<…>` form rather than backslash-escaped. The reader matches
-  its rules against a projection in which an escaped character is opaque, so it
-  could never have found such a URL again.
-- An alt text or callout icon containing `[` or `]` is escaped, and unescaped on
-  the way back, so a `]` cannot close the label early and leak the rest of the
-  line into the document as markup.
+  written in the `<…>` form, where a paren needs no escape. In either form a
+  backslash is doubled and a `|`, a backtick, the `]` of a `](` and an `&` that
+  begins a reference are backslash-escaped: the pipe would end a table cell,
+  two backticks would close a code span, a `](` reads as a link of its own
+  inside the URL, and other readers decode the reference. A relative URL holding a space or an angle
+  bracket comes back percent-encoded (`/a b` as `/a%20b`).
+- In an alt text or a callout icon, `[`, `]`, `\`, a backtick and `<` are
+  escaped, and unescaped on the way back: a `]` would close the label early and
+  leak the rest of the line into the document as markup, and other readers
+  pair a backtick or a `<` with one in the caption and lose the image. A line
+  break in one (an alt attribute pasted from wrapped HTML) is written as a
+  space, because a label is a single line.
+- Whitespace and newlines at either edge of a block's text are written as
+  numeric character references (`&#32;`, `&#10;`), because leading spaces are
+  indentation and every reader trims the rest. Splitting "Alpha one" with
+  `Enter` leaves " one", and `Shift`+`Enter` at the end of a block leaves a
+  trailing newline; without this a Markdown copy or save lost both.
+- Whitespace at the edge of a formatted run keeps its formatting. `**`, `*`
+  and `~~` cannot open or close against whitespace, and CommonMark trims a
+  code span's edge spaces, so such a run is written as HTML --
+  `a<strong>bold </strong>b`, `<em>`, `<s>`, `<code>`, `<u>` -- which this
+  reader reads back and any reader that allows inline HTML renders as written
+  (one that escapes raw HTML, as markdown-it does by default, shows the tags). Link text holds the
+  whitespace as it is.
+- A formatted run or a link that contains a line break is written whole
+  (`**one\` + newline + `two**`) and read back whole, as CommonMark allows --
+  in a heading or a table cell too, with the break as `<br>`.
+- CommonMark shows a backtick code span's content literally, backslashes
+  included, so a code run that needs any escaping (`snake_case`, `a<b`) or holds
+  a line break is written as `<code>…</code>`, where escapes are honoured.
+- A line after a soft break (or an image's caption) that opens with `#`, `-`,
+  `>`, `+`, `=`, `:-` or `1.` has the marker escaped, so other readers do not
+  start a heading, a list or a table there, and a `!` straight before a link is escaped so the
+  two are not read as an image.
+- References are read back only where the writer puts them, at the edges of a
+  block's text and at the start of a line after a soft break. Anywhere else, including code spans and link destinations,
+  `&#…;` stays the text it is, and a literal one at an edge is escaped, so it
+  comes back as typed.
 
 ## Headless use
 

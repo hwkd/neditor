@@ -2,7 +2,7 @@ import type { Block, BlockType } from '../model/document.ts';
 import { DEFAULT_CALLOUT_ICON, createBlock } from '../model/document.ts';
 import type { TableRows } from '../model/table.ts';
 import { normalizeTableRows } from '../model/table.ts';
-import { sanitizeImageUrl } from '../util/url.ts';
+import { sanitizeImageUrl, sanitizeUrl } from '../util/url.ts';
 import type { RichText } from '../model/rich-text.ts';
 import {
   richConcat,
@@ -10,6 +10,8 @@ import {
   richFromPlainText,
   richSetLink,
   richSetMark,
+  richSplit,
+  richToPlainText,
 } from '../model/rich-text.ts';
 import { INLINE_SPAN_LIMIT, matchInlineRule } from './inline-rules.ts';
 
@@ -65,7 +67,7 @@ const TOGGLE_MARKER = /^([\u25B8\u25BE])(?:\s+|$)/;
  * URL has to go inside angle brackets to survive; the alt text may carry
  * escapes, since a bare `]` would close the label early.
  */
-const IMAGE_LINE = /^!\[((?:\\.|[^\]\n])*)\]\((?:<([^<>\n]*)>|([^)\s]+))\)$/;
+const IMAGE_LINE = /^!\[((?:\\.|[^\]\n])*)\]\((?:<([^<>\n]*)>|((?:[^\s<][^\s]*)?))\)$/;
 
 /** A GFM table row; the leading pipe is what identifies one. */
 const TABLE_ROW = /^\|/;
@@ -81,6 +83,46 @@ const TABLE_ROW = /^\|/;
 const TABLE_DIVIDER_CELL = /^:?-+:?$/;
 
 /** Splits a GFM row on unescaped pipes and unescapes the rest. */
+/** Whether a destination's unescaped parentheses balance, never closing more than opened. */
+function balancedParens(destination: string): boolean {
+  let depth = 0;
+
+  for (let at = 0; at < destination.length; at += 1) {
+    const char = destination[at];
+
+    if (char === '\\') {
+      at += 1;
+    } else if (char === '(') {
+      depth += 1;
+    } else if (char === ')' && --depth < 0) {
+      return false;
+    }
+  }
+
+  return depth === 0;
+}
+
+/**
+ * The `<br>`s of a table cell or a heading as the line breaks they are.
+ *
+ * Both are one line in every reader, so the writer spells a break inside one
+ * `<br>`, as GFM tables do. An escaped `\<br>` is text, so only a `<` preceded by an even run
+ * of backslashes counts.
+ */
+function breaksFromHtml(cell: string): string {
+  // Matched on the tag alone and counted back from it: a pattern that leads
+  // with the backslashes is retried from each one of a long run.
+  return cell.replace(/<br\s*\/?>/gi, (tag, offset: number) => {
+    let slashes = 0;
+
+    while (cell.charCodeAt(offset - 1 - slashes) === 92) {
+      slashes += 1;
+    }
+
+    return slashes % 2 === 0 ? '\n' : tag;
+  });
+}
+
 function splitTableRow(line: string): string[] {
   const cells = line.split(/(?<!\\)\|/).map((cell) => cell.trim().replaceAll('\\|', '|'));
 
@@ -131,7 +173,7 @@ function parseTableLines(lines: readonly string[]): TableRows {
       continue;
     }
 
-    rows.push(cells.map(parseInlineMarkdown));
+    rows.push(cells.map((cell) => parseInlineMarkdown(breaksFromHtml(cell))));
   }
 
   return rows;
@@ -195,7 +237,102 @@ const OPENERS = new Set(['*', '_', '~', '`', '<', '[']);
  * prose, which no other reader does; it is honoured at the one place the writer
  * emits it, the head of a bullet, and nowhere else.
  */
-const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!]/;
+const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!&=]/;
+
+/**
+ * A numeric character reference, which the writer uses for whitespace at the
+ * edge of a block (leading whitespace is indentation, and every reader trims
+ * the rest). Decoded as CommonMark decodes it; an `&` that is meant literally
+ * arrives escaped.
+ */
+const NUMERIC_REFERENCE = /^&#(?:(\d{1,7})|[xX]([0-9a-fA-F]{1,6}));/;
+
+/**
+ * Where references are decoded: a run at either edge of a block's text or at
+ * the start of a line after a soft break, and nowhere else, because those are
+ * the places the writer puts them (every reader strips leading whitespace from
+ * a line, and trims a block). Decoding them everywhere corrupted foreign text --
+ * a link destination holding `&#38;` came back with a NUL in it, and a pasted
+ * code span holding `&#169;` came back as a copyright sign.
+ */
+const LINE_LEADING_REFERENCES = /(?:^|\n)((?:&#(?:\d{1,7}|[xX][0-9a-fA-F]{1,6});)+)/g;
+const WHOLE_REFERENCE = /^&#(?:\d{1,7}|[xX][0-9a-fA-F]{1,6});$/;
+/** The longest a reference can be: `&#` + seven digits + `;`. */
+const REFERENCE_REACH = 10;
+
+/**
+ * Where the run of references that ends `text` starts, or -1 if none does.
+ *
+ * Walked back from the end one reference at a time. As a pattern ending in `$`
+ * it was retried from every `&` in the line, and each try read a whole run
+ * before failing: a long run of references in the middle of a line took a
+ * second to parse.
+ */
+function trailingReferences(text: string, end: number): number {
+  let start = end;
+
+  for (;;) {
+    const from = Math.max(0, start - REFERENCE_REACH);
+    const at = text.slice(from, start).lastIndexOf('&');
+
+    if (at === -1 || !WHOLE_REFERENCE.test(text.slice(from + at, start))) {
+      break;
+    }
+
+    start = from + at;
+  }
+
+  return start === end ? -1 : start;
+}
+
+/** The closing tags the writer's HTML spelling of a mark ends in. */
+const CLOSING_TAGS = ['</strong>', '</em>', '</s>', '</u>', '</code>'];
+
+/** Where the closing tags that end `text` start: its length if there are none. */
+function beforeClosingTags(text: string): number {
+  let end = text.length;
+
+  for (;;) {
+    const tag = CLOSING_TAGS.find((candidate) => text.endsWith(candidate, end));
+
+    if (!tag) {
+      return end;
+    }
+
+    end -= tag.length;
+  }
+}
+
+/** The `[start, end)` spans of `text` whose references are the writer's, in order. */
+function decodableReferences(text: string): Array<readonly [number, number]> {
+  const spans: Array<readonly [number, number]> = [];
+
+  for (const match of text.matchAll(LINE_LEADING_REFERENCES)) {
+    const run = match[1] ?? '';
+    const start = match.index + match[0].length - run.length;
+    spans.push([start, start + run.length]);
+  }
+
+  // The writer puts a block's last line break inside the tags of a run written
+  // as HTML, so the end of the text is looked for behind any closing tags.
+  const end = beforeClosingTags(text);
+  const trailing = trailingReferences(text, end);
+
+  // A run that is the whole of the last line is already there as a leading one.
+  if (trailing !== -1 && spans.at(-1)?.[1] !== end) {
+    spans.push([trailing, end]);
+  }
+
+  return spans;
+}
+
+function decodeReference(match: RegExpExecArray): string | null {
+  const code = match[1] !== undefined ? Number(match[1]) : Number.parseInt(match[2] ?? '', 16);
+
+  return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff)
+    ? String.fromCodePoint(code)
+    : null;
+}
 
 /**
  * Stands in for an escaped character while rules are matched.
@@ -213,9 +350,13 @@ const ESCAPED = '\u0000';
  * trailing backslashes is unambiguously the break marker it emits for `\n`.
  */
 function endsWithSoftBreak(line: string): boolean {
-  const trailing = /\\+$/.exec(line);
+  let count = 0;
 
-  return trailing ? trailing[0].length % 2 === 1 : false;
+  while (line.charCodeAt(line.length - 1 - count) === 92) {
+    count += 1;
+  }
+
+  return count % 2 === 1;
 }
 
 /**
@@ -225,7 +366,20 @@ function endsWithSoftBreak(line: string): boolean {
  */
 function joinSoftBreaks(lines: readonly string[]): string[] {
   const out: string[] = [];
+  // The lines of the block being joined, as they arrived. Collected and joined
+  // once: appending each line to the block so far, and then asking that ever
+  // longer string whether it ends in a break, was quadratic in a long
+  // soft-broken paragraph.
+  let pending: string[] = [];
   let fence = 0;
+
+  const flush = (): void => {
+    if (pending.length > 0) {
+      const last = pending.length - 1;
+      out.push(pending.map((line, index) => (index < last ? line.slice(0, -1) : line)).join('\n'));
+      pending = [];
+    }
+  };
 
   for (const line of lines) {
     const trimmed = line.trimStart();
@@ -235,6 +389,7 @@ function joinSoftBreaks(lines: readonly string[]): string[] {
         fence = 0;
       }
 
+      flush();
       out.push(line);
       continue;
     }
@@ -243,19 +398,21 @@ function joinSoftBreaks(lines: readonly string[]): string[] {
 
     if (opening?.[1]) {
       fence = opening[1].length;
+      flush();
       out.push(line);
       continue;
     }
 
-    const previous = out.at(-1);
+    const previous = pending.at(-1);
 
-    if (previous !== undefined && endsWithSoftBreak(previous)) {
-      out[out.length - 1] = `${previous.slice(0, -1)}\n${line}`;
-      continue;
+    if (previous === undefined || !endsWithSoftBreak(previous)) {
+      flush();
     }
 
-    out.push(line);
+    pending.push(line);
   }
+
+  flush();
 
   return out;
 }
@@ -288,6 +445,10 @@ export function parseInlineMarkdown(text: string): RichText {
   if (text.length === 0) {
     return [];
   }
+
+  // Visited in order as `index` only grows, so the lookup is a moving pointer.
+  const decodable = text.includes('&#') ? decodableReferences(text) : [];
+  let span = 0;
 
   // What a rule can still reach, plus the character of context the lookbehinds
   // need. Text before it is cut from `matchable` for good.
@@ -441,12 +602,36 @@ export function parseInlineMarkdown(text: string): RichText {
       openFrom = 0;
     }
 
+    const open = opens[openFrom];
+    const barrier = open === undefined ? matchable.length : open - origin - 1;
+
+    // A line with no finished span has nothing parked, so nothing below could
+    // be cut and `matchable` grew to the whole line -- a rope flattened for
+    // every closing character, which made one long line quadratic. Parking all
+    // but the last window is layout as much as `park` is (the cut below still
+    // stops at the barrier, and a rule never looks further back than the
+    // window), and only done once it is twice the window, so each cut pays for
+    // itself.
+    if (recallable === 0 && matchable.length > 2 * window) {
+      const target = matchable.length - window - base;
+
+      if (target > 0) {
+        flush();
+        const [front, back] = richSplit(content, target);
+
+        for (const run of front) {
+          done.push(run);
+          recallable += 1;
+          base += run.text.length;
+        }
+
+        content = back;
+      }
+    }
+
     if (recallable === 0) {
       return;
     }
-
-    const open = opens[openFrom];
-    const barrier = open === undefined ? matchable.length : open - origin - 1;
     let cut = 0;
 
     while (recallable > 0) {
@@ -480,6 +665,25 @@ export function parseInlineMarkdown(text: string): RichText {
       index += 1;
       literal = next;
       projected = ESCAPED;
+    } else if (char === '&' && decodable.length > 0) {
+      // Visited in order, so the span lookup is a pointer that only moves on.
+      while (span < decodable.length && decodable[span]![1] <= index) {
+        span += 1;
+      }
+
+      const reference =
+        span < decodable.length && decodable[span]![0] <= index
+          ? NUMERIC_REFERENCE.exec(text.slice(index, index + 12))
+          : null;
+      const decoded = reference ? decodeReference(reference) : null;
+
+      // A decoded reference is text, never a delimiter -- the same opacity an
+      // escape gets, one placeholder per UTF-16 unit so offsets stay aligned.
+      if (reference && decoded !== null) {
+        index += reference[0].length - 1;
+        literal = decoded;
+        projected = ESCAPED.repeat(decoded.length);
+      }
     }
 
     pending += literal;
@@ -497,7 +701,7 @@ export function parseInlineMarkdown(text: string): RichText {
       continue;
     }
 
-    const match = matchInlineRule(matchable);
+    const match = matchInlineRule(matchable, { projection: true });
 
     if (!match) {
       continue;
@@ -522,6 +726,29 @@ export function parseInlineMarkdown(text: string): RichText {
     // `content` before its offsets mean anything there.
     recall(match.start);
 
+    // The rule read the destination off the projection, where an escaped
+    // character is a placeholder: `[x](https://a.test/a\_b)` linked to
+    // `a%00b`. The content holds what the escape stands for, which is how
+    // CommonMark reads a destination, so the href is taken from there -- and
+    // only now, with the whole span recalled: a destination can hold more
+    // finished code spans than are kept to hand, and read any earlier it was
+    // whatever tail was left, which could name another host.
+    let link = match.link;
+
+    if (link !== undefined && matchable.slice(innerEnd, match.end).includes(ESCAPED)) {
+      const closing = richToPlainText(content).slice(innerEnd - base, match.end - base);
+      const href = sanitizeUrl(
+        closing.startsWith('](<') ? closing.slice(3, -2) : closing.slice(2, -1),
+      );
+
+      // Nothing has been changed yet: flushing and recalling only move runs.
+      if (!href) {
+        continue;
+      }
+
+      link = href;
+    }
+
     // Strip the closing delimiter first, so the opening offsets stay valid —
     // and apply the identical splice to the projection to keep them aligned.
     content = richDelete(content, innerEnd - base, match.end - base);
@@ -534,8 +761,8 @@ export function parseInlineMarkdown(text: string): RichText {
     const start = match.start - base;
     const end = start + (innerEnd - innerStart);
 
-    if (match.link) {
-      content = richSetLink(content, start, end, match.link);
+    if (link !== undefined) {
+      content = richSetLink(content, start, end, link);
     } else if (match.mark) {
       content = richSetMark(content, start, end, match.mark, true);
     }
@@ -549,8 +776,8 @@ export function parseInlineMarkdown(text: string): RichText {
   return done.length > 0 ? richConcat(done, content) : content;
 }
 
-/** Leading whitespace as an indent level: two spaces or one tab per level. */
-function indentOf(line: string): number {
+/** Leading whitespace in columns: a space is one, a tab two. */
+function columnsOf(line: string): number {
   const leading = /^[ \t]*/.exec(line)?.[0] ?? '';
   let spaces = 0;
 
@@ -558,7 +785,35 @@ function indentOf(line: string): number {
     spaces += char === '\t' ? 2 : 1;
   }
 
-  return Math.floor(spaces / 2);
+  return spaces;
+}
+
+/**
+ * Reads a block's depth from its indentation, relative to the blocks above it.
+ *
+ * A line is a child of the nearest block above it whose own indentation is at
+ * least two columns less. That reads both what the writer emits now -- a child
+ * at its parent's content column, which under `1. ` is three -- and what it
+ * used to, two columns a level whatever the parent, at the same depths.
+ */
+function depthReader(): (line: string) => number {
+  const open: Array<{ readonly column: number; readonly depth: number }> = [];
+
+  return (line) => {
+    const column = columnsOf(line);
+
+    while (open.length > 0 && column < open.at(-1)!.column + 2) {
+      open.pop();
+    }
+
+    // With nothing above it to be a child of -- the first line of a pasted,
+    // indented fragment -- it is two columns a level, as it always was.
+    const parent = open.at(-1);
+    const depth = parent ? parent.depth + 1 : Math.floor(column / 2);
+    open.push({ column, depth });
+
+    return depth;
+  };
 }
 
 interface PrefixMatch {
@@ -584,14 +839,37 @@ function matchBlockPrefix(line: string): PrefixMatch | null {
 }
 
 /** Parses Markdown text into blocks. Returns an empty list for blank input. */
+/**
+ * A fenced block's body, with the fence's own indentation taken off each line.
+ *
+ * The writer indents a nested code block's body as far as its fence, because
+ * under a list item a line at the margin ends the item in every other reader.
+ * Older versions wrote the body at the margin, and stripping from that would
+ * eat the code's own leading spaces -- so the indentation comes off only when
+ * every line that has text carries it, which is the one shape the writer has
+ * ever produced with an indented body.
+ */
+function unindentBody(lines: readonly string[], indent: number): string {
+  const carries = (line: string): boolean =>
+    line.trim() === '' || (line.length >= indent && /^[ \t]*$/.test(line.slice(0, indent)));
+
+  if (indent > 0 && lines.every(carries)) {
+    return lines.map((line) => line.slice(Math.min(indent, line.length))).join('\n');
+  }
+
+  return lines.join('\n');
+}
+
 export function blocksFromMarkdown(text: string): Block[] {
   const lines = joinSoftBreaks(text.replace(/\r\n?/g, '\n').split('\n'));
   const blocks: Block[] = [];
   let fence: string[] | null = null;
   let fenceDepth = 0;
   let fenceLength = 0;
+  let fenceIndent = 0;
   let table: string[] | null = null;
   let tableDepth = 0;
+  const depthOf = depthReader();
 
   const flushTable = (): void => {
     if (!table) {
@@ -623,7 +901,7 @@ export function blocksFromMarkdown(text: string): Block[] {
     if (fence === null && TABLE_ROW.test(trimmedStart)) {
       if (table === null) {
         table = [];
-        tableDepth = indentOf(raw);
+        tableDepth = depthOf(raw);
       }
 
       table.push(trimmedStart);
@@ -636,7 +914,7 @@ export function blocksFromMarkdown(text: string): Block[] {
       // Only a fence at least as long as the opening one closes the block; a
       // shorter one, or one carrying an info string, is code.
       if (closingFenceLength(trimmedStart) >= fenceLength) {
-        blocks.push(createBlock('code', fence.join('\n'), fenceDepth));
+        blocks.push(createBlock('code', unindentBody(fence, fenceIndent), fenceDepth));
         fence = null;
       } else {
         fence.push(raw);
@@ -650,7 +928,8 @@ export function blocksFromMarkdown(text: string): Block[] {
     if (opening?.[1]) {
       fence = [];
       fenceLength = opening[1].length;
-      fenceDepth = indentOf(raw);
+      fenceDepth = depthOf(raw);
+      fenceIndent = raw.length - trimmedStart.length;
       continue;
     }
 
@@ -661,15 +940,25 @@ export function blocksFromMarkdown(text: string): Block[] {
       continue;
     }
 
-    const depth = indentOf(raw);
+    const depth = depthOf(raw);
 
-    const image = IMAGE_LINE.exec(line);
+    // An image's caption follows it after a hard break, as `toMarkdown` writes
+    // it -- which every other reader shows as the picture with its caption on
+    // the line below.
+    const breakAt = line.indexOf('\n');
+    const image = IMAGE_LINE.exec(breakAt === -1 ? line : line.slice(0, breakAt));
 
-    if (image) {
-      const src = sanitizeImageUrl(image[2] ?? image[3] ?? '');
+    // A plain destination's parentheses have to balance, as a link's do;
+    // `![a](b)(c)` is no image line.
+    if (image && (image[3] === undefined || balancedParens(image[3]))) {
+      // An empty destination is an image block with no picture yet -- the
+      // writer's own spelling of one. Anything else has to be a usable source.
+      const destination = image[2] ?? image[3] ?? '';
+      const src = destination === '' ? '' : sanitizeImageUrl(stripEscapes(destination));
 
-      if (src) {
-        const block = createBlock('image', [], depth);
+      if (src !== null) {
+        const caption = breakAt === -1 ? '' : line.slice(breakAt + 1);
+        const block = createBlock('image', parseInlineMarkdown(caption), depth);
         block.src = src;
         block.alt = stripEscapes(image[1] ?? '');
         blocks.push(block);
@@ -713,7 +1002,11 @@ export function blocksFromMarkdown(text: string): Block[] {
       }
     }
 
-    const block = createBlock(type, parseInlineMarkdown(rest), depth);
+    const block = createBlock(
+      type,
+      parseInlineMarkdown(type.startsWith('heading') ? breaksFromHtml(rest) : rest),
+      depth,
+    );
 
     if (type === 'todo') {
       block.checked = prefix?.checked ?? false;

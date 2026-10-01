@@ -230,8 +230,45 @@ export class SlashMenu {
       return;
     }
 
-    this.#activeIndex = (this.#activeIndex + delta + count) % count;
-    this.#renderList();
+    this.#highlight((this.#activeIndex + delta + count) % count, { scroll: true });
+  }
+
+  /**
+   * Moves the highlight on the options already in the list.
+   *
+   * Never by rebuilding it. A rebuild on `mouseenter` replaced the option under
+   * a resting pointer, Chromium sent the new element a fresh `mouseenter`, and
+   * the list re-rendered continuously: a press landed on the list rather than an
+   * option, and a pixel of movement between press and release split the click
+   * across two elements, so a mouse could not pick a command at all.
+   *
+   * `scroll` is for the keyboard. A hover never scrolls the list: the option
+   * is under the pointer already, and moving the list under a still pointer is
+   * how a hover turns into a different hover.
+   */
+  #highlight(index: number, options: { scroll: boolean }): void {
+    if (index === this.#activeIndex) {
+      return;
+    }
+
+    this.#activeIndex = index;
+
+    for (const [position, item] of [...this.#list.children].entries()) {
+      const active = position === index;
+      item.setAttribute('aria-selected', String(active));
+
+      if (active) {
+        (item as HTMLElement).dataset.active = 'true';
+      } else {
+        delete (item as HTMLElement).dataset.active;
+      }
+    }
+
+    if (options.scroll) {
+      this.#scrollActiveIntoView();
+    }
+
+    this.#hooks.onActiveChange();
   }
 
   #renderList(): void {
@@ -272,8 +309,7 @@ export class SlashMenu {
       });
 
       item.addEventListener('mouseenter', () => {
-        this.#activeIndex = index;
-        this.#renderList();
+        this.#highlight(index, { scroll: false });
       });
 
       this.#list.append(item);
@@ -285,10 +321,11 @@ export class SlashMenu {
       positionPortal(this.#element, this.#anchor, { prefer: 'below' });
     }
 
-    // Every path that moves the highlight ends here — opening, filtering, the
-    // arrow keys, a mouse crossing an item — so this is the one place that can
-    // promise the announced option is the highlighted one. The ids exist by
-    // now, which is why it is the last thing the render does.
+    // Opening and filtering end here, and the arrow keys and a mouse crossing
+    // an item end in #highlight, which asks the same thing -- so every path
+    // that moves the highlight promises the announced option is the
+    // highlighted one. The ids exist by now, which is why it is the last thing
+    // the render does.
     this.#hooks.onActiveChange();
   }
 

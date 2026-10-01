@@ -29,6 +29,8 @@ interface InlineRule {
   readonly isLink?: boolean;
   /** The `](<…>)` form, whose destination is delimited rather than run-length. */
   readonly angled?: boolean;
+  /** `<https://…>`, which nothing else may close inside while it is open. */
+  readonly autolink?: boolean;
 }
 
 /**
@@ -44,9 +46,11 @@ interface InlineRule {
  * disappeared as they were typed.
  *
  * Written per delimiter because the class has to exclude that delimiter too.
+ * A span may cross a soft break, as it may in CommonMark: the writer keeps a
+ * run with a line break in it whole, so the break keeps the run's mark.
  */
 const body = (delimiter: string): string =>
-  `([^${delimiter}\\s\\n](?:[^${delimiter}\\n]*[^${delimiter}\\s\\n])?)`;
+  `([^${delimiter}\\s](?:[^${delimiter}]*[^${delimiter}\\s])?)`;
 
 const INLINE_RULES: readonly InlineRule[] = [
   // Bold before italic: `**x**` must not be read as an italic `*x*`.
@@ -63,14 +67,33 @@ const INLINE_RULES: readonly InlineRule[] = [
   // Backticks deliberately keep their spaces: a code span is delimited by
   // backtick runs rather than by flanking, so `` ` a ` `` really is code in
   // CommonMark. Emphasis is the construct with the flanking rule.
-  { closer: '`', pattern: /`([^`\n]+)`$/, mark: 'code' },
+  { closer: '`', pattern: /`([^`]+)`$/, mark: 'code' },
   // Markdown has no underline, so `toMarkdown` writes the HTML tag; this is
   // what reads it back rather than leaving seven junk characters in the text.
-  { closer: '>', pattern: /<u>([^<\n]+)<\/u>$/, mark: 'underline' },
+  { closer: '>', pattern: /<u>([^<]+)<\/u>$/, mark: 'underline' },
+  // `toMarkdown` writes a marked run whose text starts or ends with whitespace
+  // as HTML: `**bold **` is not emphasis in any dialect, and `a**bold&#32;**b`
+  // is literal asterisks in CommonMark (the closer is not right-flanking), but
+  // any reader that allows inline HTML renders `a<strong>bold </strong>b` as
+  // written.
+  { closer: '>', pattern: /<strong>([^<]+)<\/strong>$/, mark: 'bold' },
+  { closer: '>', pattern: /<em>([^<]+)<\/em>$/, mark: 'italic' },
+  { closer: '>', pattern: /<s>([^<]+)<\/s>$/, mark: 'strikethrough' },
+  { closer: '>', pattern: /<code>([^<]+)<\/code>$/, mark: 'code' },
+  // An autolink is the URL it holds, as plain text: the writer spells a bare
+  // URL this way so that nothing written against it joins it in GFM. Not the
+  // `](<…>)` of a destination, which is a link's own spelling.
+  { closer: '>', pattern: /(?<!\]\()<(https?:\/\/[^\s<>]*)>$/i, autolink: true },
   // The angle-bracket form first: it is how a destination holding a `)` — the
   // character that would otherwise close the link — is written.
-  { closer: ')', pattern: /\[([^\]\n]+)\]\(<([^<>\n]*)>\)$/, isLink: true, angled: true },
-  { closer: ')', pattern: /\[([^\]\n]+)\]\(([^)\s]+)\)$/, isLink: true },
+  { closer: ')', pattern: /\[([^\]]+)\]\(<([^<>\n]*)>\)$/, isLink: true, angled: true },
+  // Never one that opens with `<`: that is the form above, not yet closed. Its
+  // destination may hold a `)`, and this rule fired at it --
+  // `[x](<mailto:a@b.test?s=(v2)>)` linked to `https://%3Cmailto:a@b.test/…`.
+  // It may hold balanced parentheses, as CommonMark allows: Wikipedia's
+  // `…/Foo_(bar)` ended at the first `)`. `linkOpener` finds the `](` whose
+  // `(` the closing one balances, so the pattern only has to match from there.
+  { closer: ')', pattern: /^\[([^\]]+)\]\(([^\s<][^\s]*)\)$/, isLink: true },
 ];
 
 /**
@@ -83,6 +106,87 @@ const INLINE_RULES: readonly InlineRule[] = [
  * thousand characters were not parsed at all and kept their raw `**` markup.
  */
 export const INLINE_SPAN_LIMIT = 2000;
+
+/**
+ * What can open a bare URL, for the writer (`bareUrls` in `model/document.ts`).
+ *
+ * Deliberately looser than the reader's `BARE_URL_IN_TOKEN`, which also asks
+ * what comes before: the writer only uses it to leave a `_` between two letters
+ * or digits bare, and that one cannot open a span in any reader whether or not
+ * a URL is there.
+ */
+export const BARE_URL_START = /https?:\/\/|www\./i;
+
+/**
+ * Whether the text ends inside a link destination whose `)` has not arrived.
+ *
+ * Only the last `](` can be the open one, so the pattern runs on the tail from
+ * there -- run unanchored over the window, it retried from every `](` in it and
+ * a pasted line of them took seconds. Neither spelling of a destination the
+ * writer emits holds whitespace (it percent-encodes it in the `<…>` form too),
+ * and stopping at it is what keeps an unclosed `](<` from swallowing the rest
+ * of a line of prose.
+ *
+ * The cost is foreign Markdown: the angled link rule itself admits a space, so
+ * in `[a](<https://a.test/my docs/__init__.py>)` the text after the space is
+ * not protected and `__init__` is emboldened out of the URL. Telling that
+ * destination from prose needs the `>)` that has not been typed yet; the
+ * reader could look ahead and typing cannot, and the two are kept identical.
+ */
+/** `\s`, by character code: the scans below ask it of every character they pass. */
+function isSpace(code: number): boolean {
+  return (
+    code === 32 || (code >= 9 && code <= 13) || (code > 127 && /\s/.test(String.fromCharCode(code)))
+  );
+}
+
+/**
+ * Whether the text ends inside an autolink whose `>` has not arrived.
+ *
+ * Its text is the URL as it stands, so no span closes in it: `<https://a/*x*>`
+ * would otherwise lose its asterisks a character before the `>` arrived.
+ */
+function inOpenAutolink(window: string): boolean {
+  const at = window.lastIndexOf('<');
+
+  return at !== -1 && /^<https?:\/\/[^\s<>]*$/i.test(window.slice(at));
+}
+
+function inOpenDestination(window: string): boolean {
+  const at = window.lastIndexOf('](');
+
+  if (at === -1) {
+    return false;
+  }
+
+  const tail = window.slice(at + 2);
+
+  if (tail.startsWith('<')) {
+    return /^<[^<>\s]*$/.test(tail);
+  }
+
+  // The plain form is the link rule's own: no `<` to open it, any after, no
+  // whitespace, and parentheses that may nest -- it is still open until a `)`
+  // finds no `(` of its own to close. (Forbidding `<` throughout let a span
+  // close in `/p?a<b&q=*x*`.)
+  let depth = 0;
+
+  for (let at = 0; at < tail.length; at += 1) {
+    const code = tail.charCodeAt(at);
+
+    if (isSpace(code)) {
+      return false;
+    }
+
+    if (code === 40) {
+      depth += 1;
+    } else if (code === 41 && depth-- === 0) {
+      return false;
+    }
+  }
+
+  return true;
+}
 
 export interface InlineRuleMatch {
   /** Offset of the opening delimiter. */
@@ -110,8 +214,15 @@ export interface InlineRuleMatch {
  * in the window and its shape says exactly which `](` opened it: `](<` for the
  * angle-bracket form, and for the plain form the one immediately before a run
  * of characters that are neither `)` nor whitespace — which is all the pattern
- * admits there. Reading it off directly costs two scans and cannot be wrong,
- * where guessing was and enumerating needed a bound.
+ * admits there. Reading it off directly costs two scans, where guessing was
+ * wrong and enumerating needed a bound.
+ *
+ * It is where the search starts, not a promise of where a match does: the
+ * patterns are anchored at the caret alone, so when the link at this opener is
+ * not one -- a plain destination opening with `<` -- the engine goes on to a
+ * later `[`. In foreign Markdown that finds a link inside an unclosed angle
+ * form, as CommonMark does; the writer escapes every `](` in a destination so
+ * that its own output holds none to find.
  */
 function linkOpener(window: string, angled: boolean): number {
   if (angled) {
@@ -120,39 +231,127 @@ function linkOpener(window: string, angled: boolean): number {
     return pair === -1 ? -1 : window.lastIndexOf('[', pair);
   }
 
-  // The destination admits neither `)` nor whitespace, so whichever comes first
-  // going back from the closing `)` bounds how far the whole `](…)` can reach.
-  let stop = window.length - 2;
-
-  while (stop >= 0 && !/[)\s]/.test(window[stop] ?? '')) {
-    stop -= 1;
+  // The destination holds no whitespace, and its parentheses balance, so the
+  // `(` that opens it is the first one going back from the closing `)` that
+  // nothing inside closes. Its `]` and the `[` before that are the label's.
+  // With no `](` behind the caret there is nothing to find, and the walk below
+  // is the cost of every `)`: a line of them paid it in full each time.
+  if (window.lastIndexOf('](') === -1) {
+    return -1;
   }
 
-  // Within that reach the label opens at the first `](` that HAS a `[` before
-  // it. Taking the first one unconditionally gave up on the whole rule when a
-  // stray `](` preceded a real link, because that one opens nothing — so
-  // `a] (b) [see](https://x.test/)` lost its link entirely.
-  for (let pair = window.indexOf('](', stop + 1); pair !== -1 && pair < window.length - 1;) {
-    const opener = window.lastIndexOf('[', pair);
+  let depth = 0;
 
-    if (opener !== -1) {
-      return opener;
+  for (let at = window.length - 2; at >= 0; at -= 1) {
+    const code = window.charCodeAt(at);
+
+    if (isSpace(code)) {
+      return -1;
     }
 
-    pair = window.indexOf('](', pair + 2);
+    if (code === 41) {
+      depth += 1;
+    } else if (code === 40) {
+      if (depth === 0) {
+        return window.charCodeAt(at - 1) === 93 ? window.lastIndexOf('[', at - 1) : -1;
+      }
+
+      depth -= 1;
+    }
   }
 
   return -1;
 }
 
-export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null {
+/**
+ * A bare URL's start in the part of a token that precedes a span's opener.
+ *
+ * A protocol anywhere in it; `www.` opening the token or after `*`, `_`, `~`,
+ * `(`, `[` or `]` -- or the placeholder the Markdown reader puts where a
+ * character was escaped or a reference decoded, neither of which is a letter
+ * -- so `awww.cute` is a word. Either case.
+ *
+ * This is not GFM's autolink grammar, and each attempt to make it so took
+ * underscores out of real URLs: refusing a `_` straight after the scheme broke
+ * `https://_dmarc.example.com/a_b_c` (a host may begin with one, and at the
+ * closing `_` nothing says whether more host follows); refusing a URL after
+ * `[` broke a link labelled with its own URL, `[https://a.test/_private_dir](…)`;
+ * and refusing a protocol after a letter broke `**see**https://a.test/_y_`,
+ * which is `seehttps://…` by the time its `_` closes because the finished
+ * span's delimiters are gone. So where it is uncertain the line falls on the
+ * side of the URL: text that other readers would have emphasised stays literal
+ * with its underscores (`http://_a_`, `xhttps://a.test/_y_`), which loses
+ * nothing, rather than a URL losing characters, which does.
+ */
+const ESCAPED_PLACEHOLDER = String.fromCharCode(0);
+const BARE_URL_IN_TOKEN = new RegExp(
+  `https?:\\/\\/|(?:^|[*_~([\\]${ESCAPED_PLACEHOLDER}])www\\.`,
+  'i',
+);
+
+/**
+ * Whether a span whose opening delimiter is at `opener` opens inside a bare
+ * URL: one that starts earlier in the same whitespace-delimited token.
+ *
+ * Typing `https://a.test/_y_` used to italicise the `y` and delete the
+ * underscores, and `www.a.test/__init__` lost four. A span that opens *before*
+ * the URL is still a span -- `_see https://a.test_` is italic in CommonMark and
+ * in GFM, which leaves a trailing `_` out of the link -- so it is where the
+ * opener sits that decides. It is the opener's token that is looked at, not the
+ * caret's: a span may close words later, and
+ * `http://localhost:9200/_cat/indices and …/my_index` lost an underscore from
+ * each URL while only the second token was being asked about.
+ *
+ * It sees what `matchInlineRule` is given: a URL whose start is more than
+ * `INLINE_SPAN_LIMIT` behind the caret, or that the Markdown reader has already
+ * retired from the text it keeps, is not seen.
+ */
+function opensInBareUrl(window: string, opener: number): boolean {
+  let token = opener;
+
+  while (token > 0 && !/\s/.test(window[token - 1] ?? '')) {
+    token -= 1;
+  }
+
+  return BARE_URL_IN_TOKEN.test(window.slice(token, opener));
+}
+
+export function matchInlineRule(
+  textBeforeCaret: string,
+  options: {
+    /**
+     * The text is the Markdown reader's projection, in which a NUL stands for
+     * an escaped character. Never set for typed text, where a NUL is a NUL.
+     */
+    readonly projection?: boolean;
+  } = {},
+): InlineRuleMatch | null {
   // One character past the window, so the lookbehinds see what really precedes
   // a candidate opening delimiter rather than the cut.
   const offset = Math.max(0, textBeforeCaret.length - INLINE_SPAN_LIMIT - 1);
   const window = offset === 0 ? textBeforeCaret : textBeforeCaret.slice(offset);
   const closer = textBeforeCaret.at(-1);
+  // Inside a link destination nothing but the link itself may close. Rules
+  // fire as each character arrives, so `_y_` in a URL was italicised -- and its
+  // underscores deleted -- before the `)` that makes it a destination was
+  // read: `https://a.test/_y_` came back as `https://a.test/y`, from the
+  // editor's own Markdown and while typing alike (the e2e audit's F15).
+  // Code spans are left alone: they take precedence over links in CommonMark,
+  // so `` `](` `` is code. The writer escapes a backtick in a destination (the
+  // URL parser percent-encodes one in a path but not in a query), so a code
+  // span cannot close inside a destination we wrote.
+  const inDestination = inOpenDestination(window);
+  const inAutolink = inOpenAutolink(window);
 
   for (const rule of INLINE_RULES) {
+    if (inDestination && !rule.isLink && rule.mark !== 'code') {
+      continue;
+    }
+
+    if (inAutolink && !rule.autolink) {
+      continue;
+    }
+
     // A rule that does not end in this character cannot match here, and running
     // it anyway is not free: the link patterns walk the window from every `[`
     // in it, which is most of the cost of parsing a line of stray brackets.
@@ -160,19 +359,15 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
       continue;
     }
 
-    // Both link patterns need a `](` somewhere behind the caret, and can only
-    // start at the `[` that opens it. Finding that with two index lookups keeps
-    // the regex off the rest of the window — left to walk back from every `[`
-    // it turned a line of unpaired brackets, `[0, 1) [1, 2) ...`, into a
-    // second of work per paste, because every `)` restarted the scan.
-    // A link pattern can only start at the `[` that opens the destination's
-    // `](`, so that one position is computed rather than the window walked from
-    // every bracket in it — which is what keeps a line of unpaired brackets off
-    // the quadratic path. It is computed and not guessed: a destination may
-    // hold `](` of its own (`[see](<https://…?q=[foo](bar)>)`, which this
-    // editor writes itself), so taking the last one put the opener inside the
-    // URL, and trying candidates in turn needed a cap that lost the link
-    // outright once a URL carried enough of them.
+    // The earliest `[` a link ending here can start at is the one that opens
+    // the destination's `](`, so that position is computed rather than the
+    // window walked from every bracket in it — which is what keeps a line of
+    // unpaired brackets, `[0, 1) [1, 2) ...`, off the quadratic path (it was a
+    // second of work per paste: every `)` restarted the scan). It is computed and not
+    // guessed: a foreign destination may hold `](` of its own
+    // (`[see](<https://…?q=[foo](bar)>)`), so taking the last one put the
+    // opener inside the URL, and trying candidates in turn needed a cap that
+    // lost the link outright once a URL carried enough of them.
     let searchedFrom = 0;
     let match: RegExpExecArray | null = null;
 
@@ -195,6 +390,12 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
       continue;
     }
 
+    // Asked only once a `_` rule has matched: the answer needs a walk back to
+    // the last whitespace, and a line of underscores would pay it per character.
+    if (closer === '_' && opensInBareUrl(window, searchedFrom + match.index)) {
+      continue;
+    }
+
     const index = searchedFrom + match.index;
 
     // A match starting on the cut is the one place the lookbehind has no
@@ -206,9 +407,26 @@ export function matchInlineRule(textBeforeCaret: string): InlineRuleMatch | null
     let link: string | undefined;
 
     if (rule.isLink) {
-      const href = sanitizeUrl(match[2] ?? '');
+      // In the reader's projection an escaped character is a NUL. One in a
+      // host made the URL unparseable, so the writer's own
+      // `[x](https://a\&amp;b.test/)` was not a link. It stands for a
+      // character, so there it is tested as one, and the reader then takes
+      // the real href from the content. Only there: typing applies this href
+      // as it is, and a literal NUL in a block's text must not become a link
+      // to a host the text does not hold.
+      const destination = match[2] ?? '';
+      const href = sanitizeUrl(
+        options.projection ? destination.replaceAll(ESCAPED_PLACEHOLDER, 'a') : destination,
+      );
 
-      // An unsafe or unparseable URL leaves the literal text alone.
+      // An unsafe or unparseable URL leaves the literal text alone -- all of
+      // it, when it is a closed angle form: the plain rule below is anchored
+      // only at the caret, and would retry from a `[` inside the refused URL
+      // (`[y](<javascript:void[x](//evil.test/>)` linked `x`).
+      if (!href && rule.angled) {
+        return null;
+      }
+
       if (!href) {
         continue;
       }

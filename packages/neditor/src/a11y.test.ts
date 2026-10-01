@@ -164,6 +164,37 @@ describe('keyboard reachability', () => {
     expect(active?.tabIndex).toBe(0);
   });
 
+  /**
+   * F13 (e2e finding, WebKit). Focusing a toolbar button clears WebKit's
+   * document selection. The next selectionchange found no caret in a cell, so
+   * the editor hid the table toolbar -- under the focus it had just given it --
+   * and focus fell to <body>. happy-dom keeps the range, so the clearing WebKit
+   * does is done here by hand, exactly as it happens there.
+   */
+  test('the table toolbar stays while focus is in it, even with no selection left behind', () => {
+    const editor = mount([block({ type: 'table', rows: [[[{ text: 'A' }], [{ text: 'B' }]]] })]);
+    const cell = editor.element.querySelector<HTMLElement>('[data-cell="0:1"]')!;
+    cell.focus();
+    getSelection()?.collapse(cell.firstChild, 1);
+    document.dispatchEvent(new Event('selectionchange'));
+    const toolbar = document.querySelector<HTMLElement>('.neditor-table-toolbar')!;
+    expect(toolbar.hidden).toBe(false);
+
+    press(cell, 'F10');
+    const button = document.activeElement as HTMLElement;
+    expect(button.classList.contains('neditor-table-toolbar__button')).toBe(true);
+
+    getSelection()?.removeAllRanges();
+    document.dispatchEvent(new Event('selectionchange'));
+
+    expect(toolbar.hidden).toBe(false);
+    expect(document.activeElement).toBe(button);
+
+    // And it still acts on the cell it was entered from.
+    button.click();
+    expect(editor.getDocument().blocks[0]?.rows).toHaveLength(2);
+  });
+
   test('arrows rove within the toolbar and Escape returns to the cell', () => {
     const editor = mount([block({ type: 'table', rows: [[[{ text: 'A' }]]] })]);
     const cell = editor.element.querySelector<HTMLElement>('[data-cell="0:0"]')!;
@@ -400,6 +431,112 @@ describe('the slash menu is announced', () => {
     expect(content.getAttribute('aria-expanded')).toBe(null);
     expect(content.getAttribute('aria-activedescendant')).toBe(null);
     expect(content.getAttribute('role')).toBe(null);
+    expect(content.getAttribute('aria-labelledby')).toBe(null);
+  });
+
+  /**
+   * F9 (e2e finding; axe `aria-input-field-name`, WCAG 4.1.2). The host keeps
+   * no role or name of its own -- its element supplies both -- but for as long
+   * as the menu makes it a combobox it is an input field, and an input field
+   * needs a name. It borrows the menu's, which the labels option translates.
+   */
+  test('while it is a combobox the editable has a name, in the labels language', () => {
+    const editor = mount([block({})], { labels: { slashMenu: 'Types de bloc' } });
+    const content = editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
+    content.focus();
+    typeSlash(content);
+
+    expect(content.getAttribute('role')).toBe('combobox');
+    // A label of its own, in the host's tree -- not the listbox, whose content
+    // Chromium reads instead of its aria-label ("T Text Just start writing..."),
+    // and which may live in another tree (see below).
+    const label = (content.getRootNode() as Document).getElementById(
+      content.getAttribute('aria-labelledby') ?? '',
+    );
+    expect(label?.textContent).toBe('Types de bloc');
+    expect(label?.getAttribute('role')).toBe(null);
+    expect(editor.element.lastElementChild?.classList.contains('neditor-live-region')).toBe(true);
+  });
+
+  /**
+   * B10 (e2e audit 2). An ID reference cannot cross a shadow boundary, so with
+   * the popovers portalled into another tree the combobox's aria-controls and
+   * aria-activedescendant pointed at nothing. Where they would not resolve they
+   * are not written as IDs.
+   */
+  test('with the popovers in another tree, no reference is left dangling', () => {
+    const outer = document.createElement('div');
+    document.body.append(outer);
+    const shadow = outer.attachShadow({ mode: 'open' });
+    const mountPoint = document.createElement('div');
+    shadow.append(mountPoint);
+    const editor = createEditor({
+      element: mountPoint,
+      portalContainer: document.body,
+      doc: { blocks: [block({})] },
+    });
+    editors.push(editor);
+    const content = mountPoint.querySelector<HTMLElement>('.neditor-block__content')!;
+    content.focus();
+    typeSlash(content);
+
+    expect(content.getAttribute('role')).toBe('combobox');
+
+    const dangling = ['aria-labelledby', 'aria-controls', 'aria-activedescendant'].filter(
+      (attribute) => {
+        const id = content.getAttribute(attribute);
+        return id !== null && id !== '' && shadow.getElementById(id) === null;
+      },
+    );
+    expect(dangling, "every ID reference resolves in the host's tree").toEqual([]);
+    expect(content.getAttribute('aria-labelledby')).not.toBeNull();
+  });
+
+  /**
+   * Found auditing F9. A to-do's checkbox is named by its text host
+   * (aria-labelledby), so an aria-label on the host renamed the checkbox
+   * "Block types" for as long as the menu was open. aria-labelledby on the host
+   * instead is not followed a second time when the checkbox's name is computed.
+   */
+  test("naming the combobox does not rename a to-do's checkbox", () => {
+    const editor = mount([block({ type: 'todo', content: [{ text: 'buy milk' }] })]);
+    const content = editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
+    content.focus();
+    typeSlash(content);
+
+    expect(content.getAttribute('role')).toBe('combobox');
+    expect(content.hasAttribute('aria-label')).toBe(false);
+  });
+  /**
+   * F5 (e2e observation). Only an input event re-read the query, so arrowing
+   * the caret back over the `/` left the menu open -- and its combobox wiring
+   * on a host whose caret was no longer in the command at all -- until the
+   * next keystroke happened to be an edit.
+   */
+  test('moving the caret back over the slash closes the menu', () => {
+    const editor = mount([block({})]);
+    const content = editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
+    content.focus();
+    typeSlash(content);
+    expect(document.querySelector('.neditor-slash-menu')?.hasAttribute('hidden')).toBe(false);
+
+    getSelection()?.collapse(content.firstChild, 0);
+    document.dispatchEvent(new Event('selectionchange'));
+
+    expect(document.querySelector('.neditor-slash-menu')?.hasAttribute('hidden')).toBe(true);
+    expect(content.getAttribute('role')).toBe(null);
+  });
+
+  test('a caret still after the slash keeps it open', () => {
+    const editor = mount([block({})]);
+    const content = editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
+    content.focus();
+    typeSlash(content);
+
+    getSelection()?.collapse(content.firstChild, 1);
+    document.dispatchEvent(new Event('selectionchange'));
+
+    expect(document.querySelector('.neditor-slash-menu')?.hasAttribute('hidden')).toBe(false);
   });
 });
 

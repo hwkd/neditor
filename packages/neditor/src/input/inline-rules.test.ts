@@ -109,8 +109,13 @@ describe('inline markdown rules', () => {
     expect(match?.end).toBe(prefix.length + 6);
   });
 
-  test('a delimiter spanning a newline does not fire', () => {
-    expect(matchInlineRule('*a\nb*')).toBe(null);
+  // A span may cross a soft break, as in CommonMark: the writer keeps a marked
+  // run with a line break in it whole, so the break keeps its mark (B11). A
+  // delimiter against the break itself is still against whitespace.
+  test('a span may cross a soft break, but not open or close against one', () => {
+    expect(matchInlineRule('*a\nb*')?.mark).toBe('italic');
+    expect(matchInlineRule('*a\n*')).toBe(null);
+    expect(matchInlineRule('*\nb*')).toBe(null);
   });
 
   describe('links', () => {
@@ -260,4 +265,14 @@ describe('emphasis needs a delimiter that can actually open or close', () => {
 
     expect(runs.some((run) => (run.marks ?? []).includes('code'))).toBe(true);
   });
+});
+
+// The placeholder is the Markdown reader's. In typed text a NUL is a NUL: it is
+// not stood in for, so a link is never made to a host the text does not hold.
+test("a NUL in typed text is not read as the reader's placeholder", () => {
+  const nul = String.fromCharCode(0);
+  expect(matchInlineRule(`[x](https://bank${nul}.test/)`)).toBeNull();
+  expect(
+    matchInlineRule(`[x](https://bank${nul}.test/)`, { projection: true })?.link,
+  ).toBeDefined();
 });

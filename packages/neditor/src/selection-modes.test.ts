@@ -329,3 +329,356 @@ describe('undoing an edit made in block-selection mode leaves somewhere to type'
     expect(editor.getSelectionState()).not.toBeNull();
   });
 });
+
+describe('a gesture that leaves block mode, or enters it, leaves only one mode behind', () => {
+  /**
+   * The literal scenario from the e2e finding (F6): one block selected, Tab
+   * with nothing above it to nest under. The key is rightly not swallowed --
+   * the editor must not be a keyboard trap -- so the browser moves focus on,
+   * and the next tab stop is the first block's own host. Nothing ended block
+   * selection on the way, so the reader saw a caret in that block and the next
+   * character was routed to the invisible selection: it replaced the block.
+   * happy-dom performs no default action, so the focus move is done by hand,
+   * exactly as the browser does it after the unprevented keydown.
+   */
+  test('a Tab that changes nothing ends block selection before focus moves on', () => {
+    const editor = mount(abc());
+    editor.selectBlocks([idFor(editor, 'a')]);
+
+    const prevented = press(editor.element, 'Tab');
+
+    expect(prevented, 'the Tab must still be free to leave').toBe(false);
+    expect(editor.getSelectedBlocks()).toEqual([]);
+
+    hosts(editor)[0]!.focus();
+    press(hosts(editor)[0]!, 'x');
+
+    expect(texts(editor)).toEqual(['a', 'b', 'c']);
+  });
+
+  test('a Tab that does indent keeps the selection it indented', () => {
+    const editor = mount(abc());
+    editor.selectBlocks([idFor(editor, 'b')]);
+
+    expect(press(editor.element, 'Tab')).toBe(true);
+    expect(editor.getSelectedBlocks()).toEqual([idFor(editor, 'b')]);
+  });
+
+  /**
+   * F12: the handle drag entered block selection without taking focus, so when
+   * the dragged block was the one holding the caret, focus and the DOM range
+   * stayed in its host. The reader saw a caret in the block they had just
+   * moved, and the next keystroke replaced it. A handle drag has no native
+   * selection gesture to protect, so it enters block mode the whole way.
+   */
+  test('dragging the block that holds the caret takes the caret out of it', () => {
+    const editor = mount(abc());
+    const a = idFor(editor, 'a');
+    expect(editor.focus(a, 1)).toBe(true);
+
+    const view = editor.element.querySelectorAll('.neditor-block')[0]!;
+    view.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, pointerId: 7 }));
+    const handle = editor.element.querySelector('.neditor-gutter__handle')!;
+    handle.dispatchEvent(
+      new PointerEvent('pointerdown', {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 7,
+        button: 0,
+        clientY: 0,
+      }),
+    );
+    document.dispatchEvent(
+      new PointerEvent('pointermove', { bubbles: true, pointerId: 7, clientY: 400 }),
+    );
+
+    // Mid-drag: one mode already.
+    expect(editor.getSelectedBlocks()).toEqual([a]);
+    expect(document.activeElement).toBe(editor.element);
+    expect(document.getSelection()?.rangeCount ?? 0).toBe(0);
+
+    document.dispatchEvent(
+      new PointerEvent('pointerup', { bubbles: true, pointerId: 7, clientY: 400 }),
+    );
+
+    expect(texts(editor)).toEqual(['b', 'c', 'a']);
+    expect(editor.getSelectedBlocks()).toEqual([a]);
+    expect(document.activeElement).toBe(editor.element);
+    expect(editor.getSelectionState(), 'no caret is left for the reader to type at').toBeNull();
+  });
+});
+
+describe('block-mode clipboard events find the editor wherever the browser sends them', () => {
+  /**
+   * F8 (e2e finding, Firefox). In block mode focus is on the root, which is not
+   * editable, and Firefox dispatches clipboard events at <body> in that case
+   * rather than at the focused element. The root's listeners never ran: copy
+   * and cut wrote nothing, paste inserted nothing, and nothing said so.
+   */
+  function clipboard(type: string, target: EventTarget, data: Record<string, string> = {}) {
+    const transfer = new DataTransfer();
+
+    for (const [format, value] of Object.entries(data)) {
+      transfer.setData(format, value);
+    }
+
+    const event = new ClipboardEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      clipboardData: transfer,
+    });
+    target.dispatchEvent(event);
+
+    return { event, transfer };
+  }
+
+  test('a copy dispatched at the body copies the selected blocks', () => {
+    const editor = mount(abc());
+    editor.selectBlocks([idFor(editor, 'a'), idFor(editor, 'b')]);
+    expect(document.activeElement).toBe(editor.element);
+
+    const { event, transfer } = clipboard('copy', document.body);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(transfer.getData('text/plain')).toBe('a\n\nb');
+  });
+
+  test('a cut dispatched at the body cuts them', () => {
+    const editor = mount(abc());
+    editor.selectBlocks([idFor(editor, 'b')]);
+
+    clipboard('cut', document.body);
+
+    expect(texts(editor)).toEqual(['a', 'c']);
+  });
+
+  test('a paste dispatched at the body replaces them', () => {
+    const editor = mount(abc());
+    editor.selectBlocks([idFor(editor, 'b')]);
+
+    clipboard('paste', document.body, { 'text/plain': 'pasted' });
+
+    expect(texts(editor)).toEqual(['a', 'pasted', 'c']);
+  });
+
+  test('but not when focus is somewhere else on the page', () => {
+    const editor = mount(abc());
+    editor.selectBlocks([idFor(editor, 'b')]);
+    const input = document.createElement('input');
+    document.body.append(input);
+    input.focus();
+
+    const { event, transfer } = clipboard('copy', document.body);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(transfer.getData('text/plain')).toBe('');
+    clipboard('paste', document.body, { 'text/plain': 'pasted' });
+    expect(texts(editor)).toEqual(['a', 'b', 'c']);
+  });
+
+  test('and an event that reaches the root is handled once, not twice', () => {
+    const editor = mount(abc());
+    editor.selectBlocks([idFor(editor, 'b')]);
+
+    // A second handling would paste over its own result: the same text, so
+    // the text cannot tell -- but two history entries, so one undo can.
+    clipboard('paste', editor.element, { 'text/plain': 'x' });
+    expect(texts(editor)).toEqual(['a', 'x', 'c']);
+
+    editor.undo();
+    expect(texts(editor)).toEqual(['a', 'b', 'c']);
+  });
+});
+
+describe('block selection made by a pointer stays the only mode', () => {
+  /**
+   * F7 (e2e finding, WebKit). A pointer drag that selected blocks and was
+   * released below the last one ended with WebKit putting a text selection
+   * back into that block's host, and focus with it -- after the editor had
+   * already taken both away. Block selection is what the gesture produced, so
+   * a caret that turns up inside a host while blocks are selected, with no
+   * pointer down, is taken back out rather than left to contradict it.
+   */
+  test('a range the browser drops into a block, focus unmoved, is removed again', () => {
+    const editor = mount(abc());
+    editor.selectBlocks([idFor(editor, 'b'), idFor(editor, 'c')]);
+
+    // Focus stays on the root; only the selection moves. (Focus moved into a
+    // block without a pointer is the reader's choice -- the test below.)
+    const c = hosts(editor)[2]!;
+    getSelection()?.collapse(c.firstChild, 1);
+    document.dispatchEvent(new Event('selectionchange'));
+
+    expect(editor.getSelectedBlocks()).toEqual([idFor(editor, 'b'), idFor(editor, 'c')]);
+    expect(document.activeElement).toBe(editor.element);
+    expect(getSelection()?.rangeCount ?? 0).toBe(0);
+  });
+
+  test('the drag case: WebKit puts the caret back mid-drag, and the release takes it out', () => {
+    const editor = mount(abc());
+    const [a, , c] = hosts(editor);
+    a!.dispatchEvent(
+      new PointerEvent('pointerdown', {
+        bubbles: true,
+        pointerId: 4,
+        pointerType: 'mouse',
+        clientY: 0,
+      }),
+    );
+    document.dispatchEvent(
+      new PointerEvent('pointermove', {
+        bubbles: true,
+        pointerId: 4,
+        pointerType: 'mouse',
+        clientY: 400,
+      }),
+    );
+    expect(editor.getSelectedBlocks().length).toBeGreaterThan(1);
+
+    // WebKit, with the button still down: focus and a range back in a host,
+    // and no selectionchange after the release to catch it by.
+    c!.focus();
+    getSelection()?.collapse(c!.firstChild, 1);
+    document.dispatchEvent(
+      new PointerEvent('pointerup', { bubbles: true, pointerId: 4, pointerType: 'mouse' }),
+    );
+
+    expect(document.activeElement).toBe(editor.element);
+    expect(getSelection()?.rangeCount ?? 0).toBe(0);
+  });
+
+  /**
+   * Found auditing F7. Focus moved into a block by the keyboard or a screen
+   * reader -- no pointer involved -- is the reader choosing that text. Taking
+   * the caret back out for the stale block selection would leave the next
+   * printable key replacing a block the reader may not even be looking at.
+   */
+  test('focus moved into a block without a pointer ends block selection instead', () => {
+    const editor = mount(abc());
+    editor.selectBlocks([idFor(editor, 'b')]);
+    const button = document.createElement('button');
+    document.body.append(button);
+    button.focus();
+
+    const a = hosts(editor)[0]!;
+    a.focus();
+    getSelection()?.collapse(a.firstChild, 1);
+    document.dispatchEvent(new Event('selectionchange'));
+
+    expect(editor.getSelectedBlocks()).toEqual([]);
+    expect(document.activeElement).toBe(a);
+    press(a, 'x');
+    expect(texts(editor)).toEqual(['a', 'b', 'c']);
+  });
+
+  /**
+   * B11 (e2e audit 2). A focus that arrives just after a pointer is released is
+   * the browser finishing that gesture -- a long press ending, a tap's
+   * compatibility events -- not the reader choosing the text. It is left to the
+   * stray-caret check, which keeps the block selection the gesture made.
+   */
+  test('focus arriving just after a pointer release does not end block selection', () => {
+    const editor = mount(abc());
+    editor.selectBlocks([idFor(editor, 'b')]);
+    document.dispatchEvent(
+      new PointerEvent('pointerdown', { bubbles: true, pointerId: 6, pointerType: 'touch' }),
+    );
+    document.dispatchEvent(
+      new PointerEvent('pointerup', { bubbles: true, pointerId: 6, pointerType: 'touch' }),
+    );
+
+    const b = hosts(editor)[1]!;
+    b.focus();
+    getSelection()?.collapse(b.firstChild, 1);
+    document.dispatchEvent(new Event('selectionchange'));
+
+    expect(editor.getSelectedBlocks()).toEqual([idFor(editor, 'b')]);
+    expect(document.activeElement).toBe(editor.element);
+  });
+
+  test("another editor's caret is not this editor's business", () => {
+    const first = mount(abc());
+    const second = mount(abc());
+    first.selectBlocks([idFor(first, 'b')]);
+
+    const theirs = hosts(second)[0]!;
+    theirs.focus();
+    getSelection()?.collapse(theirs.firstChild, 1);
+    document.dispatchEvent(new Event('selectionchange'));
+
+    expect(document.activeElement).toBe(theirs);
+    expect(second.getSelectionState()).toMatchObject({ blockId: idFor(second, 'a') });
+  });
+
+  test('a caret placed on purpose still ends block selection instead', () => {
+    const editor = mount(abc());
+    editor.selectBlocks([idFor(editor, 'b')]);
+
+    editor.focus(idFor(editor, 'c'), 1);
+    document.dispatchEvent(new Event('selectionchange'));
+
+    expect(editor.getSelectedBlocks()).toEqual([]);
+    expect(editor.getSelectionState()).toMatchObject({ blockId: idFor(editor, 'c') });
+  });
+
+  /**
+   * F11 (e2e finding, touch). Chromium delivers a few pointermoves before it
+   * hands a touch to scrolling with pointercancel. A text drag begun near a
+   * block edge crossed into the next block within them and selected both, and
+   * the cancel ended the drag without undoing that -- so a swipe to scroll
+   * left two blocks selected. On touch a drag across blocks is always the
+   * browser's (it pans), and long-press is the touch path to block selection,
+   * so a touch pointer never grows a text drag into blocks.
+   */
+  test('a touch moving across blocks does not select them', () => {
+    const editor = mount(abc());
+    hosts(editor)[0]!.dispatchEvent(
+      new PointerEvent('pointerdown', {
+        bubbles: true,
+        pointerId: 9,
+        pointerType: 'touch',
+        clientY: 0,
+      }),
+    );
+    document.dispatchEvent(
+      new PointerEvent('pointermove', {
+        bubbles: true,
+        pointerId: 9,
+        pointerType: 'touch',
+        clientY: 400,
+      }),
+    );
+
+    expect(editor.getSelectedBlocks()).toEqual([]);
+    expect(editor.element.dataset.selecting).toBeUndefined();
+
+    document.dispatchEvent(
+      new PointerEvent('pointercancel', { bubbles: true, pointerId: 9, pointerType: 'touch' }),
+    );
+  });
+
+  test('a mouse moving across blocks still selects them', () => {
+    const editor = mount(abc());
+    hosts(editor)[0]!.dispatchEvent(
+      new PointerEvent('pointerdown', {
+        bubbles: true,
+        pointerId: 3,
+        pointerType: 'mouse',
+        clientY: 0,
+      }),
+    );
+    document.dispatchEvent(
+      new PointerEvent('pointermove', {
+        bubbles: true,
+        pointerId: 3,
+        pointerType: 'mouse',
+        clientY: 400,
+      }),
+    );
+
+    expect(editor.getSelectedBlocks().length).toBeGreaterThan(1);
+    document.dispatchEvent(
+      new PointerEvent('pointerup', { bubbles: true, pointerId: 3, pointerType: 'mouse' }),
+    );
+  });
+});

@@ -643,10 +643,18 @@ export function blocksToHtml(doc: Document, blocks: readonly Block[]): string {
       }
 
       if (block.type === 'image') {
-        const image = doc.createElement('img');
-        image.setAttribute('src', block.src ?? '');
-        image.setAttribute('alt', block.alt ?? '');
-        element.append(image);
+        if (block.src) {
+          const image = doc.createElement('img');
+          image.setAttribute('src', block.src);
+          image.setAttribute('alt', block.alt ?? '');
+          element.append(image);
+        } else {
+          // An image block with no picture yet. `<img src="">` is a broken
+          // image in every other application and one the reader rightly
+          // ignores, so it lost the block; this marker is ours alone.
+          element.dataset.neditorImage = '';
+          element.dataset.neditorAlt = block.alt ?? '';
+        }
 
         if (!isRichEmpty(block.content)) {
           const caption = doc.createElement('figcaption');
@@ -749,7 +757,18 @@ export function blocksToHtml(doc: Document, blocks: readonly Block[]): string {
       item.append(doc.createTextNode(block.checked ? '\u2611 ' : '\u2610 '));
     }
 
-    item.append(renderRichText(doc, block.content));
+    const text = renderRichText(doc, block.content);
+
+    // Text that is only whitespace reads as the HTML's own formatting, and an
+    // item with nothing else in it but a nested list is read as a holder for
+    // that list: in a span it is text.
+    if (block.content.length > 0 && richToPlainText(block.content).trim() === '') {
+      const span = doc.createElement('span');
+      span.append(text);
+      item.append(span);
+    } else {
+      item.append(text);
+    }
     current.list.append(item);
   }
 
@@ -1646,9 +1665,14 @@ function pushImage(out: Block[], element: Element, depth: number): boolean {
   const image = tagNameOf(element) === 'IMG' ? element : firstImage(element);
   const src = sanitizeImageUrl(image?.getAttribute('src') ?? '');
 
+  // Our own empty image block (see blocksToHtml) -- only ours: a foreign
+  // `<img>` with no usable source is still skipped, not made a placeholder.
+  const emptyOwn =
+    !src && !image && tagNameOf(element) === 'FIGURE' && element.hasAttribute('data-neditor-image');
+
   // An unusable source would only render as a broken block. The caller
   // recurses into the element instead, so a <figure> keeps its other children.
-  if (!src) {
+  if (!src && !emptyOwn) {
     return false;
   }
 
@@ -1658,8 +1682,8 @@ function pushImage(out: Block[], element: Element, depth: number): boolean {
     caption ? parseRichText(caption) : [],
     depthOf(element, depth),
   );
-  block.src = src;
-  block.alt = image?.getAttribute('alt') ?? '';
+  block.src = src ?? '';
+  block.alt = image?.getAttribute('alt') ?? element.getAttribute('data-neditor-alt') ?? '';
   out.push(block);
 
   return true;
@@ -1723,10 +1747,14 @@ function visitListItemInner(
   let checked = false;
 
   if (state !== null) {
-    // Our own marker: exact, and the text still carries the box we wrote.
+    // Our own marker: exact, and the text still carries the box we wrote --
+    // the glyph and one space, and nothing more. Stripping every space after
+    // it, as a foreign checkbox is stripped, took the to-do's own leading
+    // whitespace with it, and a to-do that was only a line break came back
+    // empty.
     type = 'todo';
     checked = state === 'true';
-    runs = extractTodoPrefix(runs)?.runs ?? runs;
+    runs = /^[\u2610\u2611] /.test(richToPlainText(runs)) ? richDelete(runs, 0, 2) : runs;
   } else if (checkbox) {
     type = 'todo';
     checked = (checkbox as HTMLInputElement).checked || checkbox.hasAttribute('checked');
@@ -1741,8 +1769,10 @@ function visitListItemInner(
   }
 
   // An empty item is a real blank bullet — unless it exists only to hold the
-  // list nested under it, which is how indentation alone is written.
-  if (!isRichEmpty(runs) || nested.length === 0) {
+  // list nested under it, which is how indentation alone is written by other
+  // editors. Never by this one, which hangs a nested list off the item it
+  // belongs to: in a list it wrote, an empty item is always a block.
+  if (!isRichEmpty(runs) || nested.length === 0 || declared) {
     const block = createBlock(type, runs, itemDepth);
 
     if (type === 'todo') {

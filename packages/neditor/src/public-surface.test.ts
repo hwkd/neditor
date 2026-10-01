@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import type { Block } from './index.ts';
 import { createEditor } from './index.ts';
@@ -869,5 +869,175 @@ describe('setEditable(false) on a read-only editor changes nothing', () => {
     editor.setEditable(true);
 
     expect(shows(editor)).toBe(false);
+  });
+});
+
+describe('a shadow-mounted editor reads its caret where the browser hides it', () => {
+  /**
+   * F10 (e2e finding, WebKit). WebKit's ShadowRoot has no getSelection, and its
+   * document selection is retargeted to the shadow host -- so every offset the
+   * editor read was the host's, 0, and Enter split at the start of the block.
+   * The caret inside is only visible through `getComposedRanges`. happy-dom
+   * retargets nothing, so the selection here is built in exactly WebKit's shape.
+   */
+  function webkitShaped(
+    host: Element,
+    text: Node,
+    offset: number,
+    shape: 'dictionary' | 'variadic',
+    end = offset,
+    direction = 'forward',
+  ) {
+    const retargeted = document.createRange();
+    retargeted.setStart(host, 0);
+
+    return {
+      rangeCount: 1,
+      anchorNode: host,
+      focusNode: host,
+      anchorOffset: 0,
+      focusOffset: 0,
+      isCollapsed: offset === end,
+      direction,
+      getRangeAt: () => retargeted,
+      removeAllRanges() {},
+      addRange() {},
+      getComposedRanges(...args: unknown[]) {
+        const first = args[0] as { shadowRoots?: ShadowRoot[] } | ShadowRoot | undefined;
+        const opened =
+          shape === 'dictionary'
+            ? Array.isArray((first as { shadowRoots?: unknown })?.shadowRoots)
+            : first !== undefined && 'host' in (first as object);
+
+        // Without the root named in the shape this browser understands, the
+        // range is rescoped to the host, as the specification requires.
+        const [container, at] = opened ? [text, offset] : [host, 0];
+
+        return [
+          {
+            startContainer: container,
+            startOffset: at,
+            endContainer: container,
+            endOffset: at,
+            collapsed: true,
+          },
+        ];
+      },
+    };
+  }
+
+  for (const shape of ['dictionary', 'variadic'] as const) {
+    test(`the caret comes from getComposedRanges (${shape} form)`, () => {
+      const outer = document.createElement('div');
+      document.body.append(outer);
+      const shadow = outer.attachShadow({ mode: 'open' });
+      const mountPoint = document.createElement('div');
+      shadow.append(mountPoint);
+      const editor = createEditor({
+        element: mountPoint,
+        doc: {
+          blocks: [{ id: 'p', type: 'paragraph', depth: 0, content: [{ text: 'Alpha one' }] }],
+        },
+      });
+      editors.push(editor);
+      Object.defineProperty(shadow, 'getSelection', { value: undefined, configurable: true });
+
+      const text = mountPoint.querySelector('.neditor-block__content')!.firstChild!;
+      const original = window.getSelection;
+      window.getSelection = () => webkitShaped(outer, text, 5, shape) as unknown as Selection;
+
+      try {
+        expect(editor.getSelectionState()).toMatchObject({
+          blockId: 'p',
+          range: { start: 5, end: 5 },
+        });
+      } finally {
+        window.getSelection = original;
+      }
+    });
+  }
+});
+
+describe('a shadow-mounted selection keeps its direction', () => {
+  // Found auditing F10: a composed range is a StaticRange, which has no
+  // direction, so a backward selection read as forward and anchored at the
+  // wrong end. Selection.direction says which end the reader started from.
+  test('a backward selection read through getComposedRanges anchors at its end', async () => {
+    const { readSelection } = await import('./view/selection.ts');
+    const outer = document.createElement('div');
+    document.body.append(outer);
+    const shadow = outer.attachShadow({ mode: 'open' });
+    const host = document.createElement('p');
+    host.innerHTML = 'Alpha <b>one</b>';
+    shadow.append(host);
+    Object.defineProperty(shadow, 'getSelection', { value: undefined, configurable: true });
+    const text = host.firstChild!;
+    const bold = host.querySelector('b')!.firstChild!;
+    const retargeted = document.createRange();
+    retargeted.setStart(outer, 0);
+    const original = window.getSelection;
+    window.getSelection = () =>
+      ({
+        rangeCount: 1,
+        anchorNode: outer,
+        focusNode: outer,
+        isCollapsed: false,
+        direction: 'backward',
+        getRangeAt: () => retargeted,
+        getComposedRanges: () => [
+          {
+            startContainer: text,
+            startOffset: 1,
+            endContainer: bold,
+            endOffset: 2,
+            collapsed: false,
+          },
+        ],
+      }) as unknown as Selection;
+
+    try {
+      const reading = readSelection(host)!;
+      expect(reading.range.startContainer).toBe(text);
+      expect(reading.range.endContainer).toBe(bold);
+      // Backward: the reader started at the end.
+      expect(reading.anchorNode).toBe(bold);
+      expect(reading.focusNode).toBe(text);
+    } finally {
+      window.getSelection = original;
+    }
+  });
+});
+
+describe('a shadow-mounted editor places its caret where the browser will take it', () => {
+  /**
+   * F10, the other half. WebKit ignores `addRange` with a range inside a shadow
+   * root, so every caret the editor placed there -- focus(), the new block
+   * after Enter, the selection restored by undo -- silently went nowhere.
+   * `setBaseAndExtent` is honoured across the boundary everywhere.
+   */
+  test('focusRange lands through setBaseAndExtent when addRange is refused', () => {
+    const outer = document.createElement('div');
+    document.body.append(outer);
+    const shadow = outer.attachShadow({ mode: 'open' });
+    const mountPoint = document.createElement('div');
+    shadow.append(mountPoint);
+    const editor = createEditor({
+      element: mountPoint,
+      doc: { blocks: [{ id: 'p', type: 'paragraph', depth: 0, content: [{ text: 'Alpha one' }] }] },
+    });
+    editors.push(editor);
+    Object.defineProperty(shadow, 'getSelection', { value: undefined, configurable: true });
+
+    const real = window.getSelection()!;
+    const refused = vi.spyOn(real, 'addRange').mockImplementation(() => {});
+
+    try {
+      expect(editor.focusRange('p', 2, 5)).toBe(true);
+      const range = real.rangeCount > 0 ? real.getRangeAt(0) : null;
+      expect(range?.startOffset).toBe(2);
+      expect(range?.endOffset).toBe(5);
+    } finally {
+      refused.mockRestore();
+    }
   });
 });
