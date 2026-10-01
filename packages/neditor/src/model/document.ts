@@ -1266,12 +1266,6 @@ interface RunContext {
   before?: string;
   /** The character after it, or '' at the end. */
   after?: string;
-  /**
-   * One span per line: a heading is a single line in every other reader, so a
-   * span written whole across a break there split its delimiters between the
-   * heading and the paragraph after it. The break's own mark is the price.
-   */
-  splitLines?: boolean;
   /** Write HTML tags whatever the text: the run's delimiters would merge with a neighbour's. */
   tagged?: boolean;
   /** The run is a piece already cut to length, or one that cannot be cut: do not split it. */
@@ -1318,25 +1312,6 @@ function flanks(text: string, before: string, after: string): boolean {
  * not right-flanking.) A link's text holds the whitespace as it is.
  */
 function runToMarkdown(run: TextRun, context: RunContext = {}): string {
-  if (context.splitLines && run.text.includes('\n')) {
-    const lines = run.text.split('\n');
-
-    // Each line meets the run's own neighbour at the run's edge and the break
-    // everywhere else, and only the first can touch the run before it.
-    return lines
-      .map((line, index) =>
-        runToMarkdown(
-          { ...run, text: line },
-          {
-            before: index === 0 ? context.before : '',
-            after: index === lines.length - 1 ? context.after : '',
-            tagged: index === 0 && context.tagged,
-          },
-        ),
-      )
-      .join('\\\n');
-  }
-
   const escaped = escapeMarkdownText(run.text);
   const marks = new Set(run.marks ?? []);
 
@@ -1419,6 +1394,16 @@ function runToMarkdown(run: TextRun, context: RunContext = {}): string {
   return pieces.join('');
 }
 
+/**
+ * The line breaks of a block that must stay on one line -- a heading, a table
+ * cell -- as `<br>`, which every reader renders as a break and this one reads
+ * back as one. The single backslash in front of a newline is always the
+ * break's own: a literal one is doubled.
+ */
+function oneLineBreaks(markdown: string): string {
+  return markdown.replaceAll('\\\n', '<br>');
+}
+
 /** A GFM table. Row 0 is the header, which the delimiter row follows. */
 function tableToMarkdown(block: Block, indent: string): string {
   const rows = block.rows ?? [];
@@ -1426,8 +1411,14 @@ function tableToMarkdown(block: Block, indent: string): string {
 
   // A literal pipe would end the cell, so it has to be escaped.
   // Cells are trimmed on the way back, so their edge whitespace is protected too.
+  // A GFM row is one line, so a break inside a cell is `<br>`, which is how GFM
+  // tables spell one: written as `\` + newline it split the row in every other
+  // reader. The one backslash before a newline is always the break's own (a
+  // literal one is doubled), so it is that backslash that goes.
+  const cellToMarkdown = (cell: readonly TextRun[]): string =>
+    oneLineBreaks(protectEdgeWhitespace(richToMarkdown(cell)));
   const line = (cells: readonly RichText[]): string =>
-    `${indent}| ${cells.map((cell) => protectEdgeWhitespace(richToMarkdown(cell))).join(' | ')} |`;
+    `${indent}| ${cells.map(cellToMarkdown).join(' | ')} |`;
 
   const divider = `${indent}| ${Array.from({ length: columns }, () => '---').join(' | ')} |`;
   const [header, ...body] = rows;
@@ -1493,17 +1484,13 @@ function innerEdge(run: TextRun | undefined, side: 'first' | 'last'): string {
     : ((side === 'first' ? run.text[0] : run.text.at(-1)) ?? '');
 }
 
-export function richToMarkdown(
-  content: readonly TextRun[],
-  options: { splitLines?: boolean } = {},
-): string {
+export function richToMarkdown(content: readonly TextRun[]): string {
   // A carriage return is a line break to every reader, this one included:
   // written raw it split the block in two, and took a table apart row by row.
   // It is written as the break it is read as.
   if (content.some((run) => run.text.includes('\r'))) {
     return richToMarkdown(
       content.map((run) => ({ ...run, text: run.text.replace(/\r\n?/g, '\n') })),
-      options,
     );
   }
 
@@ -1511,7 +1498,6 @@ export function richToMarkdown(
   const contextAt = (index: number): RunContext => ({
     before: content[index - 1]?.text.at(-1) ?? '',
     after: content[index + 1]?.text[0] ?? '',
-    splitLines: options.splitLines,
   });
   // Each run is written once here and looked at twice: as the run after the
   // one being decided, and then as that run itself.
@@ -1574,21 +1560,33 @@ export function richToMarkdown(
 /** Serializes the document to Markdown. Useful for copy/paste and export. */
 export function toMarkdown(doc: NEditorDocument): string {
   const numbers = computeListNumbers(doc.blocks);
+  // Where the children of the latest block at each depth start. A child sits
+  // at its parent's content column: two spaces in for most parents, but past
+  // `1. ` -- three, or four for `10. ` -- under a numbered item, where at two
+  // every other reader ended the list and left the child outside it.
+  const columns: number[] = [];
 
   return doc.blocks
     .map((block) => {
-      const indent = '  '.repeat(block.depth);
+      let column = 0;
+
+      for (let level = 0; level < block.depth; level += 1) {
+        column = columns[level] ?? column + 2;
+      }
+
+      columns.length = block.depth;
+      columns[block.depth] =
+        column +
+        (block.type === 'numbered_list' ? String(numbers.get(block.id) ?? 1).length + 2 : 2);
+
+      const indent = ' '.repeat(column);
       // A code block is literal: its text must not be re-escaped as Markdown.
       const text =
         block.type === 'code'
           ? // Its carriage returns are line breaks too. One left at the end
             // joined the newline before the closing fence into a single CRLF.
             blockText(block).replace(/\r\n?/g, '\n')
-          : protectEdgeWhitespace(
-              escapeContinuations(
-                richToMarkdown(block.content, { splitLines: block.type.startsWith('heading') }),
-              ),
-            );
+          : protectEdgeWhitespace(escapeContinuations(richToMarkdown(block.content)));
       // An empty block is a bare marker. The space after it is what makes the
       // marker readable, not what makes it a marker, and trailing whitespace
       // does not survive the trip back — ours trims it, and so does every other
@@ -1603,12 +1601,18 @@ export function toMarkdown(doc: NEditorDocument): string {
         // `> # x` a heading), so their text is escaped the same way below.
         case 'paragraph':
           return `${indent}${escapeLeadingMarker(text)}`;
+        // An ATX heading is one line in every reader, so a break inside one is
+        // `<br>`, which they all render as one -- written as `\` + newline it
+        // ended the heading there, and a span across it left its delimiters on
+        // both sides. (Splitting each span at the break kept the delimiters
+        // whole but lost the break's own mark, and other readers still showed
+        // the backslash and a paragraph.)
         case 'heading1':
-          return marked('#', escapeClosingSequence(text));
+          return marked('#', escapeClosingSequence(oneLineBreaks(text)));
         case 'heading2':
-          return marked('##', escapeClosingSequence(text));
+          return marked('##', escapeClosingSequence(oneLineBreaks(text)));
         case 'heading3':
-          return marked('###', escapeClosingSequence(text));
+          return marked('###', escapeClosingSequence(oneLineBreaks(text)));
         // A bullet is the one block whose text can still be misread, because a
         // toggle is written as a bullet led by a triangle. Escaped here and
         // nowhere else: `\▾` is not an escape any CommonMark reader honours,
@@ -1625,8 +1629,10 @@ export function toMarkdown(doc: NEditorDocument): string {
           return marked(`${numbers.get(block.id) ?? 1}.`, escapeLeadingMarker(text));
         case 'todo':
           return marked(`- [${block.checked ? 'x' : ' '}]`);
+        // A quote whose text opens with a link labelled `!…` would read as a
+        // callout's `[!icon]`; the `!` is escaped inside the label.
         case 'quote':
-          return marked('>', escapeLeadingMarker(text));
+          return marked('>', escapeLeadingMarker(text).replace(/^\[!/, '[\\!'));
         // The icon is bracketed rather than merely leading, so a quote that
         // starts with an emoji stays a quote and an icon that is not an emoji
         // still names a callout. `[` is escaped in text, so the two can never
@@ -1639,7 +1645,18 @@ export function toMarkdown(doc: NEditorDocument): string {
         case 'code': {
           const fence = fenceFor(text);
 
-          return `${indent}${fence}\n${text}\n${indent}${fence}`;
+          // The body is indented as far as the fence. Under a list item, a
+          // line at the margin ends the item in every other reader, which then
+          // saw an empty code block and the body as a paragraph outside the
+          // list. The reader strips up to the fence's indentation again.
+          const body = indent
+            ? text
+                .split('\n')
+                .map((line) => (line === '' ? line : `${indent}${line}`))
+                .join('\n')
+            : text;
+
+          return `${indent}${fence}\n${body}\n${indent}${fence}`;
         }
         // The caption follows after a hard break: every other reader shows the
         // picture with the caption beneath it, and this one reads it back.

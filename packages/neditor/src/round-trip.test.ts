@@ -494,16 +494,12 @@ describe('audit 3', () => {
     },
   );
 
-  // An ATX heading is one line in every other reader, so a span written whole
-  // across a break there split its delimiters between heading and paragraph.
-  test('a heading writes each line of a formatted run as its own span', () => {
+  // An ATX heading is one line in every other reader, so a break inside one
+  // is `<br>`: the span stays whole, and the break keeps its mark.
+  test('a heading writes a break inside a formatted run as <br>', () => {
     const blocks = [b({ type: 'heading1', content: t('Title\nsub', { marks: ['bold'] }) })];
-    expect(toMarkdown({ blocks })).toBe('# **Title**\\\n**sub**');
-    const back = throughMarkdown(blocks)[0]!;
-    expect(back.content.filter((run) => run.text !== '\n')).toEqual([
-      { text: 'Title', marks: ['bold'] },
-      { text: 'sub', marks: ['bold'] },
-    ]);
+    expect(toMarkdown({ blocks })).toBe('# **Title<br>sub**');
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
   });
 
   test('a named entity in the text is escaped, and comes back as typed', () => {
@@ -688,22 +684,22 @@ describe('audit 4', () => {
     expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
   });
 
-  // A heading writes one span per line, and each line's delimiters meet the
-  // same neighbours a paragraph's would.
+  // A heading's break is `<br>`, inside the span, and the span's delimiters
+  // meet the same neighbours a paragraph's would. Each comes back exactly.
   test.each([
-    [[{ text: 'a' }, { text: '(x)\ny', marks: ['bold'] }], '# a<strong>(x)</strong>\\\n**y**'],
-    [[{ text: 'y\n(x)', marks: ['bold'] }, { text: 'a' }], '# **y**\\\n<strong>(x)</strong>a'],
+    [[{ text: 'a' }, { text: '(x)\ny', marks: ['bold'] }], '# a<strong>(x)<br>y</strong>'],
+    [[{ text: 'y\n(x)', marks: ['bold'] }, { text: 'a' }], '# <strong>y<br>(x)</strong>a'],
     [
       [
         { text: '(', marks: ['bold'] },
         { text: '(\nx', marks: ['bold', 'code'] },
       ],
-      '# **(**<strong><code>(</code></strong>\\\n**`x`**',
+      '# **(**<strong><code>(<br>x</code></strong>',
     ],
   ] as const)('heading %j is written %s', (content, markdown) => {
-    expect(toMarkdown({ blocks: [b({ type: 'heading1', content: content as never })] })).toBe(
-      markdown,
-    );
+    const blocks = [b({ type: 'heading1', content: content as never })];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
   });
 
   // GFM: `~~` follows the same flanking rule, and against `**` it touches
@@ -1210,12 +1206,10 @@ describe('audit 17', () => {
 });
 
 describe('audit 19', () => {
-  // The carriage-return rewrite must carry the block's options with it: a
-  // heading writes one span per line, and written across the break the span's
-  // delimiters are left on both sides of it in every other reader.
-  test('a carriage return in a heading still splits the span per line', () => {
+  // A carriage return in a heading is a break like any other: `<br>`.
+  test('a carriage return in a heading is written as a break', () => {
     const blocks = [b({ type: 'heading1', content: [{ text: 'a\rb', marks: ['bold'] }] })];
-    expect(toMarkdown({ blocks })).toBe('# **a**\\\n**b**');
+    expect(toMarkdown({ blocks })).toBe('# **a<br>b**');
   });
 
   // The two bounds of an open destination, which is what keeps an unclosed
@@ -1386,5 +1380,190 @@ describe('audit 21', () => {
     const blocks = [b({ type: 'bulleted_list', content: t('press \u25BE now') })];
     expect(toMarkdown({ blocks })).toBe('- press \u25BE now');
     expect(throughMarkdown(blocks)[0]?.content).toEqual(t('press \u25BE now'));
+  });
+});
+
+describe('open items', () => {
+  const shape = (blocks: Block[]) =>
+    blocks.map(({ type, depth, content }) => ({ type, depth, content }));
+
+  // A code block under a list item: its body has to be indented as far as
+  // its fence, or every other reader ends the item at the first body line.
+  test.each([
+    [1, 'a\nb', '- p\n\n  ```\n  a\n  b\n  ```'],
+    [1, '  x\ny', '- p\n\n  ```\n    x\n  y\n  ```'],
+    [1, 'a\n\nb', '- p\n\n  ```\n  a\n\n  b\n  ```'],
+  ] as const)('a code block at depth %i holding %j is written %j', (depth, code, markdown) => {
+    const blocks = [
+      b({ type: 'bulleted_list', content: t('p') }),
+      b({ type: 'code', depth, content: t(code) }),
+    ];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    expect(shape(throughMarkdown(blocks))).toEqual(shape(start(blocks)));
+  });
+
+  test('two levels down, under nested bullets', () => {
+    const blocks = [
+      b({ type: 'bulleted_list', content: t('p') }),
+      b({ type: 'bulleted_list', depth: 1, content: t('q') }),
+      b({ type: 'code', depth: 2, content: t('a\n  b') }),
+    ];
+    expect(toMarkdown({ blocks })).toBe('- p\n\n  - q\n\n    ```\n    a\n      b\n    ```');
+    expect(shape(throughMarkdown(blocks))).toEqual(shape(start(blocks)));
+  });
+
+  // What older versions wrote -- the body at the margin -- still reads back.
+  test('a nested code block with an unindented body still reads', () => {
+    const back = blocksFromMarkdown('- p\n\n  ```\na\n  b\n  ```');
+    expect(back[1]?.type).toBe('code');
+    expect(back[1]?.content).toEqual(t('a\n  b'));
+    expect(back[1]?.depth).toBe(1);
+  });
+
+  // GFM table rows are single lines: a break written as `\` + newline inside a
+  // cell split the row. `<br>` is how GFM tables spell one.
+  test.each([
+    ['a\nb', '| a<br>b | c |'],
+    ['a\\\nb', '| a\\\\<br>b | c |'],
+    ['x <br> y', '| x \\<br\\> y | c |'],
+  ])('a cell holding %j is written in its row as %j', (text, row) => {
+    const blocks = [
+      b({
+        type: 'table',
+        rows: [
+          [[{ text }], [{ text: 'c' }]],
+          [[{ text: '1' }], [{ text: '2' }]],
+        ] as never,
+      }),
+    ];
+    expect(toMarkdown({ blocks }).split('\n')[0]).toBe(row);
+    expect(throughMarkdown(blocks)[0]?.rows).toEqual(start(blocks)[0]?.rows);
+  });
+
+  test('a marked run across a break in a cell keeps its mark', () => {
+    const blocks = [
+      b({
+        type: 'table',
+        rows: [
+          [
+            [{ text: 'a\nb', marks: ['bold'] }],
+            [{ text: 'k', marks: ['code'] }, { text: '\n' }, { text: 'm', marks: ['code'] }],
+          ],
+          [[{ text: 'x\ny', marks: ['code'] }], [{ text: '2' }]],
+        ] as never,
+      }),
+    ];
+    expect(throughMarkdown(blocks)[0]?.rows).toEqual(start(blocks)[0]?.rows);
+  });
+
+  test('a <br> in a foreign table cell is a line break', () => {
+    expect(blocksFromMarkdown('| a<br>b | c<br/>d |\n| --- | --- |')[0]?.rows?.[0]).toEqual([
+      t('a\nb'),
+      t('c\nd'),
+    ]);
+  });
+
+  // An escaped one is text: only a `<` behind an even run of backslashes counts.
+  test('an escaped <br> in a cell is text', () => {
+    expect(blocksFromMarkdown('| a\\<br>b | c\\\\<br>d |\n| --- | --- |')[0]?.rows?.[0]).toEqual([
+      t('a<br>b'),
+      t('c\\\nd'),
+    ]);
+  });
+
+  // A quote opening with a link whose text starts with `!` was read back as a
+  // callout with an icon cut out of the link.
+  test('a quote opening with a link that starts with "!" stays a quote', () => {
+    const blocks = [b({ type: 'quote', content: [{ text: '!a] b', link: '/u' }, { text: ' c' }] })];
+    expect(toMarkdown({ blocks })).toBe('> [\\!a\\] b](/u) c');
+    const back = throughMarkdown(blocks)[0];
+    expect(back?.type).toBe('quote');
+    expect(back?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  test('a cell full of backslashes is read in linear time', () => {
+    expect(
+      growth((size) => {
+        blocksFromMarkdown(`| ${'\\'.repeat(size)}a | b |\n| --- | --- |`);
+      }, 4000),
+    ).toBeLessThan(LINEAR);
+  });
+
+  // A numbered item's content starts after `1. `, so its children are
+  // indented that far: at two spaces every other reader ended the list there.
+  test('a block nested under a numbered item is indented to its content', () => {
+    const blocks = [
+      b({ type: 'numbered_list', content: t('p') }),
+      b({ type: 'paragraph', depth: 1, content: t('q') }),
+      b({ type: 'code', depth: 1, content: t('a\nb') }),
+      b({ type: 'bulleted_list', depth: 1, content: t('r') }),
+      b({ type: 'paragraph', depth: 2, content: t('s') }),
+    ];
+    expect(toMarkdown({ blocks })).toBe(
+      '1. p\n\n   q\n\n   ```\n   a\n   b\n   ```\n\n   - r\n\n     s',
+    );
+    expect(shape(throughMarkdown(blocks))).toEqual(shape(start(blocks)));
+  });
+
+  test('and under a two-digit number, four spaces', () => {
+    const blocks = [
+      ...Array.from({ length: 10 }, (_, index) =>
+        b({ type: 'numbered_list', content: t(`n${index}`) }),
+      ),
+      b({ type: 'paragraph', depth: 1, content: t('child') }),
+    ];
+    expect(toMarkdown({ blocks }).endsWith('10. n9\n\n    child')).toBe(true);
+    expect(shape(throughMarkdown(blocks))).toEqual(shape(start(blocks)));
+  });
+
+  // What older versions wrote -- two spaces a level, whatever the parent --
+  // still reads at the same depths.
+  test.each([
+    ['1. p\n\n  q', [0, 1]],
+    ['- a\n\n  - b\n\n    c', [0, 1, 2]],
+    ['- a\n\n - b', [0, 0]],
+    ['- a\n\n   - b\n\n  c', [0, 1, 1]],
+  ])('%j reads at depths %j', (markdown, depths) => {
+    expect(blocksFromMarkdown(markdown).map((block) => block.depth)).toEqual(depths);
+  });
+
+  // CommonMark admits balanced parentheses in a plain destination, which is
+  // how Wikipedia's URLs are pasted: the link used to end at the first `)`.
+  test.each([
+    [
+      '[wiki](https://en.wikipedia.org/wiki/Foo_(bar))',
+      [{ text: 'wiki', link: 'https://en.wikipedia.org/wiki/Foo_(bar)' }],
+    ],
+    ['[a](https://a.test/x_(b_(c)))', [{ text: 'a', link: 'https://a.test/x_(b_(c))' }]],
+    // Unbalanced, it is no destination at all, as in CommonMark.
+    ['[a](https://a.test/(b)', [{ text: '[a](https://a.test/(b)' }]],
+    // Parentheses around a link are prose.
+    ['(see [a](/b))', [{ text: '(see ' }, { text: 'a', link: '/b' }, { text: ')' }]],
+    ['[a](/b)(c)', [{ text: 'a', link: '/b' }, { text: '(c)' }]],
+    [
+      '[a](/b)[c](/d)',
+      [
+        { text: 'a', link: '/b' },
+        { text: 'c', link: '/d' },
+      ],
+    ],
+    // And nothing closes inside the destination while a paren is open.
+    ['[a](/p_(x_y)_z)', [{ text: 'a', link: '/p_(x_y)_z' }]],
+  ])('%s is read as %j', (markdown, content) => {
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual(content);
+  });
+
+  test('an image line with balanced parentheses in its source is an image', () => {
+    const block = blocksFromMarkdown('![cat](https://a.test/c_(1).png)')[0];
+    expect(block?.type).toBe('image');
+    expect(block?.src).toBe('https://a.test/c_(1).png');
+  });
+
+  test('a line of links and parentheses parses in linear time', () => {
+    expect(
+      growth((size) => {
+        blocksFromMarkdown('[a](b)(c)'.repeat(size));
+      }, 200),
+    ).toBeLessThan(LINEAR);
   });
 });

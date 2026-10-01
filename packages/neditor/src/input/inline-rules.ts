@@ -84,7 +84,10 @@ const INLINE_RULES: readonly InlineRule[] = [
   // Never one that opens with `<`: that is the form above, not yet closed. Its
   // destination may hold a `)`, and this rule fired at it --
   // `[x](<mailto:a@b.test?s=(v2)>)` linked to `https://%3Cmailto:a@b.test/…`.
-  { closer: ')', pattern: /\[([^\]]+)\]\(([^)\s<][^)\s]*)\)$/, isLink: true },
+  // It may hold balanced parentheses, as CommonMark allows: Wikipedia's
+  // `…/Foo_(bar)` ended at the first `)`. `linkOpener` finds the `](` whose
+  // `(` the closing one balances, so the pattern only has to match from there.
+  { closer: ')', pattern: /^\[([^\]]+)\]\(([^\s<][^\s]*)\)$/, isLink: true },
 ];
 
 /**
@@ -124,12 +127,47 @@ export const BARE_URL_START = /https?:\/\/|www\./i;
  * destination from prose needs the `>)` that has not been typed yet; the
  * reader could look ahead and typing cannot, and the two are kept identical.
  */
+/** `\s`, by character code: the scans below ask it of every character they pass. */
+function isSpace(code: number): boolean {
+  return (
+    code === 32 || (code >= 9 && code <= 13) || (code > 127 && /\s/.test(String.fromCharCode(code)))
+  );
+}
+
 function inOpenDestination(window: string): boolean {
   const at = window.lastIndexOf('](');
 
-  // The plain alternative is the link rule's own: no `<` to open it, any after.
-  // Forbidding `<` throughout let a span close in `/p?a<b&q=*x*`.
-  return at !== -1 && /^\]\((?:<[^<>\s]*|(?:[^)\s<][^)\s]*)?)$/.test(window.slice(at));
+  if (at === -1) {
+    return false;
+  }
+
+  const tail = window.slice(at + 2);
+
+  if (tail.startsWith('<')) {
+    return /^<[^<>\s]*$/.test(tail);
+  }
+
+  // The plain form is the link rule's own: no `<` to open it, any after, no
+  // whitespace, and parentheses that may nest -- it is still open until a `)`
+  // finds no `(` of its own to close. (Forbidding `<` throughout let a span
+  // close in `/p?a<b&q=*x*`.)
+  let depth = 0;
+
+  for (let at = 0; at < tail.length; at += 1) {
+    const code = tail.charCodeAt(at);
+
+    if (isSpace(code)) {
+      return false;
+    }
+
+    if (code === 40) {
+      depth += 1;
+    } else if (code === 41 && depth-- === 0) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 export interface InlineRuleMatch {
@@ -175,26 +213,33 @@ function linkOpener(window: string, angled: boolean): number {
     return pair === -1 ? -1 : window.lastIndexOf('[', pair);
   }
 
-  // The destination admits neither `)` nor whitespace, so whichever comes first
-  // going back from the closing `)` bounds how far the whole `](…)` can reach.
-  let stop = window.length - 2;
-
-  while (stop >= 0 && !/[)\s]/.test(window[stop] ?? '')) {
-    stop -= 1;
+  // The destination holds no whitespace, and its parentheses balance, so the
+  // `(` that opens it is the first one going back from the closing `)` that
+  // nothing inside closes. Its `]` and the `[` before that are the label's.
+  // With no `](` behind the caret there is nothing to find, and the walk below
+  // is the cost of every `)`: a line of them paid it in full each time.
+  if (window.lastIndexOf('](') === -1) {
+    return -1;
   }
 
-  // Within that reach the label opens at the first `](` that HAS a `[` before
-  // it. Taking the first one unconditionally gave up on the whole rule when a
-  // stray `](` preceded a real link, because that one opens nothing — so
-  // `a] (b) [see](https://x.test/)` lost its link entirely.
-  for (let pair = window.indexOf('](', stop + 1); pair !== -1 && pair < window.length - 1;) {
-    const opener = window.lastIndexOf('[', pair);
+  let depth = 0;
 
-    if (opener !== -1) {
-      return opener;
+  for (let at = window.length - 2; at >= 0; at -= 1) {
+    const code = window.charCodeAt(at);
+
+    if (isSpace(code)) {
+      return -1;
     }
 
-    pair = window.indexOf('](', pair + 2);
+    if (code === 41) {
+      depth += 1;
+    } else if (code === 40) {
+      if (depth === 0) {
+        return window.charCodeAt(at - 1) === 93 ? window.lastIndexOf('[', at - 1) : -1;
+      }
+
+      depth -= 1;
+    }
   }
 
   return -1;
