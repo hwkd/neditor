@@ -19,24 +19,33 @@ that changes what you store or what other applications receive is listed first.
   - A code run that needs escaping or holds a line break is written as
     `<code>…</code>`: other readers showed the backslashes of `` `snake\_case` ``.
   - A formatted run or link containing a line break is written as one span,
-    not one per line -- except in a heading, which every other reader ends at
-    the line, so there each line is its own span and a mark on the break itself
-    is not kept. (A line break in a heading has no Markdown spelling: other
-    readers show the `\` and start a paragraph on the next line.)
+    not one per line.
+  - A line break in a heading or a table cell is written `<br>`, which every
+    reader renders as a break; neither may span lines, and as `\` + newline
+    it ended the heading (or split the table row) in every other reader. It is
+    read back as a line break; the old spelling still reads.
+  - A block nested under a numbered item is indented to the item's content
+    column (three spaces under `1. `, four under `10. `), and a nested code
+    block's body is indented as far as its fence. Other readers ended the list
+    at the first line that fell short. Markdown from earlier versions reads at
+    the same depths; a nested code block from them whose every line starts with
+    at least its fence's indentation now loses that much, as it does in
+    CommonMark.
   - A formatted run is also written as HTML where CommonMark's flanking rule
     would leave `**` or `*` literal: against punctuation with a letter on the
     far side (`word<strong>(x)</strong>`), around a code span next to a letter,
     `~~` around `**` next to a letter, and where two runs' delimiters would
     touch between punctuation (or as `***a****b*`, which micromark misreads,
     or `*a****b*****c**`, which CommonMark's rule of three leaves literal).
-  - A `_` between two letters or digits inside a bare URL is written bare
-    (`https://a.test/x_y`): GFM links a bare URL and took the escape's
-    backslash into it. Anything else this writer puts directly against a bare
-    URL is still taken into the link by GFM readers: the backslash of a line
-    break made with `Shift`+`Enter` straight after a URL (the commonest case),
-    another escaped character (`https://a.test/~x`), and the `&#32;` for a
-    trailing space when a block ends with a URL. CommonMark readers are
-    unaffected.
+  - A bare `http://` or `https://` URL is written as an autolink,
+    `<https://a.test/x_y>`. GFM links a bare URL up to the next space and took
+    in whatever this writer put against it: an escape's backslash
+    (`https://a.test/\~x`), a line break's, the `&#32;` of a trailing space.
+    GFM's trailing punctuation stays outside the autolink. A URL holding `*`, a
+    backtick, a bracket or `~~` (or `~` in struck text) keeps the escaped
+    spelling, as does a `www.` URL, where a `_` between two letters or digits
+    is written bare; GFM readers still link those with the backslashes in.
+    CommonMark readers render the autolink as a link where they showed text.
   - A formatted run written as HTML that ends a block with a line break keeps
     the break (and anything after it) inside the tag as `&#10;`; the closing tag alone on a line ended
     a list item early in micromark.
@@ -147,3 +156,15 @@ that changes what you store or what other applications receive is listed first.
   break, so the block came back split, and a table came back as paragraphs. It
   is written as the line break it is read as -- in a code block too, where one
   ending the text used to take the last line break with it.
+- Markdown reader: `<https://…>` (an autolink) is read, and typed, as the
+  plain URL it holds, where it stayed text with its brackets; nothing closes
+  inside one. A plain link or image destination may hold balanced
+  parentheses, so a pasted `[wiki](https://en.wikipedia.org/wiki/Foo_(bar))`
+  links to the whole URL instead of ending at the first `)`.
+- A quote whose text opens with a link labelled `!…` was read back as a
+  callout.
+- A long line with no finished span (160 KB of `a) `: 1.3 s) was quadratic to
+  parse.
+- HTML clipboard: a to-do whose text started with whitespace, or was only a
+  line break, lost it; an empty list item with a list nested under it was
+  dropped; and a list item holding only whitespace came back empty.

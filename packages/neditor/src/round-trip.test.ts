@@ -1676,4 +1676,35 @@ describe('open items', () => {
     expect(toMarkdown({ blocks })).toBe('~~https://a.test/\\~x~~');
     expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
   });
+
+  // Through the HTML clipboard. A to-do is written `☐ ` and its text; the
+  // reader stripped the box and every space after it, so a to-do whose text
+  // starts with whitespace, or is only a line break, lost it.
+  test.each(['\tx', '  3.', '\n', ' a'])(
+    'a to-do holding %j survives the HTML clipboard',
+    (text) => {
+      const blocks = [b({ type: 'todo', checked: true, content: t(text) })];
+      expect(throughHtml(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+    },
+  );
+
+  // In a list this editor wrote, an empty item is a block. Another editor's
+  // HTML may use one only to hold a nested list, which is why foreign ones go.
+  test.each(['bulleted_list', 'numbered_list', 'todo'] as const)(
+    'an empty %s with a nested item survives the HTML clipboard',
+    (type) => {
+      const blocks = [b({ type, content: [] }), b({ type, depth: 1, content: t('child') })];
+      expect(shape(throughHtml(blocks))).toEqual(shape(start(blocks)));
+    },
+  );
+
+  // Text that is only whitespace, ahead of a nested list, reads as the HTML's
+  // own formatting: the writer puts it in a span so it reads as text.
+  test.each([' ', '\t\n  '])('a list item holding only %j survives the HTML clipboard', (text) => {
+    const blocks = [
+      b({ type: 'bulleted_list', content: t(text) }),
+      b({ type: 'bulleted_list', depth: 1, content: t('child') }),
+    ];
+    expect(shape(throughHtml(blocks))).toEqual(shape(start(blocks)));
+  });
 });

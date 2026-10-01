@@ -260,6 +260,11 @@ broader than what GFM links, on purpose: underscores kept where another reader w
 emphasised cost nothing, and underscores taken out of a URL do. A span may cross a line break made with `Shift`+`Enter`, as it may
 in CommonMark, but an emphasis delimiter (`*`, `_`, `~`) cannot sit against the break.
 
+An autolink, `<https://…>`, becomes the plain URL it holds when its `>` is typed, as
+the writer spells a bare URL that way; nothing closes inside one while it is open. A
+plain link destination may hold balanced parentheses, as CommonMark allows
+(`[wiki](https://en.wikipedia.org/wiki/Foo_(bar))`).
+
 ### Block Markdown
 
 Typing these at the start of a paragraph converts the block:
@@ -674,6 +679,23 @@ writes is what `blocksFromMarkdown` reads back:
 - A code fence is one backtick longer than the longest run inside the block, so
   a snippet that itself contains ` ``` ` comes back as one code block rather
   than three.
+- A nested block is indented to its parent's content column: two spaces under
+  a bullet, three under `1. `, four under `10. `. A nested code block's body is
+  indented as far as its fence, which the reader strips again. (Nesting under a
+  quote, a callout or a paragraph has no CommonMark spelling: other readers
+  read those children as top-level blocks, or past two levels as indented
+  code; this reader reads them at their depth.)
+- A line break inside a heading or a table cell is written `<br>`, which every
+  reader renders as one, since neither may span lines. Markdown written by
+  earlier versions (`\` + newline in a heading) still reads back.
+- A bare `http://` or `https://` URL is written as an autolink, `<https://…>`,
+  because GFM links a bare URL up to the next space and took in whatever was
+  written against it -- an escape's backslash, a line break's, a trailing
+  space's reference. GFM's trailing punctuation stays outside it. A URL
+  holding `*`, a backtick, a bracket or `~~` (or a `~` in struck text) keeps
+  the escaped spelling, because an autolink's text is plain once it closes;
+  so does a `www.` URL, which has no autolink spelling. GFM readers still link
+  those with the backslashes in.
 - A link or image destination holding a paren, a space or an angle bracket is
   written in the `<…>` form, where a paren needs no escape. In either form a
   backslash is doubled and a `|`, a backtick, the `]` of a `](` and an `&` that
@@ -700,7 +722,8 @@ writes is what `blocksFromMarkdown` reads back:
   (one that escapes raw HTML, as markdown-it does by default, shows the tags). Link text holds the
   whitespace as it is.
 - A formatted run or a link that contains a line break is written whole
-  (`**one\` + newline + `two**`) and read back whole, as CommonMark allows.
+  (`**one\` + newline + `two**`) and read back whole, as CommonMark allows --
+  in a heading or a table cell too, with the break as `<br>`.
 - CommonMark shows a backtick code span's content literally, backslashes
   included, so a code run that needs any escaping (`snake_case`, `a<b`) or holds
   a line break is written as `<code>…</code>`, where escapes are honoured.
