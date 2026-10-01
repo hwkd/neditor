@@ -556,6 +556,10 @@ describe('typing a line and pasting it give the same result', () => {
     'see https://a.test/_y_ and _z_',
     '_a https://a.test/x_y',
     'www.a.test/__init__ __b__',
+    // An autolink is read as the URL it holds, typed or pasted.
+    'see <https://a.test/x_y> and *z*',
+    '<https://a.test/*x*>',
+    '[a](<https://a.test/x>)',
   ])('%s', async (line) => {
     const { parseInlineMarkdown } = await import('./index.ts');
     const editor = mount([block({})]);

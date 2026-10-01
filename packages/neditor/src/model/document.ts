@@ -967,10 +967,114 @@ function escapeMarkdownText(text: string): string {
 const ASCII_WORD = /[A-Za-z0-9]/;
 
 /**
+ * An absolute http(s) URL up to the first character an autolink cannot hold --
+ * or a backslash: CommonMark takes an autolink's text as it stands, but this
+ * reader resolves escapes before it looks for one, so `<http://a/c\>` never
+ * closed. The backslash is written escaped after the `>` instead. And a `|`,
+ * which inside one would still end a table cell.
+ */
+const AUTOLINKABLE = /https?:\/\/[^\s<>\\|]*/gi;
+
+/**
+ * What an autolink's text may not hold: it is plain text once the autolink
+ * closes, so a delimiter or a bracket in it could pair with one written after
+ * it -- `<https://a.test/*x>*y*` italicised the `x` out of the URL. Such a
+ * URL keeps the escaped spelling, which other readers link with the
+ * backslashes in it; nothing else does. Inside a struck run a single `~` is
+ * one too: the run's own `~~` cannot close over a body holding a tilde.
+ */
+const UNSAFE_IN_AUTOLINK = /[*`[\]]|~~/;
+const UNSAFE_IN_STRUCK_AUTOLINK = /[*`[\]~]/;
+/** Punctuation GFM leaves out of the end of a bare URL it links. */
+const TRAILING_URL_PUNCTUATION = new Set(['?', '!', '.', ',', ':', '*', '_', '~']);
+
+/**
+ * Where GFM would end a bare URL that starts at `start` and runs to `end`.
+ *
+ * It leaves trailing punctuation out, a trailing `)` that nothing in the URL
+ * opened, and an `&…;` that looks like an entity reference. Walked back from
+ * the end, with the parentheses counted once.
+ */
+function gfmUrlEnd(text: string, start: number, end: number): number {
+  let opens = 0;
+  let closes = 0;
+
+  for (let at = start; at < end; at += 1) {
+    const code = text.charCodeAt(at);
+    opens += code === 40 ? 1 : 0;
+    closes += code === 41 ? 1 : 0;
+  }
+
+  for (;;) {
+    const char = text[end - 1] ?? '';
+
+    if (TRAILING_URL_PUNCTUATION.has(char)) {
+      end -= 1;
+    } else if (char === ')' && closes > opens) {
+      end -= 1;
+      closes -= 1;
+    } else if (char === ';') {
+      let at = end - 2;
+
+      while (at > start && /[A-Za-z0-9]/.test(text[at] ?? '')) {
+        at -= 1;
+      }
+
+      if (at < end - 2 && text[at] === '&') {
+        end = at;
+      } else {
+        return end;
+      }
+    } else {
+      return end;
+    }
+  }
+}
+
+/**
+ * Escapes a run's text, writing each bare http(s) URL in it as an autolink.
+ *
+ * GFM links a bare URL up to the next whitespace or `<`, so whatever this
+ * writer put directly against one went into the link: the backslash of an
+ * escape (`https://a.test/\~x`) or of a line break, and the `&#32;` that
+ * keeps a trailing space. Inside `<…>` nothing is escaped -- CommonMark takes
+ * an autolink's text as it stands -- and the `>` ends it for every reader.
+ * The reader takes `<https://…>` back as the plain text it holds. A `www.`
+ * URL has no autolink spelling and is escaped as before.
+ */
+function escapeWithAutolinks(text: string, struck = false): string {
+  if (!/https?:\/\//i.test(text)) {
+    return escapeMarkdownText(text);
+  }
+
+  let written = '';
+  let from = 0;
+
+  for (const match of text.matchAll(AUTOLINKABLE)) {
+    const start = match.index;
+    const end = gfmUrlEnd(text, start, start + match[0].length);
+
+    // A scheme with nothing after it links nowhere, in GFM or here.
+    const unsafe = struck ? UNSAFE_IN_STRUCK_AUTOLINK : UNSAFE_IN_AUTOLINK;
+
+    if (end - start <= match[0].indexOf('//') + 2 || unsafe.test(text.slice(start, end))) {
+      continue;
+    }
+
+    written += `${escapeMarkdownText(text.slice(from, start))}<${text.slice(start, end)}>`;
+    from = end;
+  }
+
+  return written + escapeMarkdownText(text.slice(from));
+}
+
+/**
  * The `[start, end)` spans of `text` that are bare URLs, in order.
  *
  * GFM links a bare URL and takes a backslash as part of it, so `x\\_y` there
- * linked to `x%5C_y` and showed the backslash. A `_` between two letters or
+ * linked to `x%5C_y` and showed the backslash. An http(s) URL is written as an
+ * autolink instead (`escapeWithAutolinks`), so this is for what is left: a
+ * `www.` URL, which has no autolink spelling. A `_` between two letters or
  * digits cannot open or close emphasis in CommonMark, and cannot open a span in
  * this reader either (its `_` rules refuse an opener after a word character),
  * so that one is written bare: every `_` that could open is still escaped, and
@@ -1312,8 +1416,15 @@ function flanks(text: string, before: string, after: string): boolean {
  * not right-flanking.) A link's text holds the whitespace as it is.
  */
 function runToMarkdown(run: TextRun, context: RunContext = {}): string {
-  const escaped = escapeMarkdownText(run.text);
   const marks = new Set(run.marks ?? []);
+  // Link text is not a bare URL: GFM autolinks nothing inside a link. A code
+  // run's text is not either, in a backtick span -- but one written as
+  // `<code>…</code>` is ordinary inline text to other readers, which autolink
+  // a URL in it like any other.
+  const escaped =
+    run.link === undefined
+      ? escapeWithAutolinks(run.text, marks.has('strikethrough'))
+      : escapeMarkdownText(run.text);
 
   if (escaped.length === 0 || (marks.size === 0 && !run.link)) {
     return escaped;
@@ -1335,7 +1446,9 @@ function runToMarkdown(run: TextRun, context: RunContext = {}): string {
   // `~~` outside `**` or `*` touches an asterisk, and GFM holds it to the same
   // rule: `a~~**x**~~b` is literal tildes.
   const stacked = marks.has('strikethrough') && (marks.has('bold') || marks.has('italic'));
-  const inner = marks.has('code') ? '`' : stacked ? '*' : run.text;
+  // And for any other run, what is written: an autolink's `<` is punctuation
+  // where the URL's first letter was not.
+  const inner = marks.has('code') ? '`' : stacked ? '*' : escaped;
   const flanking =
     !emphasis || run.link !== undefined || flanks(inner, context.before ?? '', context.after ?? '');
   const tagged = context.tagged || edged || !literalCode || !flanking;

@@ -788,16 +788,17 @@ describe('audit 5', () => {
   });
 
   // GFM links a bare URL and takes a backslash as part of it: `x\_y` linked to
-  // `x%5C_y` and showed the backslash. A `_` between two letters or digits is
-  // no delimiter in CommonMark, so inside a URL it is written bare -- and the
-  // reader, like GFM, takes no `_` inside a bare URL for a delimiter.
+  // `x%5C_y` and showed the backslash. An http(s) URL is written as an autolink,
+  // where nothing is escaped; a `www.` one has no autolink spelling, so a `_`
+  // between two letters or digits in it is written bare, which is no delimiter
+  // in CommonMark -- and the reader takes no `_` inside a bare URL for one.
   test.each([
-    ['see https://a.test/x_y now', 'see https://a.test/x_y now'],
+    ['see https://a.test/x_y now', 'see <https://a.test/x_y> now'],
     ['www.a.test/a_b_c', 'www.a.test/a_b_c'],
-    ['HTTPS://A.TEST/x_y and Www.a.test/x_y', 'HTTPS://A.TEST/x_y and Www.a.test/x_y'],
-    ['snake_case and https://a.test/x_y', 'snake\\_case and https://a.test/x_y'],
-    // Not between letters: still escaped, so CommonMark does not read emphasis.
-    ['https://a.test/_x_/', 'https://a.test/\\_x\\_/'],
+    ['HTTPS://A.TEST/x_y and Www.a.test/x_y', '<HTTPS://A.TEST/x_y> and Www.a.test/x_y'],
+    ['snake_case and https://a.test/x_y', 'snake\\_case and <https://a.test/x_y>'],
+    // Not between letters either: inside an autolink nothing is a delimiter.
+    ['https://a.test/_x_/', '<https://a.test/_x_/>'],
   ])('%j is written %j', (text, markdown) => {
     const blocks = [b({ content: t(text) })];
     expect(toMarkdown({ blocks })).toBe(markdown);
@@ -820,7 +821,7 @@ describe('audit 5', () => {
   // written as `&#32;` against a URL it is taken into the link by GFM.
   test('spaces before that break stay as they are', () => {
     const blocks = [b({ content: [{ text: 'see https://a.test/ \n', marks: ['bold'] }] })];
-    expect(toMarkdown({ blocks })).toBe('<strong>see https://a.test/ &#10;</strong>');
+    expect(toMarkdown({ blocks })).toBe('<strong>see <https://a.test/> &#10;</strong>');
     expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
   });
 
@@ -1243,8 +1244,8 @@ describe('audit 20', () => {
     ['paragraph', '1) x', '1\\) x'],
     ['paragraph', 'a\n1. x', 'a\\\n1\\. x'],
     // A `_` is left bare only between ASCII letters or digits, in a URL.
-    ['paragraph', 'https://a.test/x_1', 'https://a.test/x_1'],
-    ['paragraph', 'http://a.test/x_y', 'http://a.test/x_y'],
+    ['paragraph', 'https://a.test/x_1', '<https://a.test/x_1>'],
+    ['paragraph', 'http://a.test/x_y', '<http://a.test/x_y>'],
     ['paragraph', 'awww.a/a__b__c', 'awww.a/a\\_\\_b\\_\\_c'],
     ['paragraph', 'awww.é_b_é', 'awww.é\\_b\\_é'],
     // A closing sequence follows a tab as well as a space, at every level.
@@ -1565,5 +1566,114 @@ describe('open items', () => {
         blocksFromMarkdown('[a](b)(c)'.repeat(size));
       }, 200),
     ).toBeLessThan(LINEAR);
+  });
+
+  // GFM links a bare URL up to the next whitespace or `<`, so anything written
+  // against one went into the link: an escape's backslash, a line break's, the
+  // reference for a trailing space. A bare URL is written as an autolink,
+  // inside which nothing is escaped and against which nothing can join; GFM's
+  // trailing punctuation and unbalanced parentheses stay outside it.
+  test.each([
+    ['see https://a.test/~x now', 'see <https://a.test/~x> now'],
+    ['https://a.test/docs\nnext', '<https://a.test/docs>\\\nnext'],
+    ['see https://a.test ', 'see <https://a.test>&#32;'],
+    ['see https://a.test/x.', 'see <https://a.test/x>.'],
+    ['go (https://a.test/x)', 'go (<https://a.test/x>)'],
+    ['https://en.wikipedia.org/wiki/Foo_(bar)', '<https://en.wikipedia.org/wiki/Foo_(bar)>'],
+    ['https://a.test/x_y, then', '<https://a.test/x_y>, then'],
+    ['HTTPS://A.TEST/x~y', '<HTTPS://A.TEST/x~y>'],
+    // GFM leaves an entity-shaped `&…;` out of the end of the link too.
+    ['see https://a.test/x&amp;', 'see <https://a.test/x>\\&amp;'],
+    // A backslash ends it: this reader resolves escapes before autolinks.
+    ['http://a.b/c\\:', '<http://a.b/c>\\\\:'],
+    // A scheme with nothing after it links nowhere, and is left alone.
+    ['see http:// now', 'see http:// now'],
+    // A `www.` URL has no autolink spelling, and is left as it was.
+    ['www.a.test/x_y', 'www.a.test/x_y'],
+  ])('%j is written %j', (text, markdown) => {
+    const blocks = [b({ content: t(text) })];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(t(text));
+  });
+
+  test.each([
+    [[{ text: 'https://a.test/x_y', marks: ['bold'] }], '**<https://a.test/x_y>**'],
+    [
+      [{ text: 'a' }, { text: 'https://a.test/x', marks: ['bold'] }, { text: 'b' }],
+      'a<strong><https://a.test/x></strong>b',
+    ],
+    // Link text and code are not bare URLs.
+    [[{ text: 'https://a.test', link: 'https://a.test/' }], '[https://a.test](https://a.test/)'],
+    [[{ text: 'https://a.test/x', marks: ['code'] }], '`https://a.test/x`'],
+  ] as const)('%j is written %s', (content, markdown) => {
+    const blocks = [b({ content: content as never })];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  test.each([
+    ['<https://a.test/x_y>', [{ text: 'https://a.test/x_y' }]],
+    ['<https://a.test/*x*>', [{ text: 'https://a.test/*x*' }]],
+    ['a <https://a.test/x_y_> b', [{ text: 'a https://a.test/x_y_ b' }]],
+    // The angle form of a destination is not an autolink.
+    ['[a](<https://a.test/x>)', [{ text: 'a', link: 'https://a.test/x' }]],
+    // Whitespace ends an unclosed one, and what follows is prose.
+    ['<https://a.test/x *y*', [{ text: '<https://a.test/x ' }, { text: 'y', marks: ['italic'] }]],
+    // Only an absolute http(s) URL is one; `<u>` and the rest are tags.
+    ['<b>x', [{ text: '<b>x' }]],
+  ])('%j is read as %j', (markdown, content) => {
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual(content);
+  });
+
+  // Inside `<code>…</code>` GFM autolinks a URL as it does anywhere, so the
+  // escape after it went into the link; in a backtick span it does not.
+  test.each([
+    [[{ text: 'see http://a.b~x', marks: ['code'] }], '<code>see <http://a.b~x></code>'],
+    [[{ text: 'see http://a.b', marks: ['code'] }], '`see http://a.b`'],
+  ] as const)('code %j is written %s', (content, markdown) => {
+    const blocks = [b({ content: content as never })];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  // The `](<…>)` of a destination is a link's own spelling, not an autolink:
+  // taken for one, a URL holding an unbalanced `)` lost its link.
+  test('a link whose URL holds an unbalanced paren keeps its link', () => {
+    const blocks = [b({ content: [{ text: 'a', link: 'https://a.test/x)y' }] })];
+    expect(toMarkdown({ blocks })).toBe('[a](<https://a.test/x)y>)');
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  // An autolink's text is plain once it closes, so what follows can pair with
+  // it: a URL holding a delimiter or a bracket keeps the escaped spelling.
+  test.each([
+    [[{ text: 'https://a.test/*x' }, { text: 'y', marks: ['italic'] }], 'https://a.test/\\*x*y*'],
+    [[{ text: 'https://a.test/)![a](b' }, { text: ')' }], 'https://a.test/)!\\[a\\](b)'],
+    [[{ text: 'https://a.test/`x' }, { text: 'y', marks: ['code'] }], 'https://a.test/\\`x`y`'],
+  ] as const)('%j is written %s', (content, markdown) => {
+    const blocks = [b({ content: content as never })];
+    expect(toMarkdown({ blocks })).toBe(markdown);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  // A `|` ends it, so a URL in a table cell does not split the cell.
+  test('a URL holding a pipe in a table cell stays in its cell', () => {
+    const blocks = [
+      b({
+        type: 'table',
+        rows: [
+          [[{ text: 'https://a.test/x_y_| a |' }], [{ text: 'c' }]],
+          [[{ text: '1' }], [{ text: '2' }]],
+        ] as never,
+      }),
+    ];
+    expect(toMarkdown({ blocks }).split('\n')[0]).toBe('| <https://a.test/x_y>\\_\\| a \\| | c |');
+    expect(throughMarkdown(blocks)[0]?.rows).toEqual(start(blocks)[0]?.rows);
+  });
+
+  test('a struck URL holding a tilde keeps the escaped spelling', () => {
+    const blocks = [b({ content: [{ text: 'https://a.test/~x', marks: ['strikethrough'] }] })];
+    expect(toMarkdown({ blocks })).toBe('~~https://a.test/\\~x~~');
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
   });
 });

@@ -29,6 +29,8 @@ interface InlineRule {
   readonly isLink?: boolean;
   /** The `](<…>)` form, whose destination is delimited rather than run-length. */
   readonly angled?: boolean;
+  /** `<https://…>`, which nothing else may close inside while it is open. */
+  readonly autolink?: boolean;
 }
 
 /**
@@ -78,6 +80,10 @@ const INLINE_RULES: readonly InlineRule[] = [
   { closer: '>', pattern: /<em>([^<]+)<\/em>$/, mark: 'italic' },
   { closer: '>', pattern: /<s>([^<]+)<\/s>$/, mark: 'strikethrough' },
   { closer: '>', pattern: /<code>([^<]+)<\/code>$/, mark: 'code' },
+  // An autolink is the URL it holds, as plain text: the writer spells a bare
+  // URL this way so that nothing written against it joins it in GFM. Not the
+  // `](<…>)` of a destination, which is a link's own spelling.
+  { closer: '>', pattern: /(?<!\]\()<(https?:\/\/[^\s<>]*)>$/i, autolink: true },
   // The angle-bracket form first: it is how a destination holding a `)` — the
   // character that would otherwise close the link — is written.
   { closer: ')', pattern: /\[([^\]]+)\]\(<([^<>\n]*)>\)$/, isLink: true, angled: true },
@@ -132,6 +138,18 @@ function isSpace(code: number): boolean {
   return (
     code === 32 || (code >= 9 && code <= 13) || (code > 127 && /\s/.test(String.fromCharCode(code)))
   );
+}
+
+/**
+ * Whether the text ends inside an autolink whose `>` has not arrived.
+ *
+ * Its text is the URL as it stands, so no span closes in it: `<https://a/*x*>`
+ * would otherwise lose its asterisks a character before the `>` arrived.
+ */
+function inOpenAutolink(window: string): boolean {
+  const at = window.lastIndexOf('<');
+
+  return at !== -1 && /^<https?:\/\/[^\s<>]*$/i.test(window.slice(at));
 }
 
 function inOpenDestination(window: string): boolean {
@@ -323,9 +341,14 @@ export function matchInlineRule(
   // URL parser percent-encodes one in a path but not in a query), so a code
   // span cannot close inside a destination we wrote.
   const inDestination = inOpenDestination(window);
+  const inAutolink = inOpenAutolink(window);
 
   for (const rule of INLINE_RULES) {
     if (inDestination && !rule.isLink && rule.mark !== 'code') {
+      continue;
+    }
+
+    if (inAutolink && !rule.autolink) {
       continue;
     }
 
