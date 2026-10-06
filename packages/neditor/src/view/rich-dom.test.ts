@@ -2891,3 +2891,66 @@ describe('audit 39', () => {
     expect(richToPlainText(table?.rows?.[0]?.[0] ?? [])).toBe('Line A\nLine B');
   });
 });
+
+describe('audit 40', () => {
+  const text = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image' ? '[img]' : richToPlainText(block.content),
+    );
+
+  // Firefox's copies of pretty-printed pages: whitespace beside a block is no
+  // line of its own (each checked against Firefox's own text/plain).
+  test.each([
+    ['<p>words</p>Thanks,<br>\n<center>Sub</center><p>Next</p>', ['words', 'Thanks,\nSub', 'Next']],
+    [
+      '<p>words</p><span>Name</span>\n<fieldset>\n</fieldset>\n<span>Email</span><p>Next</p>',
+      ['words', 'Name\nEmail', 'Next'],
+    ],
+    [
+      '<p>words</p>Dear Ann,<br>\n<center>\n  Thank you\n</center>\nRegards<p>Next</p>',
+      ['words', 'Dear Ann,\nThank you\nRegards', 'Next'],
+    ],
+    ['<p>s</p>x<center> </center>y<p>e</p>', ['s', 'x\ny', 'e']],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  // Whitespace between two display-block elements is layout.
+  test('layout between centred lines in a cell', () => {
+    const [table] = blocksFromHtml(
+      document,
+      '<table><tr><td><center>a</center>\n<center>b</center></td></tr></table>',
+    );
+    expect(richToPlainText(table?.rows?.[0]?.[0] ?? [])).toBe('a\nb');
+  });
+
+  // A wrapper holding an image keeps its link and marks on its text.
+  test('text in a link or bold beside an image keeps the link and the bold', () => {
+    const blocks = blocksFromHtml(
+      document,
+      '<p>s</p><a href="https://h.test/docs">the docs <img src="https://x.test/i.png"></a> for <b>more <img src="https://x.test/j.png"> info</b>.<p>e</p>',
+    );
+    expect(
+      blocks.map((block) => (block.type === 'image' ? '[img]' : richToPlainText(block.content))),
+    ).toEqual(['s', 'the docs', '[img]', 'for more', '[img]', 'info.', 'e']);
+    expect(blocks[1]?.content[0]?.link).toBe('https://h.test/docs');
+    expect(blocks[3]?.content.find((run) => run.text.includes('more'))?.marks).toEqual(['bold']);
+    expect(blocks[5]?.content.find((run) => run.text.includes('info'))?.marks).toEqual(['bold']);
+  });
+
+  // An image inside such a wrapper sits on a line, which a `<br>` ends.
+  test('a break after a linked image is no blank line', () => {
+    expect(
+      text('<p>s</p><a href="https://h.test/"><img src="https://x.test/i.png"></a><br><p>x</p>'),
+    ).toEqual(['s', '[img]', 'x']);
+  });
+
+  // An item ending in an image ends its line with it.
+  test('a break after an item ending in an image is a blank line', () => {
+    expect(text('<ul><li><img src="https://x.test/i.png"></li><br><li>b</li></ul>')).toEqual([
+      '[img]',
+      '',
+      'b',
+    ]);
+  });
+});

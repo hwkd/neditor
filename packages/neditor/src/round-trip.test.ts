@@ -2079,6 +2079,20 @@ describe('audit 28', () => {
     ).toBeLessThan(LINEAR);
   }, 60_000);
 
+  // Text beside images in a deep chain of formatting carries the chain's
+  // formatting in one shell per piece, worked out a level at a time: a copy
+  // of the whole chain per piece of text was cubic.
+  test('text beside images in a deep formatting chain reads in linear time', () => {
+    expect(
+      growth((size) => {
+        blocksFromHtml(
+          document,
+          `${'<b>x<img src="https://x.test/i.png">'.repeat(size)}${'</b>'.repeat(size)}`,
+        );
+      }, 120),
+    ).toBeLessThan(LINEAR);
+  });
+
   test.each(['*a*', '&amp;'])('icon %j', (icon) => {
     const callout = b({ type: 'callout', icon, content: t('x') });
     const markdown = toMarkdown({ blocks: [callout] });

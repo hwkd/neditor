@@ -372,6 +372,26 @@ function breaksLine(tag: string): boolean {
   return BLOCK_TAGS.has(tag) || DISPLAY_BLOCK_TAGS.has(tag);
 }
 
+const SOLID_RUNS = new WeakMap<TextRun[], { checked: number; solid: number }>();
+
+/**
+ * The last run holding more than collapsible spaces. Remembered per output as
+ * it grows, so a long stretch of such runs is looked at once, not per break.
+ */
+function lastSolidRun(out: TextRun[]): TextRun | undefined {
+  const memo = SOLID_RUNS.get(out) ?? { checked: 0, solid: -1 };
+
+  for (; memo.checked < out.length; memo.checked += 1) {
+    if (!/^[ \t\r\f]*$/.test(out[memo.checked]!.text)) {
+      memo.solid = memo.checked;
+    }
+  }
+
+  SOLID_RUNS.set(out, memo);
+
+  return memo.solid === -1 ? undefined : out[memo.solid];
+}
+
 /** Appends a newline unless the output is empty or already ends with one. */
 function breakLine(
   out: TextRun[],
@@ -379,7 +399,10 @@ function breakLine(
   link: string | undefined,
   deferred = false,
 ): void {
-  const previous = out.at(-1);
+  // While whitespace is collapsed, source whitespace is a run of its own and
+  // no content: a break after `<br>` + layout, or beside an element holding
+  // only spaces, looks past it -- or it added a line no browser shows.
+  const previous = collapsing ? lastSolidRun(out) : out.at(-1);
 
   // Matches a newline followed by any trailing whitespace, so a run ending
   // "\n  " still counts as already broken. (trimEnd would strip the newline
@@ -943,8 +966,9 @@ const CONTAINER_TAGS = new Set([
  * rendering section gives them `display: block`, `list-item` or a table
  * display. Everything else, unknown and custom elements included, is inline.
  * Whether a wrapper ends the line it is on is a question of layout, so it is
- * asked here rather than of `BLOCK_TAGS`, which says what breaks a line in
- * text and leaves out `<center>`, `<aside>` and `<form>`.
+ * asked here rather than of `BLOCK_TAGS`, which names the structure this
+ * reader knows and leaves out `<center>`, `<aside>` and `<form>`. Line breaks
+ * in text ask both, through `breaksLine`.
  */
 const DISPLAY_BLOCK_TAGS = new Set([
   'HTML',
@@ -2272,6 +2296,8 @@ function visitListChildren(
 
     if (tag === 'LI') {
       visitListItem(child as Element, fallback, depth, out, declared);
+      // And ends it: an item ending in an image leaves the line open.
+      lineOpen = false;
     } else if (tag !== 'UL' && tag !== 'OL') {
       // A wrapper around items: the items continue this list, as deep. It
       // nests without passing through an item, so it takes the list bound.
@@ -2629,6 +2655,60 @@ function visitBlocksInner(
   let closeAfter = false;
 
   /**
+   * Walks an inline wrapper's subtree in document order, without recursion:
+   * each image is flushed past as a block of its own, and everything else is
+   * buffered inside one shell carrying the formatting and link of the wrappers
+   * above it -- worked out a level at a time, as `distributeFormatting` does,
+   * so a deep chain costs its depth once rather than once per piece of text.
+   */
+  const splitAroundImages = (wrapper: Element): void => {
+    const empty: InlineFormatting = { link: null, marks: new Map(), soft: new Set() };
+    const stack: Array<{ node: Node; format: InlineFormatting }> = [
+      { node: wrapper, format: empty },
+    ];
+
+    while (stack.length > 0) {
+      const { node, format } = stack.pop()!;
+      const tag = tagNameOf(node);
+
+      if (node !== wrapper && SKIP_TAGS.has(tag)) {
+        continue;
+      }
+
+      if (tag === 'IMG') {
+        flushInline(true);
+
+        if (pushImage(out, node as Element, depth)) {
+          lineOpen = true;
+        }
+
+        continue;
+      }
+
+      if (node === wrapper || (node.nodeType === ELEMENT_NODE && containsImage(node as Element))) {
+        const inner = formattingWithin(format, node as Element);
+        const children = node.childNodes;
+
+        for (let index = children.length - 1; index >= 0; index -= 1) {
+          stack.push({ node: children[index]!, format: inner });
+        }
+
+        continue;
+      }
+
+      const shell = formattingShell(doc, format);
+      const copy = cloneDeep(node);
+
+      if (shell) {
+        shell.inner.appendChild(copy);
+        buffer.push(shell.outer);
+      } else {
+        buffer.push(copy);
+      }
+    }
+  };
+
+  /**
    * @param continues Whether what comes next goes on with the line -- an inline
    * wrapper holding blocks or images, or an inline image -- rather than a
    * block that starts a new one.
@@ -2844,6 +2924,15 @@ function visitBlocksInner(
 
     // <a href><img> and <p><img> are the commonest image markup on the web.
     // Without this the image is buffered as inline content and emits nothing.
+    // An inline wrapper holding images and no block -- a link or bold around
+    // an icon -- stays on its line: its images become image blocks, and its
+    // text keeps the wrapper's link and marks, which visiting its children
+    // bare lost.
+    if (containsImage(element) && !DISPLAY_BLOCK_TAGS.has(tag) && !containsBlockLevel(element)) {
+      splitAroundImages(element);
+      continue;
+    }
+
     if (containsImage(element)) {
       flushInline(!DISPLAY_BLOCK_TAGS.has(tag));
       visitBlocks(doc, contentsOf(doc, element), depth, out);

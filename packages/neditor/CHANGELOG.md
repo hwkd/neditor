@@ -220,7 +220,9 @@ that changes what you store or what other applications receive is listed first.
   email's image line, no longer adds a blank paragraph after the image. Text in
   an element a browser lays out as a block but this reader had no name for --
   `<center>` (HTML email centres its lines with it), `<address>`, `<aside>`,
-  `<form>` -- no longer runs into the text beside it.
+  `<form>` -- no longer runs into the text beside it. Text in a link or a
+  bold, italic or similar wrapper that also holds an image (an icon in a
+  link) keeps its link and formatting; it was read bare (on `main` too).
 - HTML clipboard (also on earlier versions): a table nested in a table cell
   is read as that cell's text instead of being dropped with it, so an HTML
   email laid out in nested tables keeps its content; a list inside a wrapper
