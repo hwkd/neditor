@@ -857,10 +857,11 @@ export function parseInlineMarkdown(text: string): RichText {
 
 /** Leading indentation in columns: a space is one, a tab two. */
 function columnsOf(line: string): number {
-  // A tab after spaces is the block's own text, not indentation: the writer
-  // indents with spaces, and `main` wrote a nested block's leading tab raw
-  // behind them, so counting it put the next child a level too shallow. A
-  // line that starts with a tab is indented with tabs.
+  // A tab after spaces is not indentation: the writer indents with spaces,
+  // and `main` wrote a nested block's leading tab raw behind them, so counting
+  // it put the next child a level too shallow. (The tab is trimmed from the
+  // text, as it always was.) A line that starts with a tab is indented with
+  // tabs.
   const leading = (line.startsWith('\t') ? /^[ \t]*/ : /^ */).exec(line)?.[0] ?? '';
   let spaces = 0;
 
@@ -879,17 +880,25 @@ function columnsOf(line: string): number {
  * at its parent's content column, which under `1. ` is three -- and what it
  * used to, two columns a level whatever the parent, at the same depths.
  */
+/** A list item's marker, after its indentation. */
+const LIST_ITEM_START = /^\s*(?:[-*+]|\d+[.)])(?:\s|$)/;
+
 function depthReader(): (line: string) => number {
-  const open: Array<{ readonly column: number; readonly depth: number }> = [];
+  const open: Array<{ readonly column: number; readonly depth: number; readonly item: boolean }> =
+    [];
 
   return (line) => {
     const column = columnsOf(line);
 
-    // Two columns further in, or a level deeper by two-columns-a-level:
-    // Markdown from `main` wrote a nested block's leading space raw, so a
-    // child of one sat a column short of two more (`   b` then `    - c`).
-    const childOf = (parent: { readonly column: number }): boolean =>
-      column >= parent.column + 2 || Math.floor(column / 2) > Math.floor(parent.column / 2);
+    // Two columns further in -- or, under anything but a list item, a level
+    // deeper by two-columns-a-level: Markdown from `main` wrote a nested
+    // paragraph's leading space raw, so a child of one sat a column short of
+    // two more (`   b` then `    - c`). Not under a list item, whose child
+    // sits at its content column: `1. Step` / `   - a` / `    - b` is two
+    // siblings, as in CommonMark.
+    const childOf = (parent: { readonly column: number; readonly item: boolean }): boolean =>
+      column >= parent.column + 2 ||
+      (!parent.item && Math.floor(column / 2) > Math.floor(parent.column / 2));
 
     while (open.length > 0 && !childOf(open.at(-1)!)) {
       open.pop();
@@ -899,7 +908,7 @@ function depthReader(): (line: string) => number {
     // indented fragment -- it is two columns a level, as it always was.
     const parent = open.at(-1);
     const depth = parent ? parent.depth + 1 : Math.floor(column / 2);
-    open.push({ column, depth });
+    open.push({ column, depth, item: LIST_ITEM_START.test(line) });
 
     return depth;
   };
@@ -934,27 +943,16 @@ function matchBlockPrefix(line: string): PrefixMatch | null {
  * under a list item a line at the margin ends the item in every other reader.
  * Older versions wrote the body at the margin, and stripping from that would
  * eat the code's own leading spaces -- so the indentation comes off only when
- * every line that has text carries it, which is the one shape the writer has
- * ever produced with an indented body.
+ * every line that is not empty starts with it, which is the one shape the
+ * writer has ever produced with an indented body.
  */
-function unindentBody(lines: readonly string[], indent: number): string {
-  // Spaces only: the writer indents with them, and a tab at the start of a
-  // line of older output is the code's own.
-  const leadingSpaces = (line: string): number => {
-    let count = 0;
-
-    while (count < indent && line[count] === ' ') {
-      count += 1;
-    }
-
-    return count;
-  };
-  // The writer leaves an empty line empty and indents every other, so a line
-  // of fewer spaces than that -- blank or not -- is older output.
-  const carries = (line: string): boolean => line === '' || leadingSpaces(line) === indent;
-
-  if (indent > 0 && lines.every(carries)) {
-    return lines.map((line) => line.slice(leadingSpaces(line))).join('\n');
+function unindentBody(lines: readonly string[], indent: string): string {
+  // The fence's own indentation, as it is written -- spaces from this writer,
+  // a tab from editors that indent lists with tabs. The writer leaves an empty
+  // line empty and indents every other, so any line that does not start with
+  // it is older output, whose body sat at the margin.
+  if (indent !== '' && lines.every((line) => line === '' || line.startsWith(indent))) {
+    return lines.map((line) => line.slice(Math.min(indent.length, line.length))).join('\n');
   }
 
   return lines.join('\n');
@@ -967,7 +965,7 @@ export function blocksFromMarkdown(text: string): Block[] {
   let fence: string[] | null = null;
   let fenceDepth = 0;
   let fenceLength = 0;
-  let fenceIndent = 0;
+  let fenceIndent = '';
   let table: string[] | null = null;
   let tableDepth = 0;
   const depthOf = depthReader();
@@ -1030,7 +1028,7 @@ export function blocksFromMarkdown(text: string): Block[] {
       fence = [];
       fenceLength = opening[1].length;
       fenceDepth = depthOf(raw);
-      fenceIndent = raw.length - trimmedStart.length;
+      fenceIndent = raw.slice(0, raw.length - trimmedStart.length);
       continue;
     }
 

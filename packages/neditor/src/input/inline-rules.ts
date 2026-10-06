@@ -382,14 +382,10 @@ export function matchInlineRule(
       continue;
     }
 
-    // A code span may close in an open autolink -- they share precedence, and
-    // the one that started first wins, which the code rule's own pattern
-    // decides -- and an autolink may not close inside an open code span.
+    // Nothing but the autolink itself, or a code span, closes in an open
+    // autolink. Which of those two wins is which started first: decided below,
+    // once a match says where it starts.
     if (inAutolink && !rule.autolink && rule.mark !== 'code') {
-      continue;
-    }
-
-    if (rule.autolink && inOpenCodeSpan(window)) {
       continue;
     }
 
@@ -435,6 +431,23 @@ export function matchInlineRule(
     const inner = match?.[1];
 
     if (!match || whole === undefined || inner === undefined || inner.length === 0) {
+      continue;
+    }
+
+    // Code spans and autolinks share precedence, and the one that started
+    // first wins: a code span that opened inside an open autolink closes
+    // nothing (`<https://a.test/`x`>` is one link), and an autolink whose `<`
+    // is inside an open code span is code. Asked only once a match exists, so
+    // a line of backticks does not pay for it on every character.
+    if (
+      inAutolink &&
+      rule.mark === 'code' &&
+      searchedFrom + match.index > window.lastIndexOf('<')
+    ) {
+      continue;
+    }
+
+    if (rule.autolink && inOpenCodeSpan(window.slice(0, searchedFrom + match.index))) {
       continue;
     }
 

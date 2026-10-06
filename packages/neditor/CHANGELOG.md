@@ -31,8 +31,8 @@ that changes what you store or what other applications receive is listed first.
     the same depths -- or at the one it was written at, where the old reader
     took a tab at the start of a nested block's text for more indentation. A
     nested code block from them is unindented only when every line that is
-    not empty starts with at least the fence's indentation in spaces, which is
-    also how CommonMark reads it.
+    not empty starts with the fence's own indentation, which is also how
+    CommonMark reads it.
   - A formatted run is also written as HTML where CommonMark's flanking rule
     would leave `**` or `*` literal: against punctuation with a letter on the
     far side (`word<strong>(x)</strong>`), around a code span next to a letter,

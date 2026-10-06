@@ -1775,8 +1775,9 @@ describe('audit 24', () => {
     ]);
   });
 
-  // `main` also wrote a leading tab raw after the indentation: it is content.
-  test('a tab after the indentation is content, not more indentation', () => {
+  // `main` also wrote a leading tab raw after the indentation: it is not
+  // indentation, though the text loses it as it always did.
+  test('a tab after the indentation is not more indentation', () => {
     expect(blocksFromMarkdown('- a\n\n  \tb\n\n    - c').map((block) => block.depth)).toEqual([
       0, 1, 2,
     ]);
@@ -1835,5 +1836,57 @@ describe('audit 24', () => {
     ['- p\n\n  ```\n \n  a\n  ```', ' \n  a'],
   ])('%j reads its code as %j', (markdown, code) => {
     expect(blocksFromMarkdown(markdown)[1]?.content).toEqual(t(code));
+  });
+});
+
+describe('audit 25', () => {
+  // A code span that opened inside an autolink closes nothing: the autolink
+  // started first, and CommonMark links the whole of it.
+  test.each([
+    ['<https://a.test/`x`>', [{ text: 'https://a.test/`x`' }]],
+    // A backtick inside the autolink opens nothing either.
+    ['<https://a.test/`x>', [{ text: 'https://a.test/`x' }]],
+    ['`a` <https://a.test/x>', [{ text: 'a', marks: ['code'] }, { text: ' https://a.test/x' }]],
+  ])('%j is read as %j', (markdown, content) => {
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual(content);
+  });
+
+  // The window edge exactly: a URL of the limit less two is the longest the
+  // reader can close as an autolink.
+  test.each([1997, 1998, 1999, 2000])('a %i-character URL survives three saves', (length) => {
+    const url = `https://a.test/?q=${'x'.repeat(length - 'https://a.test/?q='.length)}`;
+    const blocks = [b({ content: t(`see ${url} end`) })];
+    expect(throughMarkdown(throughMarkdown(throughMarkdown(blocks)))[0]?.content).toEqual(
+      t(`see ${url} end`),
+    );
+  });
+
+  // An escaped backtick opens no code span, so a `<br>` after one is a break.
+  test.each([['# a \\`<br>\\` b', [{ text: 'a `\n` b' }]]])(
+    '%j is read as %j',
+    (markdown, content) => {
+      expect(blocksFromMarkdown(markdown)[0]?.content).toEqual(content);
+    },
+  );
+
+  test('and in a table cell', () => {
+    expect(blocksFromMarkdown('| a \\`<br>\\` b |\n| --- |')[0]?.rows?.[0]).toEqual([
+      t('a `\n` b'),
+    ]);
+  });
+
+  // A list item's child sits at its content column, so one a column short of
+  // that is the item's sibling, as in CommonMark.
+  test('an off-by-one item under a list item is its sibling', () => {
+    expect(blocksFromMarkdown('1. Step\n   - a\n    - b').map((block) => block.depth)).toEqual([
+      0, 1, 1,
+    ]);
+  });
+
+  // A fence indented with a tab, as editors that indent lists with tabs write
+  // it: its body loses that tab.
+  test('a tab-indented fence in a list', () => {
+    const back = blocksFromMarkdown('- item\n\t```js\n\tconst a = 1;\n\t\treturn a;\n\t```');
+    expect(back[1]?.content).toEqual(t('const a = 1;\n\treturn a;'));
   });
 });

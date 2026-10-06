@@ -499,3 +499,19 @@ reviewed. Nine findings, two of them losing data.
 Still open, by the same reasoning as M1 and N1: in foreign Markdown an unclosed `<https://…` suppresses spans
 until the next whitespace (`a <https://a.test/**b**` keeps its asterisks), because typing cannot know a `>`
 will never come.
+
+## Audit 25 (2026-10-07)
+
+An independent review of de63543: 0 failures in about 360,000 Markdown and 93,000 HTML-clipboard round
+trips, none against micromark+GFM in marks or nesting, none in typing/paste parity. Five low findings.
+
+| #   | Kind                     | What                                                                                                                                                                                                             | Resolution                                                                                                                                                                 |
+| --- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| X1  | **Regression (de63543)** | W3 let a code span close in any open autolink, so one that opened inside it took its backticks out: `<https://a.test/`x`>`. The comment claimed the rule's own pattern decided which started first; nothing did. | A code span closes in an open autolink only if it opened before the `<`, and an autolink is refused only if a code span is open where its `<` is.                          |
+| X2  | Performance (de63543)    | The open-code-span check ran on every call: 40,000 backticks took 846 ms against 115.                                                                                                                            | Asked only once a match exists; back to the earlier cost.                                                                                                                  |
+| X3  | Test gaps (de63543)      | The long-URL limit and the escaped-backtick skip in `codeSpans` each passed every test when reverted.                                                                                                            | URLs of 1,997 to 2,000 characters through three saves, and a heading and a cell with escaped backticks around a `<br>`.                                                    |
+| X4  | **Regression (de63543)** | W4's two-columns-a-level rule also applied under list items: `1. Step` / `   - a` / `    - b` read `b` a level deeper, where CommonMark has siblings.                                                            | Only under a block that is not a list item, whose child sits at its content column.                                                                                        |
+| X5  | Regression (de63543)     | W9 unindented with spaces only, so a fence indented with a tab -- how editors that indent lists with tabs write one -- kept its tab on every line.                                                               | The fence's own indentation string comes off each line, when every non-empty line starts with it. `main` indented its fences with spaces, so old output is read as before. |
+
+A comment and a test title said a tab after the indentation spaces was content; the text loses it, as it
+always did. Both now say only that it is not indentation.
