@@ -74,7 +74,8 @@ that changes what you store or what other applications receive is listed first.
   escaped (under the image line, `===` made the image a heading elsewhere and
   `:---` a table header in GFM readers). A backtick
   or `<` in its alt text (or in a callout's icon) is escaped, so other readers cannot pair it with one in the
-  caption, and a line break there is written as a space: written raw it split
+  caption, and so are `*`, `_`, `~` and `&`, which other readers took for
+  emphasis or an entity (GFM read alt `*a*` as `a`); a line break there is written as a space: written raw it split
   the image line and the image came back as two paragraphs. An image with no source yet is written
   `![alt]()` instead of being lost.
 - **Markdown reader.** Numeric character references are decoded at the edges
@@ -160,9 +161,10 @@ that changes what you store or what other applications receive is listed first.
   ending the text used to take the last line break with it.
 - Markdown reader: `<https://…>` (an autolink) is read, and typed, as the
   plain URL it holds, where it stayed text with its brackets. No span closes
-  inside one but a code span that opened before it, and none inside a code
-  span (of any number of backticks) left open before it; `<<https://…>>` is
-  left as it is written. A plain link or image destination may hold balanced
+  inside one but a code span that opened before it, and neither it nor an HTML
+  tag (`<em>`, `<strong>`, `<s>`, `<code>`, `<u>`) closes inside a code span
+  (of any number of backticks) left open before it, so `` `<em>hi</em>` `` is
+  code again; `<<https://…>>` is left as it is written. A plain link or image destination may hold balanced
   parentheses, so a pasted `[wiki](https://en.wikipedia.org/wiki/Foo_(bar))`
   links to the whole URL instead of ending at the first `)`.
 - A quote whose text opens with a link labelled `!…` was read back as a
@@ -172,3 +174,10 @@ that changes what you store or what other applications receive is listed first.
 - HTML clipboard: a to-do whose text started with whitespace, or was only a
   line break, lost it; an empty list item with a list nested under it was
   dropped; and a list item holding only whitespace came back empty.
+- HTML clipboard, from other applications (also on earlier versions): an
+  image, table, code block, quote or heading inside a list item was dropped or
+  flattened into the item's text, a list nested in a wrapper inside one was
+  dropped, and text after a nested list moved above it. They are now the
+  item's children, in order. A table's `<caption>`, which was dropped, is a
+  paragraph above the table, and a checkbox to-do (GitHub's task lists) no
+  longer keeps the space after the box.

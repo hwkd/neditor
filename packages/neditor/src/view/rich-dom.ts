@@ -1581,6 +1581,15 @@ function visitDetails(doc: Document, element: Element, depth: number, out: Block
 function pushTable(out: Block[], element: Element, depth: number): void {
   const rows: TableRows = [];
 
+  // A table block has no caption, so the caption is the paragraph above it
+  // rather than text that silently goes nowhere.
+  const caption = element.querySelector(':scope > caption');
+  const captionRuns = caption ? parseRichText(caption) : [];
+
+  if (!isRichEmpty(captionRuns)) {
+    out.push(createBlock('paragraph', captionRuns, depthOf(element, depth)));
+  }
+
   // Scoped, so a nested table does not contribute its rows to this one — and
   // each cell is stripped of nested tables before its text is read.
   for (const row of element.querySelectorAll(
@@ -1698,6 +1707,66 @@ function childLists(element: Element): Element[] {
   });
 }
 
+/** What a list item can hold besides its text: blocks of their own. */
+const ITEM_BLOCK_TAGS = new Set([
+  ...Object.keys(HEADING_TYPES),
+  'UL',
+  'OL',
+  'BLOCKQUOTE',
+  'DETAILS',
+  'PRE',
+  'TABLE',
+  'FIGURE',
+  'IMG',
+  'HR',
+]);
+
+const ITEM_BLOCK_DESCENDANTS = new WeakMap<Element, Element | null>();
+
+function isItemBlock(element: Element): boolean {
+  return (
+    ITEM_BLOCK_TAGS.has(tagNameOf(element)) ||
+    hasUsableImage(element) ||
+    firstDescendant(
+      element,
+      (candidate) => ITEM_BLOCK_TAGS.has(tagNameOf(candidate)),
+      ITEM_BLOCK_DESCENDANTS,
+    ) !== null
+  );
+}
+
+/**
+ * Where a list item's text ends and its blocks begin, as a child index, or -1
+ * when it is text followed by nothing but nested lists -- the shape of every
+ * item this editor writes, and of most that others do.
+ *
+ * Read whole, a foreign item's image, table or code block went into its text
+ * or nowhere (`<li>Open settings<br><img …></li>` lost the picture), and text
+ * after a nested list was hoisted above it.
+ */
+function itemTextEnd(item: Element): number {
+  const children = [...item.childNodes];
+  const end = children.findIndex(
+    (node) => node.nodeType === ELEMENT_NODE && isItemBlock(node as Element),
+  );
+
+  if (end === -1) {
+    return -1;
+  }
+
+  const listsOnly = children.slice(end).every((node) => {
+    if (node.nodeType === ELEMENT_NODE) {
+      const tag = tagNameOf(node as Element);
+
+      return tag === 'UL' || tag === 'OL';
+    }
+
+    return node.nodeType !== TEXT_NODE || (node.nodeValue ?? '').trim() === '';
+  });
+
+  return listsOnly ? -1 : end;
+}
+
 /**
  * @param declared Whether the enclosing list is one we wrote, in which case
  * every to-do in it carries {@link TODO_ATTR} and the textual checkbox is
@@ -1735,14 +1804,30 @@ function visitListItemInner(
   declared: boolean,
 ): void {
   const itemDepth = depthOf(item, depth);
-  const nested = childLists(item);
+  const end = itemTextEnd(item);
+  let text = item;
+
+  // The item's text is what comes before its first block, parsed with a copy
+  // of the item as its root; the rest is visited in place as the item's
+  // children. Only the text is copied: it holds no block, so no deeper level,
+  // and copying the rest made every level of a nested list copy all below it.
+  if (end !== -1) {
+    text = item.cloneNode(false) as Element;
+
+    for (const node of [...item.childNodes].slice(0, end)) {
+      text.append(node.cloneNode(true));
+    }
+  }
+
+  const blocks = end !== -1;
+  const nested = blocks ? [] : childLists(item);
   const checkbox = findWithin(
-    item,
+    text,
     isNestedList,
     (element) => tagNameOf(element) === 'INPUT' && element.getAttribute('type') === 'checkbox',
   );
   const state = item.getAttribute(TODO_ATTR);
-  let runs = parseRichText(item, isNestedList);
+  let runs = parseRichText(text, isNestedList);
   let type = fallback;
   let checked = false;
 
@@ -1758,6 +1843,9 @@ function visitListItemInner(
   } else if (checkbox) {
     type = 'todo';
     checked = (checkbox as HTMLInputElement).checked || checkbox.hasAttribute('checked');
+    // The space after the box is the box's, as it is after a textual `[ ]`:
+    // GitHub's task lists put one there.
+    runs = richDelete(runs, 0, /^\s*/.exec(richToPlainText(runs))?.[0].length ?? 0);
   } else if (!declared) {
     const todo = extractTodoPrefix(runs);
 
@@ -1769,10 +1857,10 @@ function visitListItemInner(
   }
 
   // An empty item is a real blank bullet — unless it exists only to hold the
-  // list nested under it, which is how indentation alone is written by other
+  // list or the blocks nested under it, which is how indentation alone is written by other
   // editors. Never by this one, which hangs a nested list off the item it
   // belongs to: in a list it wrote, an empty item is always a block.
-  if (!isRichEmpty(runs) || nested.length === 0 || declared) {
+  if (!isRichEmpty(runs) || (nested.length === 0 && !blocks) || declared) {
     const block = createBlock(type, runs, itemDepth);
 
     if (type === 'todo') {
@@ -1782,9 +1870,14 @@ function visitListItemInner(
     out.push(block);
   }
 
-  // A list nested inside the item continues one level deeper.
+  // A list nested inside the item continues one level deeper, and so does
+  // every other block it holds.
   for (const child of nested) {
     visitList(child, itemDepth + 1, out);
+  }
+
+  if (blocks) {
+    visitBlocks(item.ownerDocument, item, itemDepth + 1, out, undefined, end);
   }
 }
 
@@ -1804,17 +1897,30 @@ function visitList(list: Element, depth: number, out: Block[]): void {
  *
  * Inline nodes between block elements are buffered and flushed as a paragraph,
  * so stray text at the top level is not silently dropped.
+ *
+ * @param from The first child to visit: a list item's blocks start after its
+ * text, which the item has already read.
  */
-function visitBlocks(doc: Document, node: Node, depth: number, out: Block[], exclude?: Node): void {
+function visitBlocks(
+  doc: Document,
+  node: Node,
+  depth: number,
+  out: Block[],
+  exclude?: Node,
+  from = 0,
+): void {
   if (blockNesting >= MAX_BLOCK_NESTING) {
-    pushRemainder(out, node, depth);
+    for (const rest of from === 0 ? [node] : [...node.childNodes].slice(from)) {
+      pushRemainder(out, rest, depth);
+    }
+
     return;
   }
 
   blockNesting += 1;
 
   try {
-    visitBlocksInner(doc, node, depth, out, exclude);
+    visitBlocksInner(doc, node, depth, out, exclude, from);
   } finally {
     blockNesting -= 1;
   }
@@ -1826,6 +1932,7 @@ function visitBlocksInner(
   depth: number,
   out: Block[],
   exclude?: Node,
+  from = 0,
 ): void {
   let buffer: Node[] = [];
 
@@ -1848,7 +1955,7 @@ function visitBlocksInner(
     }
   };
 
-  for (const child of [...node.childNodes]) {
+  for (const child of [...node.childNodes].slice(from)) {
     if (child === exclude) {
       continue;
     }

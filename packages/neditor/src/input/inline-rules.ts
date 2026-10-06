@@ -315,6 +315,9 @@ function linkOpener(window: string, angled: boolean): number {
   return -1;
 }
 
+/** What the Markdown reader puts in its projection where a character was escaped. */
+const ESCAPED_PLACEHOLDER = String.fromCharCode(0);
+
 /**
  * A bare URL's start in the part of a token that precedes a span's opener.
  *
@@ -335,7 +338,6 @@ function linkOpener(window: string, angled: boolean): number {
  * with its underscores (`http://_a_`, `xhttps://a.test/_y_`), which loses
  * nothing, rather than a URL losing characters, which does.
  */
-const ESCAPED_PLACEHOLDER = String.fromCharCode(0);
 const BARE_URL_IN_TOKEN = new RegExp(
   `https?:\\/\\/|(?:^|[*_~([\\]${ESCAPED_PLACEHOLDER}])www\\.`,
   'i',
@@ -471,7 +473,12 @@ export function matchInlineRule(
       continue;
     }
 
-    if (rule.autolink && openCodeRun(window.slice(0, searchedFrom + match.index)) !== 0) {
+    // The HTML tag rules share that precedence: a tag shown in code --
+    // `` `<em>hi</em>` `` -- is code, not emphasis with its tags gone.
+    if (
+      (rule.autolink || (closer === '>' && rule.mark !== undefined)) &&
+      openCodeRun(window.slice(0, searchedFrom + match.index)) !== 0
+    ) {
       continue;
     }
 

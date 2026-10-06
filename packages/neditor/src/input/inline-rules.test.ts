@@ -294,3 +294,9 @@ describe('an autolink inside a code span left open', () => {
     expect(matchInlineRule(text) !== null).toBe(closes);
   });
 });
+
+// The backtick-run refusal is about a backtick opener: `<code>` after a closed
+// span opens whatever the run before its own backtick was.
+test('a <code> tag after a closed code span', () => {
+  expect(matchInlineRule('`a `<code>x</code>')).not.toBeNull();
+});

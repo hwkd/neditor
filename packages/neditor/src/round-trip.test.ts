@@ -1271,7 +1271,7 @@ describe('audit 20', () => {
   });
 
   test.each([
-    ['\\_', '\\\\_'],
+    ['\\_', '\\\\\\_'],
     ['a[b', 'a\\[b'],
   ])('a label %j is written %j', (label, written) => {
     const image = [b({ type: 'image', src: '/x.png', alt: label })];
@@ -1967,5 +1967,47 @@ describe('audit 27', () => {
     expect(blocksFromMarkdown(`1. Step\n${line}\n    - b`).map((block) => block.depth)).toEqual([
       0, 1, 1,
     ]);
+  });
+});
+
+describe('audit 28', () => {
+  // An HTML tag shown in code is code: the tag rules do not close inside an
+  // open code span, as the autolink does not.
+  test.each(['<em>hi</em>', '<strong>a</strong>', '<code>x</code>', '<u>x</u>', '<s>x</s>'])(
+    'Write `%s` for it.',
+    (tag) => {
+      expect(blocksFromMarkdown(`Write \`${tag}\` for it.`)[0]?.content).toEqual([
+        { text: 'Write ' },
+        { text: tag, marks: ['code'] },
+        { text: ' for it.' },
+      ]);
+    },
+  );
+
+  // A label is inline content to every other reader, so emphasis and entity
+  // characters in an alt text or an icon are escaped.
+  test.each(['*a*', '_a_', '~~a~~', 'Tom &amp; Jerry &copy;'])('alt %j', (alt) => {
+    const image = b({ type: 'image', src: 'https://a.test/i.png', alt });
+    const markdown = toMarkdown({ blocks: [image] });
+    expect(markdown).not.toContain(`[${alt}]`);
+    expect(blocksFromMarkdown(markdown)[0]?.alt).toBe(alt);
+  });
+
+  // A list item's blocks are read in place: copying them copied every level
+  // nested below, once per level.
+  test('text after nested lists, many levels deep, reads in linear time', () => {
+    const level = `<ul><li>a<ul><li>b</li></ul>${'<p>c</p>'.repeat(20)}`;
+    expect(
+      growth((size) => {
+        blocksFromHtml(document, `${level.repeat(size)}${'</li></ul>'.repeat(size)}`);
+      }, 12),
+    ).toBeLessThan(LINEAR);
+  });
+
+  test.each(['*a*', '&amp;'])('icon %j', (icon) => {
+    const callout = b({ type: 'callout', icon, content: t('x') });
+    const markdown = toMarkdown({ blocks: [callout] });
+    expect(markdown).not.toContain(`[!${icon}]`);
+    expect(blocksFromMarkdown(markdown)[0]?.icon).toBe(icon);
   });
 });

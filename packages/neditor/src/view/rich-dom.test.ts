@@ -1648,3 +1648,84 @@ describe('a summary is the toggle title once, wherever it sits', () => {
     ]);
   });
 });
+
+describe('audit 28: block content inside a foreign list item', () => {
+  const shape = (html: string) =>
+    blocksFromHtml(document, html).map((block) => ({
+      type: block.type,
+      depth: block.depth,
+      text: richToPlainText(block.content),
+      ...(block.src === undefined ? {} : { src: block.src, alt: block.alt }),
+      ...(block.rows === undefined
+        ? {}
+        : { rows: block.rows.map((row) => row.map((cell) => richToPlainText(cell))) }),
+      ...(block.checked === undefined ? {} : { checked: block.checked }),
+    }));
+
+  // The item's text is what comes before its first block; the blocks are its
+  // children, in order, the way a nested list already was.
+  test('an image after the text is a child image', () => {
+    expect(
+      shape('<ol><li>Open settings<br><img src="https://a.test/s.png" alt="shot"></li></ol>'),
+    ).toEqual([
+      { type: 'numbered_list', depth: 0, text: 'Open settings' },
+      { type: 'image', depth: 1, text: '', src: 'https://a.test/s.png', alt: 'shot' },
+    ]);
+  });
+
+  test('a table after the text is a child table', () => {
+    expect(shape('<ul><li>a<table><tr><td>x</td><td>y</td></tr></table></li></ul>')).toEqual([
+      { type: 'bulleted_list', depth: 0, text: 'a' },
+      { type: 'table', depth: 1, text: '', rows: [['x', 'y']] },
+    ]);
+  });
+
+  test('text after a nested list stays after it', () => {
+    expect(shape('<ul><li><p>a</p><ul><li>b</li></ul><p>c</p></li></ul>')).toEqual([
+      { type: 'bulleted_list', depth: 0, text: 'a' },
+      { type: 'bulleted_list', depth: 1, text: 'b' },
+      { type: 'paragraph', depth: 1, text: 'c' },
+    ]);
+  });
+
+  // A wrapper holding a block is a block too: the nested list in it was dropped.
+  test('a nested list inside a wrapper is kept', () => {
+    expect(shape('<ul><li><div>a<ul><li>b</li></ul></div></li></ul>')).toEqual([
+      { type: 'paragraph', depth: 1, text: 'a' },
+      { type: 'bulleted_list', depth: 1, text: 'b' },
+    ]);
+  });
+
+  // An item holding nothing but a block is that block, a level in, as an item
+  // holding nothing but a list is that list (the paste normalises the depth).
+  test('an item that is only an image is the image', () => {
+    expect(shape('<ul><li><img src="https://a.test/s.png" alt="a"></li></ul>')).toEqual([
+      { type: 'image', depth: 1, text: '', src: 'https://a.test/s.png', alt: 'a' },
+    ]);
+  });
+
+  // Paragraphs alone are still the item's text, as before.
+  test('paragraphs alone are the item text', () => {
+    expect(shape('<ul><li><p>a</p><p>c</p></li></ul>')).toEqual([
+      { type: 'bulleted_list', depth: 0, text: 'a\nc' },
+    ]);
+  });
+
+  // A table's caption has nowhere to go in the block, so it goes above it.
+  test("a table's caption is a paragraph above it", () => {
+    expect(shape('<table><caption>Cap</caption><tr><td>x</td></tr></table>')).toEqual([
+      { type: 'paragraph', depth: 0, text: 'Cap' },
+      { type: 'table', depth: 0, text: '', rows: [['x']] },
+    ]);
+  });
+
+  // GitHub's task list: the space after the box is the box's, as it is after
+  // a textual `[ ]`.
+  test('a checkbox to-do loses the space after the box', () => {
+    expect(
+      shape(
+        '<ul><li class="task-list-item"><input type="checkbox" disabled checked> Done</li></ul>',
+      ),
+    ).toEqual([{ type: 'todo', depth: 0, text: 'Done', checked: true }]);
+  });
+});

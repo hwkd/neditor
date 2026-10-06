@@ -1233,8 +1233,10 @@ function escapeContinuations(markdown: string): string {
  * A backtick and a `<` too: a label is inline content to other readers, so a
  * backtick in an alt text paired with one in the caption, or `<!a` with a `>`
  * later on the line, swallowed the `](` between them and the image was gone.
+ * For the same reason `*`, `_` and `~` would emphasise in them, and an `&`
+ * would decode an entity: GFM read alt `*a*` as `a`.
  */
-const LABEL_ESCAPE = /[\\[\]`<]/g;
+const LABEL_ESCAPE = /[\\[\]`<*_~&]/g;
 
 /**
  * A label is one line. An alt attribute pasted from HTML can be wrapped, and
