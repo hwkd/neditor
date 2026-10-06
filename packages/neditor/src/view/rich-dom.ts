@@ -254,13 +254,6 @@ export function renderRichText(doc: Document, content: readonly TextRun[]): Docu
 /* -------------------------------------------------------------------------- */
 
 /**
- * True when real content follows this node's own subtree.
- *
- * A trailing `<br>` is the filler contenteditable appends to keep an empty
- * line selectable; it is presentation, not content, and must not become a
- * newline. Block elements reuse it to decide whether they end a line.
- */
-/**
  * Elements a reader wants treated as absent, along with everything inside them.
  *
  * This replaced cloning the subtree and deleting the unwanted parts out of the
@@ -274,6 +267,16 @@ type SkipPredicate = (element: Element, tag: string) => boolean;
 /** A list nested inside a list item is the *next* block, not this one's text. */
 const isNestedList: SkipPredicate = (_element, tag) => tag === 'UL' || tag === 'OL';
 
+/**
+ * True when real content follows this node's own subtree.
+ *
+ * A trailing `<br>` is the filler contenteditable appends to keep an empty
+ * line selectable; it is presentation, not content, and must not become a
+ * newline. Only a `<br>` asks: a block's own line breaks are deferred until
+ * text arrives (see `breakLine`), which is why a `<br>` with nothing after it
+ * makes the deferred break before it stand -- it is a blank line after a
+ * block, not the filler at the end of one.
+ */
 function hasContentAfter(node: Node, root: Node, skip?: SkipPredicate): boolean {
   const walker = root.ownerDocument?.createTreeWalker(root, SHOW_TEXT | SHOW_ELEMENT, {
     // FILTER_REJECT skips the element *and* its subtree, so a following
@@ -419,6 +422,9 @@ let blockNesting = 0;
 let listNesting = 0;
 let inlineNesting = 0;
 
+/** The root of the paste `blocksFromHtml` is reading, whose edges are mid-line. */
+let pasteRoot: Node | null = null;
+
 /**
  * The text of a subtree, gathered with a cursor.
  *
@@ -479,6 +485,15 @@ function walk(
     if (tagNameOf(child) === 'BR') {
       if (hasContentAfter(child, root, skip)) {
         out.push({ text: '\n', marks: [...marks], link });
+      } else {
+        // Nothing after it: the filler of the line before -- unless that line
+        // was ended by a block, whose break waits for text. Then the `<br>` is
+        // a line of its own, and the break before it stands.
+        const last = out.at(-1);
+
+        if (last) {
+          DEFERRED_BREAKS.delete(last);
+        }
       }
 
       continue;
@@ -504,6 +519,14 @@ function walk(
       // a block; an image, linked or not, is not.
       if (BLOCK_TAGS.has(tag) || tag === 'FIGURE' || tag === 'HR' || containsBlockLevel(element)) {
         breakLine(out, marks, link, true);
+      } else if (/[ \t\n\r\f]/.test(subtreeText(element))) {
+        // An inline one -- an image link -- keeps the space its whitespace
+        // made in the sentence, or the words either side of it join.
+        const previous = out.at(-1)?.text ?? '';
+
+        if (previous !== '' && !/[ \t\n\r\f]/.test(previous[previous.length - 1]!)) {
+          out.push({ text: ' ', marks: [...marks], link });
+        }
       }
 
       continue;
@@ -2084,6 +2107,75 @@ function visitList(list: Element, depth: number, out: Block[]): void {
 }
 
 /**
+ * Marks for whitespace a style preserves, while `collapseWhitespace` works:
+ * Unicode noncharacters, which the standard reserves for exactly this kind of
+ * process-internal use. A preserved newline is a forced line break.
+ */
+const PRESERVED: Readonly<Record<string, string>> = {
+  ' ': '\uFDD0',
+  '\t': '\uFDD1',
+  '\n': '\uFDD2',
+};
+const RESTORED: Readonly<Record<string, string>> = { '\uFDD0': ' ', '\uFDD1': '\t' };
+
+type WhiteSpace = 'normal' | 'pre' | 'pre-line';
+
+const WHITE_SPACE = new WeakMap<Element, WhiteSpace>();
+
+/**
+ * How an element lays out its whitespace, from the nearest inline `style` that
+ * says: Google Docs, VS Code and a browser's copy of a `pre-wrap` region mark
+ * their text this way, and collapsing it lost tabs and runs of spaces.
+ * `pre`, `pre-wrap` and `break-spaces` preserve it all; `pre-line` only its
+ * line breaks. Remembered per element, so a deep chain is walked once.
+ */
+function whiteSpaceOf(element: Element | null): WhiteSpace {
+  const chain: Element[] = [];
+  let mode: WhiteSpace = 'normal';
+
+  for (let at = element; at; at = at.parentElement) {
+    const known = WHITE_SPACE.get(at);
+
+    if (known) {
+      mode = known;
+      break;
+    }
+
+    chain.push(at);
+  }
+
+  for (const at of chain.reverse()) {
+    mode = declaredWhiteSpace(at) ?? mode;
+    WHITE_SPACE.set(at, mode);
+  }
+
+  return mode;
+}
+
+/** The `white-space` an element's own `style` declares last, if any. */
+function declaredWhiteSpace(element: Element): WhiteSpace | null {
+  const style = element.getAttribute('style') ?? '';
+
+  if (!style.toLowerCase().includes('white-space')) {
+    return null;
+  }
+
+  let value: string | null = null;
+
+  for (const match of style.matchAll(/(?:^|;)\s*white-space\s*:\s*([a-z-]+)/gi)) {
+    value = (match[1] ?? '').toLowerCase();
+  }
+
+  return value === null
+    ? null
+    : value === 'pre' || value === 'pre-wrap' || value === 'break-spaces'
+      ? 'pre'
+      : value === 'pre-line'
+        ? 'pre-line'
+        : 'normal';
+}
+
+/**
  * Reads inline content outside any paragraph as a browser lays it out
  * (`white-space: normal`): each run of spaces, tabs and line breaks in the
  * source is one space, and none stands at the start or end of the text or of a
@@ -2095,17 +2187,30 @@ function visitList(list: Element, depth: number, out: Block[]): void {
  * the text as a whole, rather than node by node, is what keeps a space that
  * ends one element from doubling one that starts the next.
  */
-function collapseWhitespace(root: Element): RichText {
+function collapseWhitespace(root: Element, edges: { start: boolean; end: boolean }): RichText {
   const walker = root.ownerDocument.createTreeWalker(root, SHOW_TEXT);
 
   for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
-    found.nodeValue = (found.nodeValue ?? '').replace(/[ \t\n\r\f]+/g, ' ');
+    const value = found.nodeValue ?? '';
+    const mode = whiteSpaceOf(found.parentElement);
+
+    // What a style preserves is marked, so the pass below keeps it.
+    found.nodeValue =
+      mode === 'pre'
+        ? value.replace(/[ \t\n]/g, (char) => PRESERVED[char]!)
+        : mode === 'pre-line'
+          ? value
+              .split('\n')
+              .map((line) => line.replace(/[ \t\r\f]+/g, ' '))
+              .join(PRESERVED['\n']!)
+          : value.replace(/[ \t\n\r\f]+/g, ' ');
   }
 
-  // Every space left is collapsible; every newline is a break the walk wrote.
+  // Every unmarked space left is collapsible; every newline is a break the
+  // walk wrote. The edges of a paste are the middle of a line, not its ends.
   const runs = parseRichText(root);
   const chars = runs.map((): string[] => []);
-  let suppress = true;
+  let suppress = !edges.start;
   let lastSpace = -1;
 
   for (const [index, run] of runs.entries()) {
@@ -2116,19 +2221,23 @@ function collapseWhitespace(root: Element): RichText {
           suppress = true;
           lastSpace = index;
         }
-      } else {
-        if (char === '\n' && lastSpace !== -1) {
+      } else if (char === '\n' || char === PRESERVED['\n']) {
+        if (lastSpace !== -1) {
           chars[lastSpace]!.pop();
         }
 
-        chars[index]!.push(char);
-        suppress = char === '\n';
+        chars[index]!.push('\n');
+        suppress = true;
+        lastSpace = -1;
+      } else {
+        chars[index]!.push(RESTORED[char] ?? char);
+        suppress = false;
         lastSpace = -1;
       }
     }
   }
 
-  if (lastSpace !== -1) {
+  if (lastSpace !== -1 && !edges.end) {
     chars[lastSpace]!.pop();
   }
 
@@ -2183,7 +2292,28 @@ function visitBlocksInner(
 ): void {
   let buffer: Node[] = [];
 
-  const flushInline = (): void => {
+  // At the top of a paste, inline content before the first block and after the
+  // last lands in the middle of a line, so a space at those edges stays.
+  const atRoot = node === pasteRoot;
+  let blockSeen = false;
+
+  const flushInline = (atEnd = false): void => {
+    const edges = { start: atRoot && !blockSeen, end: atRoot && atEnd };
+
+    if (!atEnd) {
+      blockSeen = true;
+    }
+
+    // Layout text around the fragment itself (Firefox wraps it in newlines)
+    // is no space someone typed.
+    while (edges.start && buffer.length > 0 && isSourceWhitespace(buffer[0]!)) {
+      buffer.shift();
+    }
+
+    while (edges.end && buffer.length > 0 && isSourceWhitespace(buffer[buffer.length - 1]!)) {
+      buffer.pop();
+    }
+
     if (buffer.length === 0) {
       return;
     }
@@ -2191,11 +2321,23 @@ function visitBlocksInner(
     const wrapper = doc.createElement('div');
 
     for (const inline of buffer) {
-      wrapper.append(cloneDeep(inline));
+      const copy = cloneDeep(inline);
+      // A style on an ancestor outside the run still governs it.
+      const mode = whiteSpaceOf(inline.parentElement);
+
+      if (mode === 'normal') {
+        wrapper.append(copy);
+      } else {
+        const holder = doc.createElement('span');
+
+        holder.setAttribute('style', `white-space: ${mode === 'pre' ? 'pre-wrap' : 'pre-line'}`);
+        holder.append(copy);
+        wrapper.append(holder);
+      }
     }
 
     buffer = [];
-    const runs = collapseWhitespace(wrapper);
+    const runs = collapseWhitespace(wrapper, edges);
 
     if (!isRichEmpty(runs)) {
       out.push(createBlock('paragraph', runs, depth));
@@ -2333,7 +2475,7 @@ function visitBlocksInner(
     buffer.push(element);
   }
 
-  flushInline();
+  flushInline(true);
 }
 
 /** Parses an HTML string into blocks, for a multi-block paste. */
@@ -2349,7 +2491,13 @@ export function blocksFromHtml(doc: Document, html: string): Block[] {
   blockNesting = 0;
   listNesting = 0;
   inlineNesting = 0;
-  visitBlocks(doc, template.content, 0, out);
+  pasteRoot = template.content;
+
+  try {
+    visitBlocks(doc, template.content, 0, out);
+  } finally {
+    pasteRoot = null;
+  }
 
   return out;
 }

@@ -2371,3 +2371,76 @@ describe('audit 33', () => {
     ).toEqual([{ type: 'bulleted_list', depth: 0, text: 'ab' }]);
   });
 });
+
+describe('audit 34', () => {
+  const text = (html: string) =>
+    blocksFromHtml(document, html).map((block) => richToPlainText(block.content));
+
+  // Whitespace an inline style preserves is kept: Google Docs, VS Code, and
+  // Chromium's own copy of a pre-wrap region all mark their text that way.
+  test.each([
+    [
+      '<b id="docs-internal-guid-1"><span style="white-space:pre;white-space:pre-wrap;">Hello  big\tx </span></b>',
+      'Hello  big\tx ',
+    ],
+    [
+      '<div style="white-space: pre;"><div><span>    return  a;</span></div></div>',
+      '    return  a;',
+    ],
+    ['<span style="font-size: 16px; white-space: pre-wrap;">\there  </span>', '\there  '],
+    ['<span style="white-space: break-spaces">a  b</span>', 'a  b'],
+    // The last declaration wins, as in CSS.
+    ['<span style="white-space: pre-wrap; white-space: normal">a  b</span>', 'a b'],
+    // pre-line keeps its line breaks and collapses the rest.
+    ['<span style="white-space: pre-line">a  b\nc</span>', 'a b\nc'],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual([expected]);
+  });
+
+  // The edges of an inline paste are the middle of a line: a space there in
+  // an element stays. Layout text around the fragment does not.
+  test.each([
+    ['<span>Hello </span>', 'Hello '],
+    ['<span> world</span>', ' world'],
+    ['\n<!--StartFragment--><b>x</b><!--EndFragment-->\n', 'x'],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual([expected]);
+  });
+
+  // A pretty-printed image link in a sentence is handed on as an image, and
+  // the sentence keeps the space its layout made there.
+  test('an image link between two words keeps them apart', () => {
+    expect(
+      blocksFromHtml(
+        document,
+        '<ul><li>V0 W0<a href="https://l.test/">\n<img src="https://i.test/x.png">\n</a>D1</li></ul>',
+      ).map((block) => [block.type, richToPlainText(block.content)]),
+    ).toEqual([
+      ['bulleted_list', 'V0 W0 D1'],
+      ['image', ''],
+    ]);
+  });
+
+  // A line break alone on the line after a block is a blank line.
+  test.each([
+    ['<table><tr><td><div>a</div><div><br></div></td></tr></table>'],
+    ['<table><tr><td><p>a</p><br></td></tr></table>'],
+  ])('%s keeps its blank line', (html) => {
+    const [table] = blocksFromHtml(document, html);
+    expect(richToPlainText(table?.rows?.[0]?.[0] ?? [])).toBe('a\n');
+  });
+
+  test.each([
+    ['<ul><li><p>a</p><br></li></ul>', 'a\n'],
+    ['<blockquote><div>a</div><br></blockquote>', 'a\n'],
+    ['<h2>a<div><br></div></h2>', 'a\n'],
+  ])('%s keeps its blank line', (html, expected) => {
+    expect(text(html)[0]).toBe(expected);
+  });
+
+  // An empty block still adds none.
+  test('an empty block after text in a cell adds no line', () => {
+    const [table] = blocksFromHtml(document, '<table><tr><td>a<div></div></td></tr></table>');
+    expect(richToPlainText(table?.rows?.[0]?.[0] ?? [])).toBe('a');
+  });
+});

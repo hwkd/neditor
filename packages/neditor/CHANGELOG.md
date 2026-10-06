@@ -194,8 +194,13 @@ that changes what you store or what other applications receive is listed first.
   joined the words. Whitespace there is now collapsed as a browser lays it
   out (`white-space: normal`): one space for each run of spaces and line
   breaks, none at the start or end of a line, across element edges; a
-  no-break space is kept. Inside a paragraph it is kept as it stands, which is
-  how this editor's own clipboard writes a line break between two runs.
+  no-break space is kept, and so is whitespace an inline style preserves
+  (`white-space: pre`, `pre-wrap`, `break-spaces`, or `pre-line`'s line
+  breaks), which is how Google Docs, VS Code and a browser's copy of a
+  `pre-wrap` region mark theirs. The edges of an inline paste are the middle
+  of a line, so a space there stays. Inside a paragraph whitespace is kept as
+  it stands, which is how this editor's own clipboard writes a line break
+  between two runs. A `<br>` alone on the line after a block is a blank line.
 - HTML clipboard (also on earlier versions): a table nested in a table cell
   is read as that cell's text instead of being dropped with it, so an HTML
   email laid out in nested tables keeps its content; a list inside a wrapper
