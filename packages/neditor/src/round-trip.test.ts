@@ -1708,3 +1708,132 @@ describe('open items', () => {
     expect(shape(throughHtml(blocks))).toEqual(shape(start(blocks)));
   });
 });
+
+describe('audit 24', () => {
+  const shape = (blocks: Block[]) =>
+    blocks.map(({ type, depth, content }) => ({ type, depth, content }));
+
+  // The reader closes an autolink only within its window, so one longer than
+  // that was never read back and gained a pair of brackets on every save.
+  test('a URL too long for the reader to close keeps the escaped spelling', () => {
+    const url = `https://a.test/?q=${'x'.repeat(2100)}`;
+    const blocks = [b({ content: t(`see ${url} end`) })];
+    expect(toMarkdown({ blocks })).toBe(`see ${url} end`);
+    expect(throughMarkdown(throughMarkdown(blocks))[0]?.content).toEqual(t(`see ${url} end`));
+  });
+
+  test('one that fits is still an autolink', () => {
+    const url = `https://a.test/?q=${'x'.repeat(1900)}`;
+    const blocks = [b({ content: t(`see ${url} end`) })];
+    expect(toMarkdown({ blocks })).toBe(`see <${url}> end`);
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(t(`see ${url} end`));
+  });
+
+  // A `<br>` in a backtick span is code, in a heading or a table cell as
+  // anywhere: GFM shows it, and so did this reader before it read `<br>` there.
+  test.each([
+    [
+      '# The `<br>` element',
+      [{ text: 'The ' }, { text: '<br>', marks: ['code'] }, { text: ' element' }],
+    ],
+    ['# a ``x <br> y`` b', [{ text: 'a ' }, { text: 'x <br> y', marks: ['code'] }, { text: ' b' }]],
+    ['# a<br>b', [{ text: 'a\nb' }]],
+  ])('%j is read as %j', (markdown, content) => {
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual(content);
+  });
+
+  test('and in a table cell', () => {
+    expect(
+      blocksFromMarkdown('| Tag | Use |\n| --- | --- |\n| `<br>` | a<br>b |')[0]?.rows?.[1],
+    ).toEqual([[{ text: '<br>', marks: ['code'] }], t('a\nb')]);
+  });
+
+  // A code span takes precedence over an autolink, as in CommonMark: showing
+  // autolink syntax in code is what documentation does.
+  test.each([
+    [
+      'Autolinks look like `<https://example.com>`.',
+      [
+        { text: 'Autolinks look like ' },
+        { text: '<https://example.com>', marks: ['code'] },
+        { text: '.' },
+      ],
+    ],
+    [
+      'Prefix `<https://a.test/x` here',
+      [{ text: 'Prefix ' }, { text: '<https://a.test/x', marks: ['code'] }, { text: ' here' }],
+    ],
+  ])('%j is read as %j', (markdown, content) => {
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual(content);
+  });
+
+  // Markdown from `main` wrote a nested block's leading space raw, so a child
+  // one level below it sat one column short of two more.
+  test('nested depths written by main still read', () => {
+    expect(blocksFromMarkdown('- a\n\n   b\n\n    - c').map((block) => block.depth)).toEqual([
+      0, 1, 2,
+    ]);
+  });
+
+  // `main` also wrote a leading tab raw after the indentation: it is content.
+  test('a tab after the indentation is content, not more indentation', () => {
+    expect(blocksFromMarkdown('- a\n\n  \tb\n\n    - c').map((block) => block.depth)).toEqual([
+      0, 1, 2,
+    ]);
+  });
+
+  // An unbalanced destination is no link: the pattern took the first `](`
+  // after the `[`, while the parentheses were balanced against the last.
+  test('[x](https://w.test/a](b) is no link', () => {
+    expect(blocksFromMarkdown('[x](https://w.test/a](b)')[0]?.content).toEqual(
+      t('[x](https://w.test/a](b)'),
+    );
+  });
+
+  // Balanced, it is one link to the whole destination, as in CommonMark; it
+  // used to end at the inner `)` and italicise the `y` after it.
+  test('[x](https://x.test/a](b)/_y_) is one link', () => {
+    expect(blocksFromMarkdown('[x](https://x.test/a](b)/_y_)')[0]?.content).toEqual([
+      { text: 'x', link: 'https://x.test/a](b)/_y_' },
+    ]);
+  });
+
+  // Fixes that nothing pinned.
+  test('nothing closes in a destination while a paren in it is open', () => {
+    expect(blocksFromMarkdown('[x](/wiki/F_(b)_c_)')[0]?.content).toEqual([
+      { text: 'x', link: '/wiki/F_(b)_c_' },
+    ]);
+  });
+
+  test('an image line whose parens do not balance is no image', () => {
+    expect(blocksFromMarkdown('![a](https://a.test/x.png)(c)')[0]?.type).toBe('paragraph');
+  });
+
+  test('a URL holding ~~ keeps the escaped spelling', () => {
+    const blocks = [
+      b({ content: [{ text: 'https://a.test/x~~a' }, { text: 'c', marks: ['strikethrough'] }] }),
+    ];
+    expect(throughMarkdown(blocks)[0]?.content).toEqual(start(blocks)[0]?.content);
+  });
+
+  // A nested fence the document ends inside is unindented too.
+  test('an unclosed nested fence', () => {
+    const back = blocksFromMarkdown('1. a\n\n   ```\n   x\n   y');
+    expect(shape(back)).toEqual(
+      shape([
+        b({ type: 'numbered_list', content: t('a') }),
+        b({ type: 'code', depth: 1, content: t('x\ny') }),
+      ]),
+    );
+  });
+
+  // The writer indents a nested code block with spaces, so only spaces come
+  // off: a tab at the start of a line of older output is the code's own.
+  test.each([
+    ['- p\n\n  ```\n\t (x\n  ```', '\t (x'],
+    ['- p\n\n  ```\n\t\n  a\n  ```', '\t\n  a'],
+    ['- p\n\n  ```\n \n  a\n  ```', ' \n  a'],
+  ])('%j reads its code as %j', (markdown, code) => {
+    expect(blocksFromMarkdown(markdown)[1]?.content).toEqual(t(code));
+  });
+});

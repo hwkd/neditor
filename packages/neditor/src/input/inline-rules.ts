@@ -117,6 +117,13 @@ export const INLINE_SPAN_LIMIT = 2000;
  */
 export const BARE_URL_START = /https?:\/\/|www\./i;
 
+/** `\s`, by character code: the scans below ask it of every character they pass. */
+function isSpace(code: number): boolean {
+  return (
+    code === 32 || (code >= 9 && code <= 13) || (code > 127 && /\s/.test(String.fromCharCode(code)))
+  );
+}
+
 /**
  * Whether the text ends inside a link destination whose `)` has not arrived.
  *
@@ -133,11 +140,37 @@ export const BARE_URL_START = /https?:\/\/|www\./i;
  * destination from prose needs the `>)` that has not been typed yet; the
  * reader could look ahead and typing cannot, and the two are kept identical.
  */
-/** `\s`, by character code: the scans below ask it of every character they pass. */
-function isSpace(code: number): boolean {
-  return (
-    code === 32 || (code >= 9 && code <= 13) || (code > 127 && /\s/.test(String.fromCharCode(code)))
-  );
+/** Whether a destination's parentheses balance, never closing more than opened. */
+function balancedParens(destination: string): boolean {
+  let depth = 0;
+
+  for (let at = 0; at < destination.length; at += 1) {
+    const code = destination.charCodeAt(at);
+
+    if (code === 40) {
+      depth += 1;
+    } else if (code === 41 && --depth < 0) {
+      return false;
+    }
+  }
+
+  return depth === 0;
+}
+
+/**
+ * Whether the text ends inside a backtick code span: an odd number of
+ * backticks behind the caret. (The code rule pairs single backticks, so an
+ * odd count leaves one open.) Showing autolink syntax in code --
+ * `` `<https://example.com>` `` -- lost its brackets without this.
+ */
+function inOpenCodeSpan(window: string): boolean {
+  let count = 0;
+
+  for (let at = window.indexOf('`'); at !== -1; at = window.indexOf('`', at + 1)) {
+    count += 1;
+  }
+
+  return count % 2 === 1;
 }
 
 /**
@@ -211,11 +244,12 @@ export interface InlineRuleMatch {
  * Where the link that ends at the caret begins, or -1 if none does.
  *
  * Both patterns are anchored at the caret, so the destination is the last thing
- * in the window and its shape says exactly which `](` opened it: `](<` for the
- * angle-bracket form, and for the plain form the one immediately before a run
- * of characters that are neither `)` nor whitespace — which is all the pattern
- * admits there. Reading it off directly costs two scans, where guessing was
- * wrong and enumerating needed a bound.
+ * in the window and its shape says which `](` opened it: `](<` for the
+ * angle-bracket form, and for the plain form the `(` that the closing `)`
+ * balances -- the first one going back that nothing inside closes, since the
+ * destination holds no whitespace and its parentheses nest. Reading it off
+ * directly is one scan back, where guessing was wrong and enumerating needed a
+ * bound.
  *
  * It is where the search starts, not a promise of where a match does: the
  * patterns are anchored at the caret alone, so when the link at this opener is
@@ -348,7 +382,14 @@ export function matchInlineRule(
       continue;
     }
 
-    if (inAutolink && !rule.autolink) {
+    // A code span may close in an open autolink -- they share precedence, and
+    // the one that started first wins, which the code rule's own pattern
+    // decides -- and an autolink may not close inside an open code span.
+    if (inAutolink && !rule.autolink && rule.mark !== 'code') {
+      continue;
+    }
+
+    if (rule.autolink && inOpenCodeSpan(window)) {
       continue;
     }
 
@@ -380,6 +421,13 @@ export function matchInlineRule(
 
       searchedFrom = opener;
       match = rule.pattern.exec(window.slice(opener));
+
+      // The pattern takes the first `](` after the label; `linkOpener` balanced
+      // the parentheses against the last. Only where they agree is it a link:
+      // `[x](https://w.test/a](b)` is none, in CommonMark or here.
+      if (match && !rule.angled && !balancedParens(match[2] ?? '')) {
+        continue;
+      }
     } else {
       match = rule.pattern.exec(window);
     }

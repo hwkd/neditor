@@ -82,7 +82,6 @@ const TABLE_ROW = /^\|/;
  */
 const TABLE_DIVIDER_CELL = /^:?-+:?$/;
 
-/** Splits a GFM row on unescaped pipes and unescapes the rest. */
 /** Whether a destination's unescaped parentheses balance, never closing more than opened. */
 function balancedParens(destination: string): boolean {
   let depth = 0;
@@ -110,9 +109,22 @@ function balancedParens(destination: string): boolean {
  * of backslashes counts.
  */
 function breaksFromHtml(cell: string): string {
+  const code = codeSpans(cell);
+  let span = 0;
+
   // Matched on the tag alone and counted back from it: a pattern that leads
   // with the backslashes is retried from each one of a long run.
   return cell.replace(/<br\s*\/?>/gi, (tag, offset: number) => {
+    // Visited in order, so the lookup is a pointer that only moves on.
+    while (span < code.length && code[span]![1] <= offset) {
+      span += 1;
+    }
+
+    // Inside a backtick span it is code: `# The \`<br>\` element` shows it.
+    if (span < code.length && code[span]![0] <= offset) {
+      return tag;
+    }
+
     let slashes = 0;
 
     while (cell.charCodeAt(offset - 1 - slashes) === 92) {
@@ -123,6 +135,73 @@ function breaksFromHtml(cell: string): string {
   });
 }
 
+/**
+ * The `[start, end)` spans of backtick code in a line, in order: a run of
+ * backticks not escaped, up to the next run of the same length.
+ *
+ * Each run is paired once, through the next run of its length, which a pointer
+ * per length finds -- so a line of unpaired backticks is still one pass.
+ */
+function codeSpans(line: string): Array<readonly [number, number]> {
+  if (!line.includes('`')) {
+    return [];
+  }
+
+  const runs: Array<{ readonly at: number; readonly length: number }> = [];
+
+  for (let at = 0; at < line.length; at += 1) {
+    if (line[at] === '\\') {
+      at += 1;
+    } else if (line[at] === '`') {
+      const start = at;
+
+      while (line[at + 1] === '`') {
+        at += 1;
+      }
+
+      runs.push({ at: start, length: at - start + 1 });
+    }
+  }
+
+  const byLength = new Map<number, number[]>();
+
+  runs.forEach((run, index) => {
+    const list = byLength.get(run.length) ?? [];
+    list.push(index);
+    byLength.set(run.length, list);
+  });
+
+  const next = new Map<number, number>();
+  const spans: Array<readonly [number, number]> = [];
+  let after = -1;
+
+  for (const [index, run] of runs.entries()) {
+    if (run.at < after) {
+      continue;
+    }
+
+    const list = byLength.get(run.length)!;
+    let pointer = next.get(run.length) ?? 0;
+
+    while (pointer < list.length && list[pointer]! <= index) {
+      pointer += 1;
+    }
+
+    next.set(run.length, pointer);
+
+    const closing = list[pointer];
+
+    if (closing !== undefined) {
+      const end = runs[closing]!.at + run.length;
+      spans.push([run.at, end]);
+      after = end;
+    }
+  }
+
+  return spans;
+}
+
+/** Splits a GFM row on unescaped pipes and unescapes the rest. */
 function splitTableRow(line: string): string[] {
   const cells = line.split(/(?<!\\)\|/).map((cell) => cell.trim().replaceAll('\\|', '|'));
 
@@ -776,9 +855,13 @@ export function parseInlineMarkdown(text: string): RichText {
   return done.length > 0 ? richConcat(done, content) : content;
 }
 
-/** Leading whitespace in columns: a space is one, a tab two. */
+/** Leading indentation in columns: a space is one, a tab two. */
 function columnsOf(line: string): number {
-  const leading = /^[ \t]*/.exec(line)?.[0] ?? '';
+  // A tab after spaces is the block's own text, not indentation: the writer
+  // indents with spaces, and `main` wrote a nested block's leading tab raw
+  // behind them, so counting it put the next child a level too shallow. A
+  // line that starts with a tab is indented with tabs.
+  const leading = (line.startsWith('\t') ? /^[ \t]*/ : /^ */).exec(line)?.[0] ?? '';
   let spaces = 0;
 
   for (const char of leading) {
@@ -802,7 +885,13 @@ function depthReader(): (line: string) => number {
   return (line) => {
     const column = columnsOf(line);
 
-    while (open.length > 0 && column < open.at(-1)!.column + 2) {
+    // Two columns further in, or a level deeper by two-columns-a-level:
+    // Markdown from `main` wrote a nested block's leading space raw, so a
+    // child of one sat a column short of two more (`   b` then `    - c`).
+    const childOf = (parent: { readonly column: number }): boolean =>
+      column >= parent.column + 2 || Math.floor(column / 2) > Math.floor(parent.column / 2);
+
+    while (open.length > 0 && !childOf(open.at(-1)!)) {
       open.pop();
     }
 
@@ -838,7 +927,6 @@ function matchBlockPrefix(line: string): PrefixMatch | null {
   return null;
 }
 
-/** Parses Markdown text into blocks. Returns an empty list for blank input. */
 /**
  * A fenced block's body, with the fence's own indentation taken off each line.
  *
@@ -850,16 +938,29 @@ function matchBlockPrefix(line: string): PrefixMatch | null {
  * ever produced with an indented body.
  */
 function unindentBody(lines: readonly string[], indent: number): string {
-  const carries = (line: string): boolean =>
-    line.trim() === '' || (line.length >= indent && /^[ \t]*$/.test(line.slice(0, indent)));
+  // Spaces only: the writer indents with them, and a tab at the start of a
+  // line of older output is the code's own.
+  const leadingSpaces = (line: string): number => {
+    let count = 0;
+
+    while (count < indent && line[count] === ' ') {
+      count += 1;
+    }
+
+    return count;
+  };
+  // The writer leaves an empty line empty and indents every other, so a line
+  // of fewer spaces than that -- blank or not -- is older output.
+  const carries = (line: string): boolean => line === '' || leadingSpaces(line) === indent;
 
   if (indent > 0 && lines.every(carries)) {
-    return lines.map((line) => line.slice(Math.min(indent, line.length))).join('\n');
+    return lines.map((line) => line.slice(leadingSpaces(line))).join('\n');
   }
 
   return lines.join('\n');
 }
 
+/** Parses Markdown text into blocks. Returns an empty list for blank input. */
 export function blocksFromMarkdown(text: string): Block[] {
   const lines = joinSoftBreaks(text.replace(/\r\n?/g, '\n').split('\n'));
   const blocks: Block[] = [];
@@ -1027,7 +1128,7 @@ export function blocksFromMarkdown(text: string): Block[] {
 
   // An unterminated fence still yields its content.
   if (fence && fence.length > 0) {
-    blocks.push(createBlock('code', fence.join('\n'), fenceDepth));
+    blocks.push(createBlock('code', unindentBody(fence, fenceIndent), fenceDepth));
   }
 
   return blocks;

@@ -1054,10 +1054,16 @@ function escapeWithAutolinks(text: string, struck = false): string {
     const start = match.index;
     const end = gfmUrlEnd(text, start, start + match[0].length);
 
-    // A scheme with nothing after it links nowhere, in GFM or here.
+    // A scheme with nothing after it links nowhere, in GFM or here. And one
+    // longer than the reader's window is one it cannot close: written as an
+    // autolink it came back with its brackets, one more pair every save.
     const unsafe = struck ? UNSAFE_IN_STRUCK_AUTOLINK : UNSAFE_IN_AUTOLINK;
 
-    if (end - start <= match[0].indexOf('//') + 2 || unsafe.test(text.slice(start, end))) {
+    if (
+      end - start <= match[0].indexOf('//') + 2 ||
+      end - start > INLINE_SPAN_LIMIT - 2 ||
+      unsafe.test(text.slice(start, end))
+    ) {
       continue;
     }
 

@@ -28,9 +28,11 @@ that changes what you store or what other applications receive is listed first.
     column (three spaces under `1. `, four under `10. `), and a nested code
     block's body is indented as far as its fence. Other readers ended the list
     at the first line that fell short. Markdown from earlier versions reads at
-    the same depths; a nested code block from them whose every line starts with
-    at least its fence's indentation now loses that much, as it does in
-    CommonMark.
+    the same depths -- or at the one it was written at, where the old reader
+    took a tab at the start of a nested block's text for more indentation. A
+    nested code block from them is unindented only when every line that is
+    not empty starts with at least the fence's indentation in spaces, which is
+    also how CommonMark reads it.
   - A formatted run is also written as HTML where CommonMark's flanking rule
     would leave `**` or `*` literal: against punctuation with a letter on the
     far side (`word<strong>(x)</strong>`), around a code span next to a letter,
