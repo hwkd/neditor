@@ -501,8 +501,9 @@ function walk(
     // because whether text follows is only known once the walk gets there.
     if (skip?.(element, tag) === true) {
       // A figure and a rule are blocks here though not in BLOCK_TAGS, which
-      // lists what breaks the line when read as text; an image is not.
-      if (BLOCK_TAGS.has(tag) || tag === 'FIGURE' || tag === 'HR') {
+      // lists what breaks the line when read as text, and so is a link holding
+      // a block; an image, linked or not, is not.
+      if (BLOCK_TAGS.has(tag) || tag === 'FIGURE' || tag === 'HR' || containsBlockLevel(element)) {
         breakLine(out, marks, link, true);
       }
 
@@ -1431,6 +1432,22 @@ function distributeFormatting(
       run.pop();
     }
 
+    // Pretty-printing between two inline nodes is one space, as the inline
+    // buffer in `visitBlocks` reads it. Not inside a sealed block, which
+    // `parseRichText` reads as it stands, as it does any paragraph -- that is
+    // how this editor writes a line break between two runs.
+    if (!sealed) {
+      const content = run.map((node) => !isSourceWhitespace(node));
+      const from = content.indexOf(true);
+      const to = content.lastIndexOf(true);
+
+      for (let index = from + 1; index < to; index += 1) {
+        if (isIndentation(run[index]!)) {
+          run[index]!.nodeValue = ' ';
+        }
+      }
+    }
+
     const first = run[0];
     const nodes = run;
 
@@ -1821,13 +1838,34 @@ function isItemBlock(element: Element): boolean {
   }
 
   // GitHub wraps every image in a link, and a loose list every line in a
-  // paragraph: one holding no text at all beside a usable image is the image.
-  // Holding text too, it is text.
+  // paragraph: one holding nothing but the image is the image. Holding text,
+  // or a task list's checkbox, it is the item's text.
   return (
-    tag === 'IMG' ||
-    tag === 'FIGURE' ||
-    ((tag === 'P' || tag === 'A') && (element.textContent ?? '').trim() === '')
+    tag === 'IMG' || tag === 'FIGURE' || ((tag === 'P' || tag === 'A') && holdsOnlyImage(element))
   );
+}
+
+/**
+ * Whether an element holds no text and no checkbox. Walked, and left at the
+ * first of either: `textContent` recurses through the subtree in some DOMs,
+ * and counts a style sheet's source as text.
+ */
+function holdsOnlyImage(element: Element): boolean {
+  const walker = element.ownerDocument.createTreeWalker(element, SHOW_TEXT | SHOW_ELEMENT, {
+    acceptNode: (candidate) =>
+      SKIP_TAGS.has(tagNameOf(candidate)) ? FILTER_REJECT : FILTER_ACCEPT,
+  });
+
+  for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
+    if (
+      tagNameOf(found) === 'INPUT' ||
+      (found.nodeType === TEXT_NODE && (found.nodeValue ?? '').trim().length > 0)
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 /**
@@ -1937,6 +1975,20 @@ function visitListItemInner(
     runs = [];
   }
 
+  // An item whose blocks come before any text of its own takes its first
+  // paragraph as its text, rather than vanishing and renumbering the list:
+  // GitHub writes `1. ![shot](a.png)` + `Click it.` as an image paragraph and
+  // a text paragraph inside the item. The paragraph reads before the block,
+  // as bare text after a block does.
+  if (!declared && isRichEmpty(runs)) {
+    const paragraph = [...blocks].find((block) => tagNameOf(block) === 'P' && !isItemBlock(block));
+
+    if (paragraph) {
+      blocks.delete(paragraph);
+      runs = parseRichText(paragraph);
+    }
+  }
+
   // An empty item is a real blank bullet — unless it exists only to hold the
   // lists or blocks nested under it, which is how indentation alone is written
   // by other editors. Never by this one, which hangs a nested list off the item it
@@ -2040,16 +2092,25 @@ function visitBlocksInner(
       return;
     }
 
-    // Whitespace is buffered only between inline nodes, and what trails the
-    // last of them is the layout before whatever ended the run.
-    while (buffer.length > 0 && isSourceWhitespace(buffer[buffer.length - 1]!)) {
-      buffer.pop();
+    // Whitespace is buffered only after an inline node, and what follows the
+    // last one holding text -- an empty `<span>` included -- is the layout
+    // before whatever ended the run, not a space at the end of the text.
+    let last = buffer.length - 1;
+
+    while (
+      last >= 0 &&
+      (isSourceWhitespace(buffer[last]!) ||
+        (buffer[last]!.nodeType === ELEMENT_NODE && subtreeText(buffer[last]!).trim().length === 0))
+    ) {
+      last -= 1;
     }
 
     const wrapper = doc.createElement('div');
 
-    for (const inline of buffer) {
-      wrapper.append(cloneDeep(inline));
+    for (const [index, inline] of buffer.entries()) {
+      if (index <= last || !isSourceWhitespace(inline)) {
+        wrapper.append(cloneDeep(inline));
+      }
     }
 
     buffer = [];
@@ -2066,14 +2127,13 @@ function visitBlocksInner(
     }
 
     if (child.nodeType === TEXT_NODE) {
-      // A space between two inline elements is content (`<b>bold</b> <i>it</i>`
-      // read `boldit`); on its own, before a block, or carrying a line break
-      // (pretty-printing, as `isIndentation` reads it), it is layout.
-      if (
-        (child.nodeValue ?? '').trim().length > 0 ||
-        (buffer.length > 0 && !isIndentation(child))
-      ) {
+      // Whitespace between two inline elements is content (`<b>bold</b>
+      // <i>it</i>` read `boldit`) -- one space where it is pretty-printing, as
+      // a browser shows it; on its own, or before a block, it is layout.
+      if ((child.nodeValue ?? '').trim().length > 0) {
         buffer.push(child);
+      } else if (buffer.length > 0) {
+        buffer.push(isIndentation(child) ? doc.createTextNode(' ') : child);
       }
 
       continue;

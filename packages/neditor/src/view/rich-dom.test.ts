@@ -1988,3 +1988,133 @@ describe('audit 30', () => {
     expect(() => blocksFromHtml(document, html)).not.toThrow();
   });
 });
+
+describe('audit 31', () => {
+  const shape = (html: string) =>
+    blocksFromHtml(document, html).map((block) => ({
+      type: block.type,
+      depth: block.depth,
+      text: richToPlainText(block.content),
+      ...(block.checked === undefined ? {} : { checked: block.checked }),
+    }));
+
+  // A loose task item: the box sits beside the image in the first paragraph.
+  // That paragraph holds an input, so it is not an image block.
+  test.each([
+    '<ul class="contains-task-list"><li class="task-list-item"><p><input type="checkbox" checked disabled> <a href="https://a.test/i.png"><img src="https://a.test/i.png"></a></p><p>Ship it</p></li></ul>',
+    '<ul><li><p><input type="checkbox" checked> <img src="https://a.test/i.png"></p></li></ul>',
+  ])('%s keeps its to-do', (html) => {
+    expect(shape(html)[0]).toMatchObject({ type: 'todo', depth: 0, checked: true });
+  });
+
+  // An item whose first block comes before any text takes its first paragraph
+  // as its text, so the list keeps the item and its number.
+  test.each([
+    [
+      '<ol><li><p><a href="https://a.test/a.png"><img src="https://a.test/a.png"></a></p><p>Click the button.</p></li><li><p>Next</p></li></ol>',
+      [
+        { type: 'numbered_list', depth: 0, text: 'Click the button.' },
+        { type: 'image', depth: 1, text: '' },
+        { type: 'numbered_list', depth: 0, text: 'Next' },
+      ],
+    ],
+    [
+      '<ol><li><pre>npm i</pre><p>Install it.</p></li><li>Next</li></ol>',
+      [
+        { type: 'numbered_list', depth: 0, text: 'Install it.' },
+        { type: 'code', depth: 1, text: 'npm i' },
+        { type: 'numbered_list', depth: 0, text: 'Next' },
+      ],
+    ],
+  ])('%s keeps the item', (html, blocks) => {
+    expect(shape(html)).toEqual(blocks);
+  });
+
+  // The text test beside an image walks without recursion, and a style sheet
+  // is no text.
+  test('a deep chain beside an image reads without overflowing', () => {
+    expect(() =>
+      blocksFromHtml(
+        document,
+        `<ul><li><p><img src="https://a.test/i.png">${'<span>'.repeat(5000)}x</p></li></ul>`,
+      ),
+    ).not.toThrow();
+  });
+
+  test('a style sheet beside an image is not text', () => {
+    expect(
+      shape(
+        '<ul><li>a<p><style>p { color: red }</style><img src="https://a.test/i.png"></p></li></ul>',
+      ),
+    ).toEqual([
+      { type: 'bulleted_list', depth: 0, text: 'a' },
+      { type: 'image', depth: 1, text: '' },
+    ]);
+  });
+
+  // A list past the bound is still read, as text, where it was.
+  test('a list nested in lists past the bound keeps its text', () => {
+    const blocks = shape(`${'<ul>'.repeat(300)}<li>x</li>${'</ul>'.repeat(300)}`);
+    expect(blocks.map((block) => block.text)).toEqual(['x']);
+  });
+
+  // The checkbox is found wherever it sits in the item's own text, and the
+  // first one wins.
+  test.each([
+    ['<ul><li><p><input type="checkbox" checked> Done</p></li></ul>', 'Done', true],
+    ['<ul><li><label><input type="checkbox"> Task</label></li></ul>', 'Task', false],
+    [
+      '<ul><li><span><input type="checkbox"></span><input type="checkbox" checked> x</li></ul>',
+      'x',
+      false,
+    ],
+  ])('%s is a to-do', (html, text, checked) => {
+    expect(shape(html)).toEqual([{ type: 'todo', depth: 0, text, checked }]);
+  });
+
+  // Leading whitespace is layout, not a space in front of the text.
+  test('whitespace before the first inline node is not kept', () => {
+    expect(shape('<div> <b>x</b></div>')).toEqual([{ type: 'paragraph', depth: 0, text: 'x' }]);
+  });
+
+  // Nor is whitespace after the last text, before an empty element or a break.
+  test.each(['<div><b>x</b>\n <span></span>\n<p>y</p></div>', '<div><b>x</b> <br></div>'])(
+    '%j has no trailing space',
+    (html) => {
+      expect(shape(html)[0]?.text).toBe('x');
+    },
+  );
+
+  // Pretty-printing between inline elements is one space, as a browser shows
+  // it, whether or not a wrapper is distributed over it. A paragraph keeps its
+  // own whitespace: that is how this editor writes a line break between runs.
+  test.each([
+    '<div>\n <strong>Note:</strong>\n <a href="https://a.test/">read this</a>\n <p>para</p>\n</div>',
+    '<em><div>\n <strong>Note:</strong>\n <a href="https://a.test/">read this</a>\n <p>para</p>\n</div></em>',
+  ])('%j reads one space between the elements', (html) => {
+    expect(shape(html)[0]?.text).toBe('Note: read this');
+  });
+
+  // A skipped link that holds a block breaks the line like the block; one
+  // that is only an inline image does not.
+  test.each([
+    [
+      '<ul><li>a<a href="https://l.test/"><p><img src="https://i.test/x.png"></p></a>b</li></ul>',
+      'a\nb',
+    ],
+    [
+      '<ul><li>a <a href="https://l.test/"><img src="https://i.test/x.png"></a> b</li></ul>',
+      'a  b',
+    ],
+  ])('%s reads its text as %j', (html, text) => {
+    expect(shape(html)[0]?.text).toBe(text);
+  });
+
+  // Inside a paragraph a wrapper is distributed over, the paragraph's own
+  // whitespace stands, as it does when the formatting is written by hand.
+  test('a distributed paragraph keeps its whitespace as a hand-written one does', () => {
+    const wrapped = '<b><p><i>a</i>\n <i>b</i></p><p>c</p></b>';
+    const byHand = '<p><b><i>a</i>\n <i>b</i></b></p><p><b>c</b></p>';
+    expect(shape(wrapped)).toEqual(shape(byHand));
+  });
+});
