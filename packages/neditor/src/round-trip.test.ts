@@ -2004,6 +2004,71 @@ describe('audit 28', () => {
     ).toBeLessThan(LINEAR);
   });
 
+  // A wrapper between list levels is never distributed from inside an item:
+  // doing so cloned everything below it once per level, and shells piled up.
+  test.each([
+    [
+      'a <b> between levels',
+      (n: number) => `${'<ul><li>a<b>'.repeat(n)}${'</b></li></ul>'.repeat(n)}`,
+    ],
+    [
+      'a <b> holding a block',
+      (n: number) => `${'<ul><li><b>a<pre>x</pre>'.repeat(n)}${'</b></li></ul>'.repeat(n)}`,
+    ],
+    [
+      'a styled span between levels',
+      (n: number) =>
+        `${'<ul><li>a<span style="font-weight:700"><ul><li>'.repeat(n)}x${'</li></ul></span></li></ul>'.repeat(n)}`,
+    ],
+    [
+      'a block and a wrapper per level',
+      (n: number) => `${'<ul><li>a<pre>x</pre><b>'.repeat(n)}${'</b></li></ul>'.repeat(n)}`,
+    ],
+  ])('%s reads in linear time', (_name, html) => {
+    expect(growth((size) => void blocksFromHtml(document, html(size)), 8)).toBeLessThan(LINEAR);
+  });
+
+  // An item's quote and table are visited now, so a quote's lists and a
+  // table's cells must not each be read through everything nested below them.
+  // The list bound caps the depth at 256 levels, so sizes cannot be spread as
+  // far as `growth` spreads them, and fixed costs flatten the ratio: measured,
+  // 7-8 when linear and 44-86 when each level read the rest.
+  test.each([
+    ['a quote', '<blockquote>', '</blockquote>'],
+    ['a table', '<table><tr><td>', '</td></tr></table>'],
+  ])('%s per level reads in linear time', (_name, open, close) => {
+    const pad = '<i>q</i>'.repeat(20);
+    const html = (n: number) =>
+      `${`<ul><li>a${open}${pad}`.repeat(n)}${`${close}</li></ul>`.repeat(n)}`;
+    let least = Infinity;
+
+    for (let attempt = 0; attempt < 3 && least >= 30; attempt += 1) {
+      const small = bestOf(() => blocksFromHtml(document, html(12)));
+      const large = bestOf(() => blocksFromHtml(document, html(192)));
+      least = Math.min(least, large / Math.max(small, 1));
+    }
+
+    expect(least).toBeLessThan(30);
+  });
+
+  // The parser rebuilds an anchor around every level, so one item's text
+  // reaches every skipped list below it: a look-ahead from each for text after
+  // it went through the rest. Only one item is read, so this is not capped by
+  // the list bound; measured, 8 when linear and 133 with the look-ahead.
+  test('anchors between list levels read in linear time', () => {
+    const html = (n: number) =>
+      `${'<ul><li>a<a href="https://x.test/">'.repeat(n)}${'</a></li></ul>'.repeat(n)}`;
+    let least = Infinity;
+
+    for (let attempt = 0; attempt < 3 && least >= 40; attempt += 1) {
+      const small = bestOf(() => blocksFromHtml(document, html(100)));
+      const large = bestOf(() => blocksFromHtml(document, html(1600)));
+      least = Math.min(least, large / Math.max(small, 1));
+    }
+
+    expect(least).toBeLessThan(40);
+  });
+
   test.each(['*a*', '&amp;'])('icon %j', (icon) => {
     const callout = b({ type: 'callout', icon, content: t('x') });
     const markdown = toMarkdown({ blocks: [callout] });

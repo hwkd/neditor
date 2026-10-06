@@ -1688,14 +1688,6 @@ describe('audit 28: block content inside a foreign list item', () => {
     ]);
   });
 
-  // A wrapper holding a block is a block too: the nested list in it was dropped.
-  test('a nested list inside a wrapper is kept', () => {
-    expect(shape('<ul><li><div>a<ul><li>b</li></ul></div></li></ul>')).toEqual([
-      { type: 'paragraph', depth: 1, text: 'a' },
-      { type: 'bulleted_list', depth: 1, text: 'b' },
-    ]);
-  });
-
   // An item holding nothing but a block is that block, a level in, as an item
   // holding nothing but a list is that list (the paste normalises the depth).
   test('an item that is only an image is the image', () => {
@@ -1727,5 +1719,164 @@ describe('audit 28: block content inside a foreign list item', () => {
         '<ul><li class="task-list-item"><input type="checkbox" disabled checked> Done</li></ul>',
       ),
     ).toEqual([{ type: 'todo', depth: 0, text: 'Done', checked: true }]);
+  });
+});
+
+describe('audit 29: list items holding blocks', () => {
+  const shape = (html: string) =>
+    blocksFromHtml(document, html).map((block) => ({
+      type: block.type,
+      depth: block.depth,
+      text: richToPlainText(block.content),
+      ...(block.checked === undefined ? {} : { checked: block.checked }),
+    }));
+
+  // micromark's rendering of an item that is only a fenced block: the
+  // pretty-printing around the block is not a line of text.
+  test('an item that is only a code block is the code block', () => {
+    expect(
+      shape(
+        '<ol>\n<li>Install</li>\n<li>\n<pre><code>npm i x</code></pre>\n</li>\n<li>Run</li>\n</ol>',
+      ),
+    ).toEqual([
+      { type: 'numbered_list', depth: 0, text: 'Install' },
+      { type: 'code', depth: 1, text: 'npm i x' },
+      { type: 'numbered_list', depth: 0, text: 'Run' },
+    ]);
+  });
+
+  // Layout around the block is no text either, however it is spelled.
+  test.each([
+    '<ol><li>a</li><li><br> <h2>M0</h2></li></ol>',
+    '<ol><li>a</li><li><h2>M0</h2> <a href="https://l.test/">\n</a></li></ol>',
+  ])('%s has no blank item', (html) => {
+    expect(shape(html)).toEqual([
+      { type: 'numbered_list', depth: 0, text: 'a' },
+      { type: 'heading2', depth: 1, text: 'M0' },
+    ]);
+  });
+
+  // A to-do's box is content: it stays, empty, in front of its block.
+  test('a to-do holding only a block keeps its box', () => {
+    expect(shape('<ul><li><input type="checkbox" checked> <h2>x</h2></li></ul>')).toEqual([
+      { type: 'todo', depth: 0, text: '', checked: true },
+      { type: 'heading2', depth: 1, text: 'x' },
+    ]);
+  });
+
+  // Text after the first block is still the item's: the to-do, its state and
+  // the numbered list all survive an image in front of the text.
+  test('a GitHub task item with an image keeps the to-do', () => {
+    expect(
+      shape(
+        '<ul><li class="task-list-item"><input type="checkbox" disabled checked> <img src="https://a.test/i.png" alt=""> Ship</li></ul>',
+      ),
+    ).toEqual([
+      { type: 'todo', depth: 0, text: 'Ship', checked: true },
+      { type: 'image', depth: 1, text: '' },
+    ]);
+  });
+
+  test('items led by an icon stay a numbered list', () => {
+    expect(
+      shape(
+        '<ol><li><img src="https://a.test/1.png"> Step one</li><li><img src="https://a.test/2.png"> Step two</li></ol>',
+      ),
+    ).toEqual([
+      { type: 'numbered_list', depth: 0, text: ' Step one' },
+      { type: 'image', depth: 1, text: '' },
+      { type: 'numbered_list', depth: 0, text: ' Step two' },
+      { type: 'image', depth: 1, text: '' },
+    ]);
+  });
+
+  // An image the reader cannot use is no block, so it splits nothing.
+  test('an unusable image inside the text splits nothing', () => {
+    expect(shape('<ul><li>Click <img src="cid:x"> to open</li></ul>')).toEqual([
+      { type: 'bulleted_list', depth: 0, text: 'Click  to open' },
+    ]);
+  });
+
+  // And an item holding only one is still a blank bullet, not nothing.
+  test('an item holding only an unusable image is a blank bullet', () => {
+    expect(shape('<ul><li><img src="cid:a"></li></ul>')).toEqual([
+      { type: 'bulleted_list', depth: 0, text: '' },
+    ]);
+  });
+
+  // A checkbox inside one of the item's blocks is that block's, not the item's.
+  test('a checkbox in a child table does not make the item a to-do', () => {
+    expect(
+      shape('<ul><li>a<table><tr><td><input type="checkbox">x</td></tr></table></li></ul>'),
+    ).toEqual([
+      { type: 'bulleted_list', depth: 0, text: 'a' },
+      { type: 'table', depth: 1, text: '' },
+    ]);
+  });
+
+  // Each kind of block an item can hold.
+  test.each([
+    ['<pre>x</pre>', 'code'],
+    ['<blockquote>x</blockquote>', 'quote'],
+    ['<h2>x</h2>', 'heading2'],
+    ['<hr>', 'divider'],
+    ['<figure><img src="https://a.test/i.png"><figcaption>x</figcaption></figure>', 'image'],
+  ])('%s in an item is its child', (html, type) => {
+    expect(shape(`<ul><li>a${html}</li></ul>`).map((block) => [block.type, block.depth])).toEqual([
+      ['bulleted_list', 0],
+      [type, 1],
+    ]);
+  });
+
+  // Bare text after a block or a nested list has no element of its own to be
+  // a block, so it stays the item's text -- on a line of its own, not joined
+  // to the word before the block.
+  test.each([
+    ['<ul><li>a<ul><li>b</li></ul>c</li></ul>', 'a\nc'],
+    ['<ul><li>a<pre>x</pre>c</li></ul>', 'a\nc'],
+  ])('%s keeps its text apart', (html, text) => {
+    expect(shape(html)[0]?.text).toBe(text);
+  });
+
+  // Whitespace after a nested list is no text to break the line for.
+  test('whitespace after a nested list adds no break', () => {
+    expect(shape('<ul><li>a<ul><li>b</li></ul><b> </b></li></ul>')[0]?.text).toBe('a ');
+  });
+
+  // Google Docs, and a browser's own indent command, nest a list directly
+  // inside a list rather than inside an item.
+  test('a list nested directly in a list is a level deeper', () => {
+    expect(shape('<ul><li>a</li><ul><li>b</li></ul><li>c</li></ul>')).toEqual([
+      { type: 'bulleted_list', depth: 0, text: 'a' },
+      { type: 'bulleted_list', depth: 1, text: 'b' },
+      { type: 'bulleted_list', depth: 0, text: 'c' },
+    ]);
+  });
+
+  // Rows and cells are read from the table's own children, never by a query
+  // over everything below it, which recursed through every level nested in a
+  // cell and overflowed the stack.
+  test.each([
+    ['a table in an item', '<ul><li>a<table><tr><td>', '</td></tr></table></li></ul>'],
+    [
+      'a table in a cell',
+      '<table><tr><td>a<table><tr><td>',
+      '</td></tr></table></td></tr></table>',
+    ],
+  ])('%s, 1,100 deep, reads without overflowing', (_name, open, close) => {
+    expect(() =>
+      blocksFromHtml(document, `${open.repeat(1100)}x${close.repeat(1100)}`),
+    ).not.toThrow();
+  });
+
+  // At the nesting bound the item's blocks are still not dropped.
+  test('an item past the nesting bound keeps all its text', () => {
+    const html = `${'<div>'.repeat(1023)}<ul><li>a<pre>x</pre>b<p>c</p></li></ul>${'</div>'.repeat(1023)}`;
+    const text = blocksFromHtml(document, html)
+      .map((block) => richToPlainText(block.content))
+      .join('|');
+    for (const part of ['a', 'x', 'b', 'c']) {
+      expect(text).toContain(part);
+    }
   });
 });

@@ -274,6 +274,9 @@ type SkipPredicate = (element: Element, tag: string) => boolean;
 /** A list nested inside a list item is the *next* block, not this one's text. */
 const isNestedList: SkipPredicate = (_element, tag) => tag === 'UL' || tag === 'OL';
 
+/** A table nested in a cell is dropped: a cell holds text. */
+const isNestedTable: SkipPredicate = (_element, tag) => tag === 'TABLE';
+
 function hasContentAfter(node: Node, root: Node, skip?: SkipPredicate): boolean {
   const walker = root.ownerDocument?.createTreeWalker(root, SHOW_TEXT | SHOW_ELEMENT, {
     // FILTER_REJECT skips the element *and* its subtree, so a following
@@ -347,14 +350,32 @@ function isBetweenBlocks(node: Node): boolean {
 }
 
 /** Appends a newline unless the output is empty or already ends with one. */
-function breakLine(out: TextRun[], marks: Mark[], link: string | undefined): void {
+/**
+ * Breaks that only stand if text follows them: `parseRichText` drops one with
+ * no text after it once the walk is done, rather than every skipped block
+ * looking ahead through the rest of the subtree for itself.
+ */
+const DEFERRED_BREAKS = new WeakSet<TextRun>();
+
+function breakLine(
+  out: TextRun[],
+  marks: Mark[],
+  link: string | undefined,
+  deferred = false,
+): void {
   const previous = out.at(-1);
 
   // Matches a newline followed by any trailing whitespace, so a run ending
   // "\n  " still counts as already broken. (trimEnd would strip the newline
   // being looked for and defeat the check entirely.)
   if (previous && !/\n[^\S\n]*$/.test(previous.text)) {
-    out.push({ text: '\n', marks: [...marks], link });
+    const run = { text: '\n', marks: [...marks], link };
+
+    if (deferred) {
+      DEFERRED_BREAKS.add(run);
+    }
+
+    out.push(run);
   }
 }
 
@@ -471,7 +492,18 @@ function walk(
     const element = child as Element;
     const tag = tagNameOf(element);
 
-    if (SKIP_TAGS.has(tag) || skip?.(element, tag) === true) {
+    if (SKIP_TAGS.has(tag)) {
+      continue;
+    }
+
+    // A block skipped here is read elsewhere, but it still stands between the
+    // text on either side of it: `<li>a<ul>…</ul>c</li>` read `ac`. Deferred,
+    // because whether text follows is only known once the walk gets there.
+    if (skip?.(element, tag) === true) {
+      if (BLOCK_TAGS.has(tag)) {
+        breakLine(out, marks, link, true);
+      }
+
       continue;
     }
 
@@ -522,6 +554,23 @@ function walk(
 export function parseRichText(root: Node, skip?: SkipPredicate): RichText {
   const out: TextRun[] = [];
   walk(root, [], undefined, root, out, skip);
+
+  // Only trailing deferred breaks can lack text after them, so the splices
+  // happen at the tail.
+  let textAfter = false;
+
+  for (let index = out.length - 1; index >= 0; index -= 1) {
+    const run = out[index]!;
+
+    if (DEFERRED_BREAKS.has(run)) {
+      if (!textAfter) {
+        out.splice(index, 1);
+      }
+    } else if (run.text.trim().length > 0) {
+      textAfter = true;
+    }
+  }
+
   return normalizeRuns(out);
 }
 
@@ -1581,30 +1630,42 @@ function visitDetails(doc: Document, element: Element, depth: number, out: Block
 function pushTable(out: Block[], element: Element, depth: number): void {
   const rows: TableRows = [];
 
+  const children = [...element.children];
+
   // A table block has no caption, so the caption is the paragraph above it
   // rather than text that silently goes nowhere.
-  const caption = element.querySelector(':scope > caption');
+  const caption = children.find((child) => tagNameOf(child) === 'CAPTION');
   const captionRuns = caption ? parseRichText(caption) : [];
 
   if (!isRichEmpty(captionRuns)) {
     out.push(createBlock('paragraph', captionRuns, depthOf(element, depth)));
   }
 
-  // Scoped, so a nested table does not contribute its rows to this one — and
-  // each cell is stripped of nested tables before its text is read.
-  for (const row of element.querySelectorAll(
-    ':scope > tr, :scope > thead > tr, :scope > tbody > tr, :scope > tfoot > tr',
-  )) {
+  // Rows and cells come from the children, so a nested table contributes no
+  // rows to this one, and each cell's text is read skipping nested tables.
+  // Not by a `:scope >` query, which walks -- recursively, in some DOMs -- the
+  // whole subtree, nor by cutting nested tables out of a copy: a table in a
+  // list item has its cells read, and a cell can hold the rest of the list, so
+  // either one read every level below once per level.
+  const rowElements = children.flatMap((child) => {
+    const tag = tagNameOf(child);
+
+    return tag === 'TR'
+      ? [child]
+      : tag === 'THEAD' || tag === 'TBODY' || tag === 'TFOOT'
+        ? [...child.children].filter((row) => tagNameOf(row) === 'TR')
+        : [];
+  });
+
+  for (const row of rowElements) {
     const cells: RichText[] = [];
 
-    for (const cell of row.querySelectorAll(':scope > th, :scope > td')) {
-      const clone = cell.cloneNode(true) as Element;
+    for (const cell of row.children) {
+      const tag = tagNameOf(cell);
 
-      for (const nested of clone.querySelectorAll('table')) {
-        nested.remove();
+      if (tag === 'TH' || tag === 'TD') {
+        cells.push(parseRichText(cell, isNestedTable));
       }
-
-      cells.push(parseRichText(clone));
     }
 
     if (cells.length > 0) {
@@ -1659,11 +1720,28 @@ function visitQuote(element: Element, depth: number, out: Block[]): void {
  * itself, and returning both would emit their items twice.
  */
 function outermostLists(element: Element): Element[] {
-  return [...element.querySelectorAll('ul, ol')].filter((list) => {
-    const enclosing = list.parentElement?.closest('ul, ol') ?? null;
+  const lists: Element[] = [];
+  const walker = element.ownerDocument.createTreeWalker(element, SHOW_ELEMENT, {
+    // A list is taken and not descended into, so each quote reads only its own
+    // content. Querying the whole subtree instead read every level below once
+    // per level, which a quote in a list item, nested, made quadratic.
+    acceptNode: (candidate) => {
+      const tag = tagNameOf(candidate);
 
-    return enclosing === null || !element.contains(enclosing);
+      if (tag === 'UL' || tag === 'OL') {
+        lists.push(candidate as Element);
+        return FILTER_REJECT;
+      }
+
+      return FILTER_ACCEPT;
+    },
   });
+
+  while (walker.nextNode()) {
+    // The filter collects as the walk goes.
+  }
+
+  return lists;
 }
 
 /** A `<figure>` carries the caption; a bare `<img>` is just the image. */
@@ -1698,73 +1776,54 @@ function pushImage(out: Block[], element: Element, depth: number): boolean {
   return true;
 }
 
-/** The lists an element holds directly, which continue one level deeper. */
-function childLists(element: Element): Element[] {
-  return [...element.children].filter((child) => {
-    const tag = tagNameOf(child);
-
-    return tag === 'UL' || tag === 'OL';
-  });
-}
-
-/** What a list item can hold besides its text: blocks of their own. */
+/**
+ * What a list item can hold besides its text: blocks of their own, as direct
+ * children only. Each of these reads without descending into an inline wrapper
+ * -- a heading or a quote parses its own text, a code block or a table reads
+ * its own cells -- so formatting is never pushed inward from inside an item,
+ * which a list item, read whole, has always been sealed against: done once per
+ * level, it cloned everything below. A `<figure>` or `<img>` counts only with
+ * an image the reader will take; any other is no block and splits nothing.
+ */
 const ITEM_BLOCK_TAGS = new Set([
   ...Object.keys(HEADING_TYPES),
-  'UL',
-  'OL',
   'BLOCKQUOTE',
-  'DETAILS',
   'PRE',
   'TABLE',
-  'FIGURE',
-  'IMG',
   'HR',
 ]);
 
-const ITEM_BLOCK_DESCENDANTS = new WeakMap<Element, Element | null>();
-
 function isItemBlock(element: Element): boolean {
+  const tag = tagNameOf(element);
+
   return (
-    ITEM_BLOCK_TAGS.has(tagNameOf(element)) ||
-    hasUsableImage(element) ||
-    firstDescendant(
-      element,
-      (candidate) => ITEM_BLOCK_TAGS.has(tagNameOf(candidate)),
-      ITEM_BLOCK_DESCENDANTS,
-    ) !== null
+    ITEM_BLOCK_TAGS.has(tag) || ((tag === 'IMG' || tag === 'FIGURE') && hasUsableImage(element))
   );
 }
 
 /**
- * Where a list item's text ends and its blocks begin, as a child index, or -1
- * when it is text followed by nothing but nested lists -- the shape of every
- * item this editor writes, and of most that others do.
+ * The children a list item hands on as blocks of their own: its nested lists,
+ * as always, and now its blocks.
  *
  * Read whole, a foreign item's image, table or code block went into its text
- * or nowhere (`<li>Open settings<br><img …></li>` lost the picture), and text
- * after a nested list was hoisted above it.
+ * or nowhere (`<li>Open settings<br><img …></li>` lost the picture). Its
+ * nested lists, its blocks, and a paragraph after the first of them are its
+ * children, in order; everything else is its text, read in place. So bare text
+ * after a block is still the item's, and the item -- its to-do, its number --
+ * survives a block in front of its text.
  */
-function itemTextEnd(item: Element): number {
-  const children = [...item.childNodes];
-  const end = children.findIndex(
-    (node) => node.nodeType === ELEMENT_NODE && isItemBlock(node as Element),
-  );
+function itemBlocks(item: Element): Set<Element> {
+  const blocks = new Set<Element>();
 
-  if (end === -1) {
-    return -1;
+  for (const child of item.children) {
+    const tag = tagNameOf(child);
+
+    if (tag === 'UL' || tag === 'OL' || isItemBlock(child) || (tag === 'P' && blocks.size > 0)) {
+      blocks.add(child);
+    }
   }
 
-  const listsOnly = children.slice(end).every((node) => {
-    if (node.nodeType === ELEMENT_NODE) {
-      const tag = tagNameOf(node as Element);
-
-      return tag === 'UL' || tag === 'OL';
-    }
-
-    return node.nodeType !== TEXT_NODE || (node.nodeValue ?? '').trim() === '';
-  });
-
-  return listsOnly ? -1 : end;
+  return blocks;
 }
 
 /**
@@ -1804,30 +1863,16 @@ function visitListItemInner(
   declared: boolean,
 ): void {
   const itemDepth = depthOf(item, depth);
-  const end = itemTextEnd(item);
-  let text = item;
-
-  // The item's text is what comes before its first block, parsed with a copy
-  // of the item as its root; the rest is visited in place as the item's
-  // children. Only the text is copied: it holds no block, so no deeper level,
-  // and copying the rest made every level of a nested list copy all below it.
-  if (end !== -1) {
-    text = item.cloneNode(false) as Element;
-
-    for (const node of [...item.childNodes].slice(0, end)) {
-      text.append(node.cloneNode(true));
-    }
-  }
-
-  const blocks = end !== -1;
-  const nested = blocks ? [] : childLists(item);
+  const blocks = itemBlocks(item);
+  // Read in place, never copied: an item holds the whole list below it.
+  const skip: SkipPredicate = (element, tag) => isNestedList(element, tag) || blocks.has(element);
   const checkbox = findWithin(
-    text,
-    isNestedList,
+    item,
+    skip,
     (element) => tagNameOf(element) === 'INPUT' && element.getAttribute('type') === 'checkbox',
   );
   const state = item.getAttribute(TODO_ATTR);
-  let runs = parseRichText(text, isNestedList);
+  let runs = parseRichText(item, skip);
   let type = fallback;
   let checked = false;
 
@@ -1856,11 +1901,19 @@ function visitListItemInner(
     }
   }
 
+  // Beside a foreign item's blocks, text that is only whitespace or a break is
+  // the layout around them: `<li>\n<pre>…</pre>\n</li>` holds a code block,
+  // not a line of nothing above it. Our own lists keep an item's whitespace.
+  if (!declared && blocks.size > 0 && richToPlainText(runs).trim() === '') {
+    runs = [];
+  }
+
   // An empty item is a real blank bullet — unless it exists only to hold the
-  // list or the blocks nested under it, which is how indentation alone is written by other
-  // editors. Never by this one, which hangs a nested list off the item it
-  // belongs to: in a list it wrote, an empty item is always a block.
-  if (!isRichEmpty(runs) || (nested.length === 0 && !blocks) || declared) {
+  // lists or blocks nested under it, which is how indentation alone is written
+  // by other editors. Never by this one, which hangs a nested list off the item it
+  // belongs to: in a list it wrote, an empty item is always a block. A to-do's
+  // box is content of its own, so an empty to-do stays.
+  if (!isRichEmpty(runs) || blocks.size === 0 || declared || type === 'todo') {
     const block = createBlock(type, runs, itemDepth);
 
     if (type === 'todo') {
@@ -1871,13 +1924,11 @@ function visitListItemInner(
   }
 
   // A list nested inside the item continues one level deeper, and so does
-  // every other block it holds.
-  for (const child of nested) {
-    visitList(child, itemDepth + 1, out);
-  }
-
-  if (blocks) {
-    visitBlocks(item.ownerDocument, item, itemDepth + 1, out, undefined, end);
+  // every other block it holds, in the order the item holds them.
+  if (blocks.size > 0) {
+    visitBlocks(item.ownerDocument, item, itemDepth + 1, out, undefined, (child) =>
+      blocks.has(child as Element),
+    );
   }
 }
 
@@ -1886,8 +1937,15 @@ function visitList(list: Element, depth: number, out: Block[]): void {
   const declared = list.hasAttribute(LIST_ATTR);
 
   for (const child of list.children) {
-    if (tagNameOf(child) === 'LI') {
+    const tag = tagNameOf(child);
+
+    if (tag === 'LI') {
       visitListItem(child, fallback, depth, out, declared);
+    } else if (tag === 'UL' || tag === 'OL') {
+      // A list directly inside a list -- what Google Docs and a browser's own
+      // indent command write -- is the item before it continuing a level in.
+      // It was skipped, with everything under it.
+      visitList(child, depth + 1, out);
     }
   }
 }
@@ -1898,8 +1956,8 @@ function visitList(list: Element, depth: number, out: Block[]): void {
  * Inline nodes between block elements are buffered and flushed as a paragraph,
  * so stray text at the top level is not silently dropped.
  *
- * @param from The first child to visit: a list item's blocks start after its
- * text, which the item has already read.
+ * @param include Which children to visit, where only some are blocks: a list
+ * item's, whose text the item has already read in place.
  */
 function visitBlocks(
   doc: Document,
@@ -1907,10 +1965,10 @@ function visitBlocks(
   depth: number,
   out: Block[],
   exclude?: Node,
-  from = 0,
+  include?: (child: Node) => boolean,
 ): void {
   if (blockNesting >= MAX_BLOCK_NESTING) {
-    for (const rest of from === 0 ? [node] : [...node.childNodes].slice(from)) {
+    for (const rest of include ? [...node.childNodes].filter(include) : [node]) {
       pushRemainder(out, rest, depth);
     }
 
@@ -1920,7 +1978,7 @@ function visitBlocks(
   blockNesting += 1;
 
   try {
-    visitBlocksInner(doc, node, depth, out, exclude, from);
+    visitBlocksInner(doc, node, depth, out, exclude, include);
   } finally {
     blockNesting -= 1;
   }
@@ -1932,7 +1990,7 @@ function visitBlocksInner(
   depth: number,
   out: Block[],
   exclude?: Node,
-  from = 0,
+  include?: (child: Node) => boolean,
 ): void {
   let buffer: Node[] = [];
 
@@ -1955,8 +2013,8 @@ function visitBlocksInner(
     }
   };
 
-  for (const child of [...node.childNodes].slice(from)) {
-    if (child === exclude) {
+  for (const child of [...node.childNodes]) {
+    if (child === exclude || (include && !include(child))) {
       continue;
     }
 

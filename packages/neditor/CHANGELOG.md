@@ -175,9 +175,13 @@ that changes what you store or what other applications receive is listed first.
   line break, lost it; an empty list item with a list nested under it was
   dropped; and a list item holding only whitespace came back empty.
 - HTML clipboard, from other applications (also on earlier versions): an
-  image, table, code block, quote or heading inside a list item was dropped or
-  flattened into the item's text, a list nested in a wrapper inside one was
-  dropped, and text after a nested list moved above it. They are now the
-  item's children, in order. A table's `<caption>`, which was dropped, is a
-  paragraph above the table, and a checkbox to-do (GitHub's task lists) no
-  longer keeps the space after the box.
+  image, table, code block, quote, heading or rule inside a list item was
+  dropped or flattened into the item's text, and a paragraph after a nested
+  list moved above it. They are now the item's children, in order; the item
+  itself, its to-do box and its number stay, and bare text after one of them
+  stays the item's text, on a line of its own rather than joined to the word
+  before it. A list nested directly inside a list (Google Docs, and a browser's
+  own indent command) was dropped with everything under it; it is a level
+  deeper. A table's `<caption>`, which was dropped, is a paragraph above the
+  table, and a checkbox to-do (GitHub's task lists) no longer keeps the space
+  after the box.
