@@ -273,9 +273,9 @@ const isNestedList: SkipPredicate = (_element, tag) => tag === 'UL' || tag === '
  * A trailing `<br>` is the filler contenteditable appends to keep an empty
  * line selectable; it is presentation, not content, and must not become a
  * newline. Only a `<br>` asks: a block's own line breaks are deferred until
- * text arrives (see `breakLine`), which is why a `<br>` with nothing after it
- * makes the deferred break before it stand -- it is a blank line after a
- * block, not the filler at the end of one.
+ * text arrives (see `breakLine`). Every `<br>`, whatever follows it, makes the
+ * deferred break before it stand -- after a block it is a blank line, not the
+ * filler at the end of one.
  */
 function hasContentAfter(node: Node, root: Node, skip?: SkipPredicate): boolean {
   const walker = root.ownerDocument?.createTreeWalker(root, SHOW_TEXT | SHOW_ELEMENT, {
@@ -360,6 +360,9 @@ const DEFERRED_BREAKS = new WeakSet<TextRun>();
 /** The space a skipped inline element leaves, kept only between two words. */
 const SKIPPED_SPACES = new WeakSet<TextRun>();
 
+/** Blank paragraphs a lone `<br>` made between blocks; trimmed at a paste's ends. */
+const BLANK_LINES = new WeakSet<Block>();
+
 /** Appends a newline unless the output is empty or already ends with one. */
 function breakLine(
   out: TextRun[],
@@ -425,8 +428,15 @@ let blockNesting = 0;
 let listNesting = 0;
 let inlineNesting = 0;
 
-/** The root of the paste `blocksFromHtml` is reading, whose edges are mid-line. */
-let pasteRoot: Node | null = null;
+/**
+ * The first and last text of the paste `blocksFromHtml` is reading, other than
+ * layout, each with its ancestors: wherever it sits -- loose at the root or
+ * inside the first or last block, as Firefox puts a selected edge space -- the
+ * run holding one is at the paste's edge, which lands mid-line. Collected once
+ * per paste, so a run asks in the time it takes to look at its own nodes.
+ */
+let pasteFirst = new Set<Node>();
+let pasteLast = new Set<Node>();
 
 /**
  * The text of a subtree, gathered with a cursor.
@@ -499,6 +509,11 @@ function walk(
 
       if (hasContentAfter(child, root, skip)) {
         out.push({ text: '\n', marks: [...marks], link });
+      } else if (/[\uFDD2\uFDD4]$/.test(last?.text ?? '')) {
+        // Nor is it filler after a line break a style preserved: the break is
+        // a line of its own then, as after a block, and `collapseWhitespace`
+        // must not take it for the end of the text.
+        out.push({ text: STANDS, marks: [...marks], link });
       }
 
       continue;
@@ -2131,6 +2146,34 @@ function visitList(list: Element, depth: number, out: Block[]): void {
   }
 }
 
+/** Layout at a paste's edge: layout text, or an element holding no text at all. */
+function isEdgeLayout(node: Node): boolean {
+  return node.nodeType === ELEMENT_NODE
+    ? tagNameOf(node) !== 'BR' && subtreeText(node).length === 0
+    : isLayoutText(node);
+}
+
+/** Whether a node is or holds a `<br>`, walked without recursion. */
+function holdsBreak(node: Node): boolean {
+  if (tagNameOf(node) === 'BR') {
+    return true;
+  }
+
+  if (node.nodeType !== ELEMENT_NODE) {
+    return false;
+  }
+
+  const walker = node.ownerDocument!.createTreeWalker(node, SHOW_ELEMENT);
+
+  for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
+    if (tagNameOf(found) === 'BR') {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 /** A text node of collapsible whitespace that holds a line break. */
 function isLayoutText(node: Node): boolean {
   const value = node.nodeType === TEXT_NODE ? (node.nodeValue ?? '') : '';
@@ -2155,6 +2198,8 @@ const RESTORED: Readonly<Record<string, string>> = { '\uFDD0': ' ', '\uFDD1': '\
 const LINE_BREAK = '\uFDD4';
 /** Put before a mark the text already held, so it reads as itself. */
 const LITERAL = '\uFDD3';
+/** A `<br>` after a preserved break: that break stands rather than ends the text. */
+const STANDS = '\uFDD5';
 
 type WhiteSpace = 'normal' | 'pre' | 'pre-line';
 
@@ -2198,32 +2243,46 @@ function declaredWhiteSpace(element: Element): WhiteSpace | null {
     return null;
   }
 
-  // The last valid declaration wins; an invalid one is ignored, as CSS ignores
-  // it, and `inherit`, `unset` and `revert` inherit (null).
+  // The last valid declaration wins, an `!important` one over any that is not;
+  // an invalid one is ignored, as CSS ignores it, and `inherit`, `unset` and
+  // `revert` inherit (null).
   let declared: WhiteSpace | null = null;
+  let important: WhiteSpace | null | undefined;
 
-  for (const match of style.matchAll(/(?:^|;)\s*white-space\s*:\s*([a-z-]+)/gi)) {
-    const value = (match[1] ?? '').toLowerCase();
+  for (const match of style.matchAll(/(?:^|;)\s*white-space\s*:([^;]*)/gi)) {
+    let value = (match[1] ?? '').trim().toLowerCase();
+    const isImportant = /!\s*important$/.test(value);
 
-    if (value in WHITE_SPACE_VALUES) {
-      declared = WHITE_SPACE_VALUES[value]!;
-    } else if (INHERITING.has(value)) {
-      declared = null;
+    if (isImportant) {
+      value = value.slice(0, value.lastIndexOf('!')).trim();
+    }
+
+    const mode = WHITE_SPACE_VALUES.get(value);
+    const valid = mode !== undefined || INHERITING.has(value);
+
+    if (!valid) {
+      continue;
+    }
+
+    if (isImportant) {
+      important = mode ?? null;
+    } else {
+      declared = mode ?? null;
     }
   }
 
-  return declared;
+  return important === undefined ? declared : important;
 }
 
-const WHITE_SPACE_VALUES: Readonly<Record<string, WhiteSpace>> = {
-  normal: 'normal',
-  nowrap: 'normal',
-  initial: 'normal',
-  pre: 'pre',
-  'pre-wrap': 'pre',
-  'break-spaces': 'pre',
-  'pre-line': 'pre-line',
-};
+const WHITE_SPACE_VALUES = new Map<string, WhiteSpace>([
+  ['normal', 'normal'],
+  ['nowrap', 'normal'],
+  ['initial', 'normal'],
+  ['pre', 'pre'],
+  ['pre-wrap', 'pre'],
+  ['break-spaces', 'pre'],
+  ['pre-line', 'pre-line'],
+]);
 
 const INHERITING = new Set(['inherit', 'unset', 'revert', 'revert-layer']);
 
@@ -2246,7 +2305,7 @@ function collapseWhitespace(root: Element, edges: { start: boolean; end: boolean
   const walker = root.ownerDocument.createTreeWalker(root, SHOW_TEXT);
 
   for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
-    const value = (found.nodeValue ?? '').replace(/[\uFDD0-\uFDD4]/g, (char) => LITERAL + char);
+    const value = (found.nodeValue ?? '').replace(/[\uFDD0-\uFDD5]/g, (char) => LITERAL + char);
     const mode = whiteSpaceOf(found.parentElement);
 
     // What a style preserves is marked, so the pass below keeps it.
@@ -2281,6 +2340,8 @@ function collapseWhitespace(root: Element, edges: { start: boolean; end: boolean
         }
 
         literal = !literal;
+      } else if (char === STANDS) {
+        lastPreservedBreak = -1;
       } else if (char === ' ') {
         if (!suppress) {
           chars[index]!.push(' ');
@@ -2368,27 +2429,28 @@ function visitBlocksInner(
 ): void {
   let buffer: Node[] = [];
 
-  // At the top of a paste, inline content before the first block and after the
-  // last lands in the middle of a line, so a space at those edges stays.
-  const atRoot = node === pasteRoot;
-  let blockSeen = false;
-
-  const flushInline = (atEnd = false): void => {
-    const edges = { start: atRoot && !blockSeen, end: atRoot && atEnd };
-
-    if (!atEnd) {
-      blockSeen = true;
+  const flushInline = (): void => {
+    if (buffer.length === 0) {
+      return;
     }
+
+    // A space at a paste's edges stays: the paste lands mid-line.
+    const edges = {
+      start: buffer.some((inline) => pasteFirst.has(inline)),
+      end: buffer.some((inline) => pasteLast.has(inline)),
+    };
 
     // Layout text around the fragment itself (Firefox wraps it in newlines)
     // is no space someone typed -- but a space with no line break is: Firefox
     // copies a selected trailing space as `<b>Hello</b> `. A no-break space is
     // never layout.
-    while (edges.start && buffer.length > 0 && isLayoutText(buffer[0]!)) {
+    // An element with no text at all -- an icon's empty `<i>` -- is no edge
+    // either: the layout beside it is still layout.
+    while (edges.start && buffer.length > 0 && isEdgeLayout(buffer[0]!)) {
       buffer.shift();
     }
 
-    while (edges.end && buffer.length > 0 && isLayoutText(buffer[buffer.length - 1]!)) {
+    while (edges.end && buffer.length > 0 && isEdgeLayout(buffer[buffer.length - 1]!)) {
       buffer.pop();
     }
 
@@ -2414,11 +2476,22 @@ function visitBlocksInner(
       }
     }
 
+    // A lone `<br>` between two blocks is a blank line of its own, as two of
+    // them already read as one block holding a line break. At either end of
+    // the paste there is nothing for it to stand between, and
+    // `blocksFromHtml` trims it.
+    const blankLine = buffer.some(holdsBreak);
+
     buffer = [];
     const runs = collapseWhitespace(wrapper, edges);
 
     if (!isRichEmpty(runs)) {
       out.push(createBlock('paragraph', runs, depth));
+    } else if (blankLine) {
+      const block = createBlock('paragraph', [], depth);
+
+      BLANK_LINES.add(block);
+      out.push(block);
     }
   };
 
@@ -2553,7 +2626,7 @@ function visitBlocksInner(
     buffer.push(element);
   }
 
-  flushInline(true);
+  flushInline();
 }
 
 /** Parses an HTML string into blocks, for a multi-block paste. */
@@ -2569,15 +2642,63 @@ export function blocksFromHtml(doc: Document, html: string): Block[] {
   blockNesting = 0;
   listNesting = 0;
   inlineNesting = 0;
-  pasteRoot = template.content;
+
+  // The paste's first and last content -- text that is not layout, a line
+  // break, an image. Only text is an edge: a paste that starts or ends with a
+  // break or a picture does not start or end mid-line in its text.
+  const walker = doc.createTreeWalker(template.content, SHOW_TEXT | SHOW_ELEMENT, {
+    acceptNode: (candidate) => {
+      const tag = tagNameOf(candidate);
+
+      return SKIP_TAGS.has(tag)
+        ? FILTER_REJECT
+        : (candidate.nodeType === TEXT_NODE && !isLayoutText(candidate)) ||
+            tag === 'BR' ||
+            tag === 'IMG'
+          ? FILTER_ACCEPT
+          : FILTER_SKIP;
+    },
+  });
+  const first = walker.nextNode();
+  let last = first;
+
+  for (let found = first; found !== null; found = walker.nextNode()) {
+    last = found;
+  }
+
+  const withAncestors = (node: Node | null): Set<Node> => {
+    const nodes = new Set<Node>();
+
+    for (let at = node?.nodeType === TEXT_NODE ? node : null; at; at = at.parentNode) {
+      nodes.add(at);
+    }
+
+    return nodes;
+  };
+
+  pasteFirst = withAncestors(first);
+  pasteLast = withAncestors(last);
 
   try {
     visitBlocks(doc, template.content, 0, out);
   } finally {
-    pasteRoot = null;
+    pasteFirst = new Set();
+    pasteLast = new Set();
   }
 
-  return out;
+  // A blank line at either end stands between nothing.
+  let from = 0;
+  let to = out.length;
+
+  while (from < to && BLANK_LINES.has(out[from]!)) {
+    from += 1;
+  }
+
+  while (to > from && BLANK_LINES.has(out[to - 1]!)) {
+    to -= 1;
+  }
+
+  return out.slice(from, to);
 }
 
 /** Parses an HTML string, for clipboard payloads. */

@@ -2077,8 +2077,13 @@ describe('audit 31', () => {
   });
 
   // Leading whitespace is layout, not a space in front of the text.
+  // (At the very start of a paste it is the paste's edge, which keeps it --
+  // Firefox copies a selected leading space that way; see audit 36.)
   test('whitespace before the first inline node is not kept', () => {
-    expect(shape('<div> <b>x</b></div>')).toEqual([{ type: 'paragraph', depth: 0, text: 'x' }]);
+    expect(shape('<p>a</p><div> <b>x</b></div>')).toEqual([
+      { type: 'paragraph', depth: 0, text: 'a' },
+      { type: 'paragraph', depth: 0, text: 'x' },
+    ]);
   });
 
   // Nor is whitespace after the last text, before an empty element or a break.
@@ -2561,5 +2566,63 @@ describe('audit 35', () => {
     ['<span style="white-space:pre-line">a \nb</span>', 'a\nb'],
   ])('%j reads %j', (html, expected) => {
     expect(text(html)).toEqual([expected]);
+  });
+});
+
+describe('audit 36', () => {
+  const text = (html: string) =>
+    blocksFromHtml(document, html).map((block) => richToPlainText(block.content));
+
+  // A `<br>` after a preserved line break is a line of its own, so the break
+  // stands: every browser copies a pre-wrap block ending in a blank line so.
+  test.each([
+    ['<div style="white-space:pre-wrap">first\n<br></div><div>second</div>', ['first\n', 'second']],
+    ['<div>W<span style="white-space:pre-line">\n</span><br></div><div>x</div>', ['W\n', 'x']],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  // One blank line between two blocks is a block of its own, as two are --
+  // and a blank line that is all there is, or at either end, is nothing.
+  test.each([
+    ['<div>a</div><br><div>b</div>', ['a', '', 'b']],
+    ['<div>a</div><div><br></div><div>b</div>', ['a', '', 'b']],
+    ['<div>a</div><br><br><div>b</div>', ['a', '\n', 'b']],
+    ['<div><br></div>', []],
+    ['<div><br></div><div>a</div>', ['a']],
+    ['<div>a</div><div><br></div>', ['a']],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  // Firefox puts a selected edge space inside the first or last block: the
+  // paste's edges are its first and last text, wherever they sit.
+  test.each([
+    ['<div>one</div><div>two three </div>', ['one', 'two three ']],
+    ['<div> <b>b</b></div><div>c</div>', [' b', 'c']],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  // The keywords, each checked against Chromium.
+  test.each([
+    ['<div style="white-space:pre-wrap"><span style="white-space:nowrap">a  b</span></div>', 'a b'],
+    ['<span style="white-space:pre-wrap; white-space:revert">a  b</span>', 'a b'],
+    ['<span style="white-space:pre-wrap; white-space:unset">a  b</span>', 'a b'],
+    ['<span style="white-space:pre-wrap; white-space:revert-layer">a  b</span>', 'a b'],
+    ['<span style="white-space:pre-wrap !important; white-space:normal">a  b</span>', 'a  b'],
+    ['<span style="white-space:pre-wrap; white-space:constructor">a  b</span>', 'a  b'],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)[0]).toBe(expected);
+  });
+
+  // An escaped mark is text: it ends a run of spaces, and a break does not
+  // take it for one.
+  test.each([
+    ['<div>\uFDD0 x</div>', '\uFDD0 x'],
+    ['<div>a \uFDD0<br>b</div>', 'a \uFDD0\nb'],
+    ['<div><span style="white-space:pre-wrap">a\n\uFDD0</span></div>', 'a\n\uFDD0'],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)[0]).toBe(expected);
   });
 });

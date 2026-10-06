@@ -202,7 +202,13 @@ that changes what you store or what other applications receive is listed first.
   space as a bare one -- while layout around the fragment does not. Inside a
   paragraph whitespace is kept as it stands, which is how this editor's own
   clipboard writes a line break between two runs. Each `<br>` alone on a line
-  after a block is a blank line.
+  after a block is a blank line, including after a line break a style
+  preserved. A lone `<br>` between two top-level blocks is a blank paragraph,
+  as a browser draws it -- VS Code writes empty lines that way, and Google
+  Docs puts one between a paragraph and a following list or table, so a
+  Google Docs paste now shows those blank lines. A paste's edges are its first
+  and last text wherever they sit, so Firefox's selected edge space inside the
+  first or last block is kept too.
 - HTML clipboard (also on earlier versions): a table nested in a table cell
   is read as that cell's text instead of being dropped with it, so an HTML
   email laid out in nested tables keeps its content; a list inside a wrapper
