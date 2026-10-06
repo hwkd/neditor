@@ -2626,3 +2626,78 @@ describe('audit 36', () => {
     expect(text(html)[0]).toBe(expected);
   });
 });
+
+describe('audit 37', () => {
+  const text = (html: string) =>
+    blocksFromHtml(document, html).map((block) => richToPlainText(block.content));
+
+  // A `<br>` after a wrapper that holds blocks ends the wrapper's open line:
+  // no blank paragraph, as Chromium draws it.
+  test.each([
+    [
+      '<p>Intro</p><a href="https://x.test/"><div>Title</div>Read more</a><br><p>Next</p>',
+      ['Intro', 'Title', 'Read more', 'Next'],
+    ],
+    [
+      '<p>Intro</p><span>Lead <div>Block</div>tail</span><br><p>Next</p>',
+      ['Intro', 'Lead', 'Block', 'tail', 'Next'],
+    ],
+    ['<div>lead<span><br><div>x</div></span></div>', ['lead', 'x']],
+    // A block's start is a new line, so a `<br>` there is still a blank one.
+    ['<p>a</p>text<div><br><div>x</div></div>', ['a', 'text', '', 'x']],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  // A block before the paste's first text, or after its last, starts or ends
+  // a line there: the text is no edge.
+  test.each([
+    ['<p></p><hr> text more<p>q</p>', ['', '', 'text more', 'q']],
+    ['<hr> text', ['', 'text']],
+    ['text <hr>', ['text', '']],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  // Spaces between a preserved break and a `<br>` do not hide the blank line.
+  test.each([
+    ['<div><span style="white-space:pre-wrap">a\n</span> <br></div><div>b</div>', ['a\n', 'b']],
+    ['<div style="white-space:pre-line">a\n <br></div><div>b</div>', ['a\n', 'b']],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  // The mark exists only while whitespace is collapsed: a noncharacter in a
+  // paragraph's text before its filler `<br>` gains nothing.
+  test.each([
+    ['<p>x\uFDD2<br></p>', 'x\uFDD2'],
+    ['<ul><li>x\uFDD4<br></li></ul>', 'x\uFDD4'],
+    ['<div>a\uFDD5b</div>', 'a\uFDD5b'],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)[0]).toBe(expected);
+  });
+
+  // The edge walker passes over layout and what is never read.
+  test.each([
+    ['<p>y</p><div>x </div>\n', ['y', 'x ']],
+    ['<p>y</p><div>x </div><style>a{}</style>', ['y', 'x ']],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  // A `<br>` inside an inline element makes a blank line as a bare one does.
+  test('a wrapped blank line between blocks', () => {
+    expect(text('<p>a</p><b><br></b><p>b</p>')).toEqual(['a', '', 'b']);
+  });
+
+  // `!important` with a space, and an important `inherit`.
+  test.each([
+    ['<span style="white-space:pre-wrap ! important; white-space:normal">a  b</span>', 'a  b'],
+    [
+      '<div style="white-space:pre"><span style="white-space:pre-wrap; white-space:inherit !important; white-space:normal">a  b</span></div>',
+      'a  b',
+    ],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)[0]).toBe(expected);
+  });
+});

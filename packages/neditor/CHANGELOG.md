@@ -206,9 +206,12 @@ that changes what you store or what other applications receive is listed first.
   preserved. A lone `<br>` between two top-level blocks is a blank paragraph,
   as a browser draws it -- VS Code writes empty lines that way, and Google
   Docs puts one between a paragraph and a following list or table, so a
-  Google Docs paste now shows those blank lines. A paste's edges are its first
-  and last text wherever they sit, so Firefox's selected edge space inside the
-  first or last block is kept too.
+  Google Docs paste now shows those blank lines; a `<br>` that ends an inline
+  line -- after a wrapper holding blocks -- is not one. A paste's edges are its
+  first and last text, loose or inside its first or last block, so Firefox's
+  selected edge space there is kept too -- unless a block (a divider, an empty
+  paragraph) comes before that first text or after that last, or the text is
+  inside a wrapper whose formatting is pushed into the blocks it holds.
 - HTML clipboard (also on earlier versions): a table nested in a table cell
   is read as that cell's text instead of being dropped with it, so an HTML
   email laid out in nested tables keeps its content; a list inside a wrapper

@@ -439,6 +439,17 @@ let pasteFirst = new Set<Node>();
 let pasteLast = new Set<Node>();
 
 /**
+ * Whether inline text has started a line that nothing has ended yet. A `<br>`
+ * run ends such a line rather than making a blank one: the inline text a
+ * wrapper holding blocks ends with goes on after the wrapper, and the line a
+ * `<br>` after it closes is that one.
+ */
+let lineOpen = false;
+
+/** Set while `collapseWhitespace` parses, the only reader of its marks. */
+let collapsing = false;
+
+/**
  * The text of a subtree, gathered with a cursor.
  *
  * Not `textContent`: the DOM implementation this package is tested against
@@ -509,10 +520,11 @@ function walk(
 
       if (hasContentAfter(child, root, skip)) {
         out.push({ text: '\n', marks: [...marks], link });
-      } else if (/[\uFDD2\uFDD4]$/.test(last?.text ?? '')) {
-        // Nor is it filler after a line break a style preserved: the break is
-        // a line of its own then, as after a block, and `collapseWhitespace`
-        // must not take it for the end of the text.
+      } else if (collapsing) {
+        // Nor is it filler after a line break a style preserved, however much
+        // collapsible space sits between: the break is a line of its own then,
+        // as after a block, and `collapseWhitespace` must not take it for the
+        // end of the text. Only it reads the mark, so only it is given one.
         out.push({ text: STANDS, marks: [...marks], link });
       }
 
@@ -2322,7 +2334,15 @@ function collapseWhitespace(root: Element, edges: { start: boolean; end: boolean
 
   // Every unmarked space left is collapsible; every newline is a break the
   // walk wrote. The edges of a paste are the middle of a line, not its ends.
-  const runs = parseRichText(root);
+  collapsing = true;
+  let runs: RichText;
+
+  try {
+    runs = parseRichText(root);
+  } finally {
+    collapsing = false;
+  }
+
   const chars = runs.map((): string[] => []);
   let suppress = !edges.start;
   let lastSpace = -1;
@@ -2429,8 +2449,25 @@ function visitBlocksInner(
 ): void {
   let buffer: Node[] = [];
 
-  const flushInline = (): void => {
+  // A block ends the line it is on; it is applied once the block has been
+  // visited, since what the block holds may have opened one of its own.
+  let closeAfter = false;
+
+  /**
+   * @param continues Whether what comes next goes on with the line -- a wrapper
+   * holding blocks, whose own inline text starts on it -- rather than a block
+   * that starts a new one.
+   */
+  const flushInline = (continues = false): void => {
+    if (!continues) {
+      closeAfter = true;
+    }
+
     if (buffer.length === 0) {
+      if (!continues) {
+        lineOpen = false;
+      }
+
       return;
     }
 
@@ -2455,6 +2492,10 @@ function visitBlocksInner(
     }
 
     if (buffer.length === 0) {
+      if (!continues) {
+        lineOpen = false;
+      }
+
       return;
     }
 
@@ -2484,18 +2525,34 @@ function visitBlocksInner(
 
     buffer = [];
     const runs = collapseWhitespace(wrapper, edges);
+    const opened = lineOpen;
 
     if (!isRichEmpty(runs)) {
       out.push(createBlock('paragraph', runs, depth));
+      lineOpen = true;
     } else if (blankLine) {
-      const block = createBlock('paragraph', [], depth);
+      // A `<br>` that ends an open line is no blank line of its own.
+      if (!opened) {
+        const block = createBlock('paragraph', [], depth);
 
-      BLANK_LINES.add(block);
-      out.push(block);
+        BLANK_LINES.add(block);
+        out.push(block);
+      }
+
+      lineOpen = false;
+    }
+
+    if (!continues) {
+      lineOpen = false;
     }
   };
 
   for (const child of [...node.childNodes]) {
+    if (closeAfter) {
+      lineOpen = false;
+      closeAfter = false;
+    }
+
     if (child === exclude || (include && !include(child))) {
       continue;
     }
@@ -2589,7 +2646,7 @@ function visitBlocksInner(
     // <a href><img> and <p><img> are the commonest image markup on the web.
     // Without this the image is buffered as inline content and emits nothing.
     if (containsImage(element)) {
-      flushInline();
+      flushInline(!BLOCK_TAGS.has(tag));
       visitBlocks(doc, contentsOf(doc, element), depth, out);
       continue;
     }
@@ -2617,7 +2674,7 @@ function visitBlocksInner(
     // inline collapses every paragraph, heading and list item inside it into a
     // single paragraph.
     if (containsBlockLevel(element)) {
-      flushInline();
+      flushInline(!BLOCK_TAGS.has(tag));
       visitBlocks(doc, contentsOf(doc, element), depth, out);
       continue;
     }
@@ -2626,7 +2683,12 @@ function visitBlocksInner(
     buffer.push(element);
   }
 
-  flushInline();
+  if (closeAfter) {
+    lineOpen = false;
+  }
+
+  // Whether the line goes on past this is the caller's to say.
+  flushInline(true);
 }
 
 /** Parses an HTML string into blocks, for a multi-block paste. */
@@ -2642,28 +2704,50 @@ export function blocksFromHtml(doc: Document, html: string): Block[] {
   blockNesting = 0;
   listNesting = 0;
   inlineNesting = 0;
+  lineOpen = false;
 
   // The paste's first and last content -- text that is not layout, a line
   // break, an image. Only text is an edge: a paste that starts or ends with a
-  // break or a picture does not start or end mid-line in its text.
-  const walker = doc.createTreeWalker(template.content, SHOW_TEXT | SHOW_ELEMENT, {
-    acceptNode: (candidate) => {
-      const tag = tagNameOf(candidate);
+  // break or a picture does not start or end mid-line in its text. Nor does a
+  // block before the first text that does not hold it -- a divider, an empty
+  // paragraph -- or any block after the last: each starts a line there.
+  //
+  // One walk in document order, over each node's children by index: stepping
+  // siblings costs the node's index in some DOMs, and a wide paste paid it
+  // once per node.
+  let first: Node | null = null;
+  let last: Node | null = null;
+  const blocksBeforeFirst: Node[] = [];
+  let blockAfterLast = false;
+  const stack: Node[] = [template.content];
 
-      return SKIP_TAGS.has(tag)
-        ? FILTER_REJECT
-        : (candidate.nodeType === TEXT_NODE && !isLayoutText(candidate)) ||
-            tag === 'BR' ||
-            tag === 'IMG'
-          ? FILTER_ACCEPT
-          : FILTER_SKIP;
-    },
-  });
-  const first = walker.nextNode();
-  let last = first;
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    const tag = tagNameOf(node);
 
-  for (let found = first; found !== null; found = walker.nextNode()) {
-    last = found;
+    if (node !== template.content) {
+      if (SKIP_TAGS.has(tag)) {
+        continue;
+      }
+
+      if ((node.nodeType === TEXT_NODE && !isLayoutText(node)) || tag === 'BR' || tag === 'IMG') {
+        first ??= node;
+        last = node;
+        blockAfterLast = false;
+      } else if (BLOCK_LEVEL_TAGS.has(tag)) {
+        if (first === null) {
+          blocksBeforeFirst.push(node);
+        }
+
+        blockAfterLast = true;
+      }
+    }
+
+    const children = node.childNodes;
+
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      stack.push(children[index]!);
+    }
   }
 
   const withAncestors = (node: Node | null): Set<Node> => {
@@ -2677,7 +2761,11 @@ export function blocksFromHtml(doc: Document, html: string): Block[] {
   };
 
   pasteFirst = withAncestors(first);
-  pasteLast = withAncestors(last);
+  pasteLast = blockAfterLast ? new Set() : withAncestors(last);
+
+  if (blocksBeforeFirst.some((block) => !pasteFirst.has(block))) {
+    pasteFirst = new Set();
+  }
 
   try {
     visitBlocks(doc, template.content, 0, out);
