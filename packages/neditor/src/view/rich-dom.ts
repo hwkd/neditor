@@ -931,6 +931,71 @@ const CONTAINER_TAGS = new Set([
 ]);
 
 /**
+ * The elements a browser lays out as blocks by default -- the HTML standard's
+ * rendering section gives them `display: block`, `list-item` or a table
+ * display. Everything else, unknown and custom elements included, is inline.
+ * Whether a wrapper ends the line it is on is a question of layout, so it is
+ * asked here rather than of `BLOCK_TAGS`, which says what breaks a line in
+ * text and leaves out `<center>`, `<aside>` and `<form>`.
+ */
+const DISPLAY_BLOCK_TAGS = new Set([
+  'HTML',
+  'BODY',
+  'ADDRESS',
+  'ARTICLE',
+  'ASIDE',
+  'BLOCKQUOTE',
+  'CENTER',
+  'DIALOG',
+  'DIR',
+  'DIV',
+  'DD',
+  'DL',
+  'DT',
+  'DETAILS',
+  'FIELDSET',
+  'FIGCAPTION',
+  'FIGURE',
+  'FOOTER',
+  'FORM',
+  'H1',
+  'H2',
+  'H3',
+  'H4',
+  'H5',
+  'H6',
+  'HEADER',
+  'HGROUP',
+  'HR',
+  'LEGEND',
+  'LI',
+  'LISTING',
+  'MAIN',
+  'MENU',
+  'NAV',
+  'OL',
+  'P',
+  'PLAINTEXT',
+  'PRE',
+  'SEARCH',
+  'SECTION',
+  'SUMMARY',
+  'UL',
+  'XMP',
+  'TABLE',
+  'CAPTION',
+  'COLGROUP',
+  'COL',
+  'THEAD',
+  'TBODY',
+  'TFOOT',
+  'TR',
+  'TD',
+  'TH',
+  'OPTGROUP',
+]);
+
+/**
  * Tags `visitBlocks` turns into a block of their own.
  *
  * Finding one inside an unrecognised element is what separates a wrapper that
@@ -1394,7 +1459,9 @@ function pushFormattingInward(doc: Document, wrapper: Element): DocumentFragment
   const empty: InlineFormatting = { link: null, marks: new Map(), soft: new Set() };
   const format = formattingWithin(empty, wrapper, STRUCTURE_TAGS.has(tagNameOf(wrapper)));
 
-  fragment.append(...[...(wrapper.cloneNode(true) as Element).childNodes]);
+  // Copied without recursion: the depth is the pasted document's to choose,
+  // and a list's wrapped items reach this once per wrapper.
+  fragment.append(...[...(cloneDeep(wrapper) as Element).childNodes]);
   distributeFormatting(doc, fragment, format, false);
 
   return fragment;
@@ -2130,14 +2197,87 @@ function visitListItemInner(
 
 function visitList(list: Element, depth: number, out: Block[]): void {
   const fallback: BlockType = tagNameOf(list) === 'OL' ? 'numbered_list' : 'bulleted_list';
-  const declared = list.hasAttribute(LIST_ATTR);
 
-  for (const child of list.children) {
+  visitListChildren(list, fallback, list.hasAttribute(LIST_ATTR), depth, out);
+}
+
+const LIST_ITEM_DESCENDANTS = new WeakMap<Element, Element | null>();
+
+/**
+ * A list's children: its items, the lists nested directly in it, and --
+ * which pages built by frameworks render, valid or not -- items a wrapper
+ * holds (`<ul><a href><li>…</li></a></ul>`), read through the wrapper with its
+ * link and formatting pushed into them, and loose content, read as blocks at
+ * the list's depth. Both were dropped, the whole list with them where every
+ * item was wrapped.
+ */
+function visitListChildren(
+  parent: Node,
+  fallback: BlockType,
+  declared: boolean,
+  depth: number,
+  out: Block[],
+): void {
+  const doc = parent.ownerDocument!;
+  let loose: Node[] = [];
+
+  const flushLoose = (): void => {
+    const content = loose.some(
+      (node) => node.nodeType === ELEMENT_NODE || /[^ \t\n\r\f]/.test(node.nodeValue ?? ''),
+    );
+
+    if (content) {
+      const wrapper = doc.createElement('div');
+
+      for (const node of loose) {
+        wrapper.append(cloneDeep(node));
+      }
+
+      visitBlocks(doc, wrapper, depth, out);
+    }
+
+    loose = [];
+  };
+
+  for (const child of [...parent.childNodes]) {
     const tag = tagNameOf(child);
 
+    if (child.nodeType !== ELEMENT_NODE && child.nodeType !== TEXT_NODE) {
+      continue;
+    }
+
+    if (SKIP_TAGS.has(tag)) {
+      continue;
+    }
+
+    if (
+      child.nodeType === TEXT_NODE ||
+      (tag !== 'LI' && tag !== 'UL' && tag !== 'OL' && !holdsListItem(child as Element))
+    ) {
+      loose.push(child);
+      continue;
+    }
+
+    flushLoose();
+
     if (tag === 'LI') {
-      visitListItem(child, fallback, depth, out, declared);
-    } else if (tag === 'UL' || tag === 'OL') {
+      visitListItem(child as Element, fallback, depth, out, declared);
+    } else if (tag !== 'UL' && tag !== 'OL') {
+      // A wrapper around items: the items continue this list, as deep. It
+      // nests without passing through an item, so it takes the list bound.
+      if (listNesting >= MAX_LIST_NESTING) {
+        pushRemainder(out, child, depth);
+        continue;
+      }
+
+      listNesting += 1;
+
+      try {
+        visitListChildren(contentsOf(doc, child as Element), fallback, declared, depth, out);
+      } finally {
+        listNesting -= 1;
+      }
+    } else {
       // A list directly inside a list -- what Google Docs and a browser's own
       // indent command write -- is the item before it continuing a level in.
       // It was skipped, with everything under it. It nests without passing
@@ -2150,12 +2290,24 @@ function visitList(list: Element, depth: number, out: Block[]): void {
       listNesting += 1;
 
       try {
-        visitList(child, depth + 1, out);
+        visitList(child as Element, depth + 1, out);
       } finally {
         listNesting -= 1;
       }
     }
   }
+
+  flushLoose();
+}
+
+function holdsListItem(element: Element): boolean {
+  return (
+    firstDescendant(
+      element,
+      (candidate) => tagNameOf(candidate) === 'LI',
+      LIST_ITEM_DESCENDANTS,
+    ) !== null
+  );
 }
 
 /** Layout at a paste's edge: layout text, or an element holding no text at all. */
@@ -2313,7 +2465,10 @@ const INHERITING = new Set(['inherit', 'unset', 'revert', 'revert-layer']);
  * the text as a whole, rather than node by node, is what keeps a space that
  * ends one element from doubling one that starts the next.
  */
-function collapseWhitespace(root: Element, edges: { start: boolean; end: boolean }): RichText {
+function collapseWhitespace(
+  root: Element,
+  edges: { start: boolean; end: boolean },
+): { runs: RichText; endsLine: boolean } {
   const walker = root.ownerDocument.createTreeWalker(root, SHOW_TEXT);
 
   for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
@@ -2348,6 +2503,9 @@ function collapseWhitespace(root: Element, edges: { start: boolean; end: boolean
   let lastSpace = -1;
   let lastPreservedBreak = -1;
   let literal = false;
+  // Whether the last content ended its line -- a `<br>`, a preserved break --
+  // so that nothing after the run continues it.
+  let endsLine = false;
 
   for (const [index, run] of runs.entries()) {
     for (const char of run.text) {
@@ -2357,11 +2515,13 @@ function collapseWhitespace(root: Element, edges: { start: boolean; end: boolean
           suppress = false;
           lastSpace = -1;
           lastPreservedBreak = -1;
+          endsLine = false;
         }
 
         literal = !literal;
       } else if (char === STANDS) {
         lastPreservedBreak = -1;
+        endsLine = true;
       } else if (char === ' ') {
         if (!suppress) {
           chars[index]!.push(' ');
@@ -2379,11 +2539,13 @@ function collapseWhitespace(root: Element, edges: { start: boolean; end: boolean
         suppress = true;
         lastSpace = -1;
         lastPreservedBreak = char === '\n' ? -1 : index;
+        endsLine = true;
       } else {
         chars[index]!.push(RESTORED[char] ?? char);
         suppress = false;
         lastSpace = -1;
         lastPreservedBreak = -1;
+        endsLine = false;
       }
     }
   }
@@ -2398,11 +2560,14 @@ function collapseWhitespace(root: Element, edges: { start: boolean; end: boolean
     chars[lastPreservedBreak]!.pop();
   }
 
-  return normalizeRuns(
-    runs
-      .map((run, index) => ({ ...run, text: chars[index]!.join('') }))
-      .filter((run) => run.text.length > 0),
-  );
+  return {
+    runs: normalizeRuns(
+      runs
+        .map((run, index) => ({ ...run, text: chars[index]!.join('') }))
+        .filter((run) => run.text.length > 0),
+    ),
+    endsLine,
+  };
 }
 
 /**
@@ -2524,12 +2689,20 @@ function visitBlocksInner(
     const blankLine = buffer.some(holdsBreak);
 
     buffer = [];
-    const runs = collapseWhitespace(wrapper, edges);
+    const collapsed = collapseWhitespace(wrapper, edges);
     const opened = lineOpen;
+    let runs = collapsed.runs;
+
+    // A run that starts with a break on an open line -- after an inline
+    // image, or a wrapper's own text -- ends that line rather than leaving a
+    // blank one at its head.
+    if (opened && richToPlainText(runs).startsWith('\n')) {
+      runs = richDelete(runs, 0, 1);
+    }
 
     if (!isRichEmpty(runs)) {
       out.push(createBlock('paragraph', runs, depth));
-      lineOpen = true;
+      lineOpen = !collapsed.endsLine;
     } else if (blankLine) {
       // A `<br>` that ends an open line is no blank line of its own.
       if (!opened) {
@@ -2632,10 +2805,22 @@ function visitBlocksInner(
       continue;
     }
 
-    if (tag === 'FIGURE' || tag === 'IMG') {
+    // An inline `<img>` sits on a line, which a `<br>` after it ends; a
+    // `<figure>` is a block.
+    if (tag === 'IMG') {
+      flushInline(true);
+
+      if (pushImage(out, element, depth)) {
+        lineOpen = true;
+      }
+
+      continue;
+    }
+
+    if (tag === 'FIGURE') {
       flushInline();
 
-      if (!pushImage(out, element, depth) && tag === 'FIGURE') {
+      if (!pushImage(out, element, depth)) {
         // No usable image, but the figure may still hold a caption or a table.
         visitBlocks(doc, element, depth, out, exclude);
       }
@@ -2646,7 +2831,7 @@ function visitBlocksInner(
     // <a href><img> and <p><img> are the commonest image markup on the web.
     // Without this the image is buffered as inline content and emits nothing.
     if (containsImage(element)) {
-      flushInline(!BLOCK_TAGS.has(tag));
+      flushInline(!DISPLAY_BLOCK_TAGS.has(tag));
       visitBlocks(doc, contentsOf(doc, element), depth, out);
       continue;
     }
@@ -2674,7 +2859,7 @@ function visitBlocksInner(
     // inline collapses every paragraph, heading and list item inside it into a
     // single paragraph.
     if (containsBlockLevel(element)) {
-      flushInline(!BLOCK_TAGS.has(tag));
+      flushInline(!DISPLAY_BLOCK_TAGS.has(tag));
       visitBlocks(doc, contentsOf(doc, element), depth, out);
       continue;
     }

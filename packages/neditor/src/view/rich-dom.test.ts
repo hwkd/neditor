@@ -2701,3 +2701,112 @@ describe('audit 37', () => {
     expect(text(html)[0]).toBe(expected);
   });
 });
+
+describe('audit 38', () => {
+  const text = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image' ? '[img]' : richToPlainText(block.content),
+    );
+
+  // A line that already ended in a break is not left open: the `<br>` after
+  // it is a blank line.
+  test.each([
+    [
+      '<p>Intro</p><a href="https://x.test/"><div>Title</div>Read more<br></a><br><p>Next</p>',
+      ['Intro', 'Title', 'Read more', '', 'Next'],
+    ],
+    [
+      '<p>Intro</p><a href="https://x.test/"><div>Title</div><span style="white-space:pre-wrap">Read more\n</span></a><br><p>Next</p>',
+      ['Intro', 'Title', 'Read more', '', 'Next'],
+    ],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  // Text after the break opens the line again, so a `<br>` then ends it.
+  test('text after a break leaves its line open', () => {
+    expect(text('<p>x</p><a href="https://h.test/"><div>T</div>a<br>b</a><br><p>y</p>')).toEqual([
+      'x',
+      'T',
+      'a\nb',
+      'y',
+    ]);
+  });
+
+  // An element the browser lays out as a block ends its line, whatever this
+  // reader calls it; only an inline one leaves the line open.
+  test.each([
+    [
+      '<p>x</p><center><div>Logo</div>View online</center><br><p>Hi</p>',
+      ['x', 'Logo', 'View online', '', 'Hi'],
+    ],
+    ['<p>x</p>Lead text<aside><br><p>Body</p></aside>', ['x', 'Lead text', '', 'Body']],
+    ['<p>a</p>text<figcaption><br><div>x</div></figcaption>', ['a', 'text', '', 'x']],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  // An inline image sits on a line; the `<br>` after it ends that line.
+  test.each([
+    [
+      '<div>there</div><div><img src="https://a.test/a.png"><br></div><div>Thanks</div>',
+      ['there', '[img]', 'Thanks'],
+    ],
+    ['<p><img src="https://a.test/a.png"><br>Caption text</p>', ['[img]', 'Caption text']],
+    [
+      '<p>a</p>text<a href="https://h.test/"><br><img src="https://x.test/i.png"></a><p>x</p>',
+      ['a', 'text', '[img]', 'x'],
+    ],
+    [
+      '<p>a</p>text<p><br><img src="https://x.test/i.png"></p><p>x</p>',
+      ['a', 'text', '', '[img]', 'x'],
+    ],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  // Each way the line is closed.
+  test.each([
+    ['<p>a</p><span><div>b</div></span><br><p>x</p>', ['a', 'b', '', 'x']],
+    [
+      '<p>a</p><a href="https://h.test/"><div>T</div>more</a><br><span><br><div>x</div></span>',
+      ['a', 'T', 'more', '', 'x'],
+    ],
+    [
+      '<p>a</p><span><div>b</div>tail</span><div><br><div>x</div></div>',
+      ['a', 'b', 'tail', '', 'x'],
+    ],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  // List items a wrapper holds are items still, carrying the wrapper's link;
+  // loose content in a list is read rather than dropped.
+  test('items wrapped in links are kept', () => {
+    const blocks = blocksFromHtml(
+      document,
+      '<p>Menu</p><ul><a href="https://a.test/1"><li>Home page</li></a><a href="https://a.test/2"><li>About us</li></a></ul><p>After</p>',
+    );
+    expect(blocks.map((block) => [block.type, richToPlainText(block.content)])).toEqual([
+      ['paragraph', 'Menu'],
+      ['bulleted_list', 'Home page'],
+      ['bulleted_list', 'About us'],
+      ['paragraph', 'After'],
+    ]);
+    expect(blocks[1]?.content[0]?.link).toBe('https://a.test/1');
+  });
+
+  test('a deep chain of formatting around items reads without overflowing', () => {
+    expect(() =>
+      blocksFromHtml(document, `<ul>${'<b><li>x</li>'.repeat(3000)}${'</b>'.repeat(3000)}</ul>`),
+    ).not.toThrow();
+  });
+
+  test.each([
+    ['<ul><div><li>a</li><li>b</li></div></ul>', ['a', 'b']],
+    ['<ul><li>a</li>loose text<li>b</li></ul>', ['a', 'loose text', 'b']],
+    ['<ol><li>a</li><p>para</p></ol>', ['a', 'para']],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+});

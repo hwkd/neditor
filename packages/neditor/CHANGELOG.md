@@ -212,6 +212,12 @@ that changes what you store or what other applications receive is listed first.
   selected edge space there is kept too -- unless a block (a divider, an empty
   paragraph) comes before that first text or after that last, or the text is
   inside a wrapper whose formatting is pushed into the blocks it holds.
+- HTML clipboard (also on earlier versions): list items a wrapper holds inside
+  a list (`<ul><a href><li>…</li></a></ul>`, as framework-built pages render)
+  were dropped, the whole list with them when every item was wrapped; they are
+  items now, carrying the wrapper's link, and loose text or paragraphs directly
+  in a list are read as blocks. An inline image followed by a `<br>`, as in an
+  email's image line, no longer adds a blank paragraph after the image.
 - HTML clipboard (also on earlier versions): a table nested in a table cell
   is read as that cell's text instead of being dropped with it, so an HTML
   email laid out in nested tables keeps its content; a list inside a wrapper
