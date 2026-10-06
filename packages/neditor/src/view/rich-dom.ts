@@ -357,6 +357,9 @@ function isBetweenBlocks(node: Node): boolean {
  */
 const DEFERRED_BREAKS = new WeakSet<TextRun>();
 
+/** The space a skipped inline element leaves, kept only between two words. */
+const SKIPPED_SPACES = new WeakSet<TextRun>();
+
 /** Appends a newline unless the output is empty or already ends with one. */
 function breakLine(
   out: TextRun[],
@@ -483,17 +486,19 @@ function walk(
     }
 
     if (tagNameOf(child) === 'BR') {
+      // A line ended by a block has its break waiting for text; a `<br>`
+      // after it is a line of its own, so that break stands -- whether more
+      // follows (each of several blank lines) or not (the last of them).
+      // With nothing after it and no block before, it is the filler of the
+      // line before, and adds nothing.
+      const last = out.at(-1);
+
+      if (last) {
+        DEFERRED_BREAKS.delete(last);
+      }
+
       if (hasContentAfter(child, root, skip)) {
         out.push({ text: '\n', marks: [...marks], link });
-      } else {
-        // Nothing after it: the filler of the line before -- unless that line
-        // was ended by a block, whose break waits for text. Then the `<br>` is
-        // a line of its own, and the break before it stands.
-        const last = out.at(-1);
-
-        if (last) {
-          DEFERRED_BREAKS.delete(last);
-        }
       }
 
       continue;
@@ -522,10 +527,16 @@ function walk(
       } else if (/[ \t\n\r\f]/.test(subtreeText(element))) {
         // An inline one -- an image link -- keeps the space its whitespace
         // made in the sentence, or the words either side of it join.
+        // Only between two words: it is dropped once the walk is done if
+        // nothing follows it, or what follows starts with whitespace or a
+        // line break of its own.
         const previous = out.at(-1)?.text ?? '';
 
         if (previous !== '' && !/[ \t\n\r\f]/.test(previous[previous.length - 1]!)) {
-          out.push({ text: ' ', marks: [...marks], link });
+          const run = { text: ' ', marks: [...marks], link };
+
+          SKIPPED_SPACES.add(run);
+          out.push(run);
         }
       }
 
@@ -595,7 +606,21 @@ export function parseRichText(root: Node, skip?: SkipPredicate): RichText {
     }
   }
 
-  return normalizeRuns(out.filter((run, index) => index <= lastText || !DEFERRED_BREAKS.has(run)));
+  return normalizeRuns(
+    out.filter((run, index) => {
+      if (DEFERRED_BREAKS.has(run)) {
+        return index <= lastText;
+      }
+
+      if (SKIPPED_SPACES.has(run)) {
+        const next = out[index + 1]?.text ?? '';
+
+        return !/[ \t\n\r\f]/.test(next[0] ?? ' ');
+      }
+
+      return true;
+    }),
+  );
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2106,10 +2131,19 @@ function visitList(list: Element, depth: number, out: Block[]): void {
   }
 }
 
+/** A text node of collapsible whitespace that holds a line break. */
+function isLayoutText(node: Node): boolean {
+  const value = node.nodeType === TEXT_NODE ? (node.nodeValue ?? '') : '';
+
+  return value.includes('\n') && /^[ \t\n\r\f]*$/.test(value);
+}
+
 /**
  * Marks for whitespace a style preserves, while `collapseWhitespace` works:
- * Unicode noncharacters, which the standard reserves for exactly this kind of
- * process-internal use. A preserved newline is a forced line break.
+ * Unicode noncharacters, meant for process-internal use -- but text may carry
+ * them all the same, so any the text already holds is escaped with
+ * {@link LITERAL} first and read back as itself. A preserved newline is a
+ * forced line break.
  */
 const PRESERVED: Readonly<Record<string, string>> = {
   ' ': '\uFDD0',
@@ -2117,6 +2151,10 @@ const PRESERVED: Readonly<Record<string, string>> = {
   '\n': '\uFDD2',
 };
 const RESTORED: Readonly<Record<string, string>> = { '\uFDD0': ' ', '\uFDD1': '\t' };
+/** A `pre-line` line break, which takes the collapsible space before it. */
+const LINE_BREAK = '\uFDD4';
+/** Put before a mark the text already held, so it reads as itself. */
+const LITERAL = '\uFDD3';
 
 type WhiteSpace = 'normal' | 'pre' | 'pre-line';
 
@@ -2160,26 +2198,43 @@ function declaredWhiteSpace(element: Element): WhiteSpace | null {
     return null;
   }
 
-  let value: string | null = null;
+  // The last valid declaration wins; an invalid one is ignored, as CSS ignores
+  // it, and `inherit`, `unset` and `revert` inherit (null).
+  let declared: WhiteSpace | null = null;
 
   for (const match of style.matchAll(/(?:^|;)\s*white-space\s*:\s*([a-z-]+)/gi)) {
-    value = (match[1] ?? '').toLowerCase();
+    const value = (match[1] ?? '').toLowerCase();
+
+    if (value in WHITE_SPACE_VALUES) {
+      declared = WHITE_SPACE_VALUES[value]!;
+    } else if (INHERITING.has(value)) {
+      declared = null;
+    }
   }
 
-  return value === null
-    ? null
-    : value === 'pre' || value === 'pre-wrap' || value === 'break-spaces'
-      ? 'pre'
-      : value === 'pre-line'
-        ? 'pre-line'
-        : 'normal';
+  return declared;
 }
 
+const WHITE_SPACE_VALUES: Readonly<Record<string, WhiteSpace>> = {
+  normal: 'normal',
+  nowrap: 'normal',
+  initial: 'normal',
+  pre: 'pre',
+  'pre-wrap': 'pre',
+  'break-spaces': 'pre',
+  'pre-line': 'pre-line',
+};
+
+const INHERITING = new Set(['inherit', 'unset', 'revert', 'revert-layer']);
+
 /**
- * Reads inline content outside any paragraph as a browser lays it out
- * (`white-space: normal`): each run of spaces, tabs and line breaks in the
- * source is one space, and none stands at the start or end of the text or of a
- * line a `<br>` ends. A no-break space is not whitespace here and stays.
+ * Reads inline content outside any paragraph as a browser lays it out: under
+ * `white-space: normal` each run of spaces, tabs and line breaks in the source
+ * is one space, and none stands at the start or end of a line -- a line a
+ * `<br>` ends, or the text's own, except where `edges` says the text is the
+ * edge of a paste, which lands mid-line. What an inline `white-space` style
+ * preserves is kept (see {@link whiteSpaceOf}), and a no-break space is not
+ * whitespace here at all.
  *
  * Only foreign HTML reaches this -- this editor writes every block's text
  * inside a block element, where `parseRichText` reads whitespace as it stands,
@@ -2191,7 +2246,7 @@ function collapseWhitespace(root: Element, edges: { start: boolean; end: boolean
   const walker = root.ownerDocument.createTreeWalker(root, SHOW_TEXT);
 
   for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
-    const value = found.nodeValue ?? '';
+    const value = (found.nodeValue ?? '').replace(/[\uFDD0-\uFDD4]/g, (char) => LITERAL + char);
     const mode = whiteSpaceOf(found.parentElement);
 
     // What a style preserves is marked, so the pass below keeps it.
@@ -2202,7 +2257,7 @@ function collapseWhitespace(root: Element, edges: { start: boolean; end: boolean
           ? value
               .split('\n')
               .map((line) => line.replace(/[ \t\r\f]+/g, ' '))
-              .join(PRESERVED['\n']!)
+              .join(LINE_BREAK)
           : value.replace(/[ \t\n\r\f]+/g, ' ');
   }
 
@@ -2212,33 +2267,54 @@ function collapseWhitespace(root: Element, edges: { start: boolean; end: boolean
   const chars = runs.map((): string[] => []);
   let suppress = !edges.start;
   let lastSpace = -1;
+  let lastPreservedBreak = -1;
+  let literal = false;
 
   for (const [index, run] of runs.entries()) {
     for (const char of run.text) {
-      if (char === ' ') {
+      if (literal || char === LITERAL) {
+        if (literal) {
+          chars[index]!.push(char);
+          suppress = false;
+          lastSpace = -1;
+          lastPreservedBreak = -1;
+        }
+
+        literal = !literal;
+      } else if (char === ' ') {
         if (!suppress) {
           chars[index]!.push(' ');
           suppress = true;
           lastSpace = index;
         }
-      } else if (char === '\n' || char === PRESERVED['\n']) {
-        if (lastSpace !== -1) {
+      } else if (char === '\n' || char === PRESERVED['\n'] || char === LINE_BREAK) {
+        // A `<br>` or a pre-line break takes the collapsible space before it;
+        // a pre or pre-wrap one leaves it, as Chromium lays it out.
+        if (lastSpace !== -1 && char !== PRESERVED['\n']) {
           chars[lastSpace]!.pop();
         }
 
         chars[index]!.push('\n');
         suppress = true;
         lastSpace = -1;
+        lastPreservedBreak = char === '\n' ? -1 : index;
       } else {
         chars[index]!.push(RESTORED[char] ?? char);
         suppress = false;
         lastSpace = -1;
+        lastPreservedBreak = -1;
       }
     }
   }
 
   if (lastSpace !== -1 && !edges.end) {
     chars[lastSpace]!.pop();
+  }
+
+  // A preserved line break that ends the text ends its line, as a trailing
+  // `<br>` does: a block it ends draws no line after it.
+  if (lastPreservedBreak !== -1 && !edges.end) {
+    chars[lastPreservedBreak]!.pop();
   }
 
   return normalizeRuns(
@@ -2305,12 +2381,14 @@ function visitBlocksInner(
     }
 
     // Layout text around the fragment itself (Firefox wraps it in newlines)
-    // is no space someone typed.
-    while (edges.start && buffer.length > 0 && isSourceWhitespace(buffer[0]!)) {
+    // is no space someone typed -- but a space with no line break is: Firefox
+    // copies a selected trailing space as `<b>Hello</b> `. A no-break space is
+    // never layout.
+    while (edges.start && buffer.length > 0 && isLayoutText(buffer[0]!)) {
       buffer.shift();
     }
 
-    while (edges.end && buffer.length > 0 && isSourceWhitespace(buffer[buffer.length - 1]!)) {
+    while (edges.end && buffer.length > 0 && isLayoutText(buffer[buffer.length - 1]!)) {
       buffer.pop();
     }
 

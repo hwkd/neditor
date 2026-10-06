@@ -2444,3 +2444,122 @@ describe('audit 34', () => {
     expect(richToPlainText(table?.rows?.[0]?.[0] ?? [])).toBe('a');
   });
 });
+
+describe('audit 35', () => {
+  const text = (html: string) =>
+    blocksFromHtml(document, html).map((block) => richToPlainText(block.content));
+  const cell = (html: string) =>
+    richToPlainText(blocksFromHtml(document, html)[0]?.rows?.[0]?.[0] ?? []);
+
+  // Every blank line after a block stands, not only the last.
+  test.each([
+    ['<table><tr><td><div>a</div><div><br></div><div><br></div></td></tr></table>', 'a\n\n'],
+    ['<table><tr><td><p>a</p><br><br></td></tr></table>', 'a\n\n'],
+    ['<table><tr><td><p>a</p><br><br><br></td></tr></table>', 'a\n\n\n'],
+    ['<table><tr><td>a<div>b</div><br><br></td></tr></table>', 'a\nb\n\n'],
+  ])('%s keeps every blank line', (html, expected) => {
+    expect(cell(html)).toBe(expected);
+  });
+
+  test('two blank lines after a block in a quote', () => {
+    expect(text('<blockquote><p>a</p><br><br></blockquote>')).toEqual(['a\n\n']);
+  });
+
+  // Firefox's own copy keeps the selected space as a bare text node at the
+  // edge; only layout text carrying a line break is dropped there, and a
+  // no-break space never is.
+  test.each([
+    ['<b>Hello</b> ', 'Hello '],
+    [' <b>world</b>', ' world'],
+    ['<html><body>\n<!--StartFragment--><b>Hello</b> <!--EndFragment-->\n</body></html>', 'Hello '],
+    ['<b>Hello</b>&nbsp;', 'Hello\u00a0'],
+    ['&nbsp;', '\u00a0'],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual([expected]);
+  });
+
+  // The marks are escaped where the text already holds them.
+  test('pasted noncharacters stay as they are', () => {
+    expect(text('<span>x\uFDD2y\uFDD0\uFDD0z \uFDD3\uFDD4</span>')).toEqual([
+      'x\uFDD2y\uFDD0\uFDD0z \uFDD3\uFDD4',
+    ]);
+    expect(text('<span style="white-space: pre">a\uFDD1  b</span>')).toEqual(['a\uFDD1  b']);
+  });
+
+  // The space a skipped image link leaves stands only between two words.
+  test.each([
+    [
+      '<ul><li>word<a href="https://l.test/">\n<img src="https://i.test/x.png">\n</a> next</li></ul>',
+      'word next',
+    ],
+    [
+      '<ul><li>word<a href="https://l.test/">\n<img src="https://i.test/x.png">\n</a></li></ul>',
+      'word',
+    ],
+  ])('%s reads %j', (html, expected) => {
+    expect(text(html)[0]).toBe(expected);
+  });
+
+  // A preserved line break that ends a block's text is its end, not a line.
+  test.each([
+    ['<div style="white-space:pre-wrap">Some text\n</div><p>end</p>', ['Some text', 'end']],
+    ['<span style="white-space:pre-wrap">a\n</span><p>end</p>', ['a', 'end']],
+    ['<span style="white-space:pre-line">a\n</span><p>end</p>', ['a', 'end']],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  // At the end of a paste it lands mid-line, so the break stays.
+  test('a preserved line break at the end of a paste stays', () => {
+    expect(text('<span style="white-space:pre-wrap">a\n</span>')).toEqual(['a\n']);
+  });
+
+  // `inherit`, `unset`, `revert` and an invalid value do not reset to normal;
+  // an invalid one is ignored, as CSS ignores it.
+  test.each([
+    [
+      '<div style="white-space:pre-wrap"><span style="white-space:revert">w0  w1\tw2</span></div>',
+      'w0  w1\tw2',
+    ],
+    [
+      '<div style="white-space:pre-wrap"><span style="white-space:inherit">w0  w1</span></div>',
+      'w0  w1',
+    ],
+    [
+      '<div style="white-space:pre-wrap"><span style="white-space:bogus">w0  w1</span></div>',
+      'w0  w1',
+    ],
+    ['<span style="white-space:pre-wrap; white-space:bogus">w0  w1</span>', 'w0  w1'],
+    [
+      '<div style="white-space:pre-wrap"><span style="white-space:initial">w0  w1</span></div>',
+      'w0 w1',
+    ],
+    // A later `inherit` overrides an earlier value, inheriting normal here.
+    ['<span style="white-space:pre-wrap; white-space:inherit">w0  w1</span>', 'w0 w1'],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)[0]).toBe(expected);
+  });
+
+  // An ancestor's pre-line reaches the run as pre-line, not as pre-wrap.
+  test('an outer pre-line governs the run as pre-line', () => {
+    expect(text('<div style="white-space:pre-line"><div><span>a   b</span></div></div>')).toEqual([
+      'a b',
+    ]);
+  });
+
+  // After a block, a run's start is a line's start, not the paste's edge.
+  test('inline text after a block loses its leading space', () => {
+    expect(text('<p>x</p>\n<span> w</span>')).toEqual(['x', 'w']);
+  });
+
+  // A collapsible space before a pre-line break goes, as before a `<br>`; one
+  // before a pre or pre-wrap break stays. Both as Chromium reads them.
+  test.each([
+    ['<div>a <span style="white-space:pre">\nb</span></div>', 'a \nb'],
+    ['<div>a <span style="white-space:pre-wrap">\nb</span></div>', 'a \nb'],
+    ['<div>a <span style="white-space:pre-line">\nb</span></div>', 'a\nb'],
+    ['<span style="white-space:pre-line">a \nb</span>', 'a\nb'],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual([expected]);
+  });
+});

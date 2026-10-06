@@ -198,9 +198,11 @@ that changes what you store or what other applications receive is listed first.
   (`white-space: pre`, `pre-wrap`, `break-spaces`, or `pre-line`'s line
   breaks), which is how Google Docs, VS Code and a browser's copy of a
   `pre-wrap` region mark theirs. The edges of an inline paste are the middle
-  of a line, so a space there stays. Inside a paragraph whitespace is kept as
-  it stands, which is how this editor's own clipboard writes a line break
-  between two runs. A `<br>` alone on the line after a block is a blank line.
+  of a line, so a space there stays -- Firefox copies a selected trailing
+  space as a bare one -- while layout around the fragment does not. Inside a
+  paragraph whitespace is kept as it stands, which is how this editor's own
+  clipboard writes a line break between two runs. Each `<br>` alone on a line
+  after a block is a blank line.
 - HTML clipboard (also on earlier versions): a table nested in a table cell
   is read as that cell's text instead of being dropped with it, so an HTML
   email laid out in nested tables keeps its content; a list inside a wrapper
