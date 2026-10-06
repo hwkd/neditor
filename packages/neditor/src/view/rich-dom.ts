@@ -274,9 +274,6 @@ type SkipPredicate = (element: Element, tag: string) => boolean;
 /** A list nested inside a list item is the *next* block, not this one's text. */
 const isNestedList: SkipPredicate = (_element, tag) => tag === 'UL' || tag === 'OL';
 
-/** A table nested in a cell is dropped: a cell holds text. */
-const isNestedTable: SkipPredicate = (_element, tag) => tag === 'TABLE';
-
 function hasContentAfter(node: Node, root: Node, skip?: SkipPredicate): boolean {
   const walker = root.ownerDocument?.createTreeWalker(root, SHOW_TEXT | SHOW_ELEMENT, {
     // FILTER_REJECT skips the element *and* its subtree, so a following
@@ -319,8 +316,9 @@ function hasContentAfter(node: Node, root: Node, skip?: SkipPredicate): boolean 
       return true;
     }
 
-    // Whitespace between block tags is formatting, not content.
-    if (current.nodeType === TEXT_NODE && (current.nodeValue ?? '').trim().length > 0) {
+    // Whitespace between block tags is formatting, not content -- but a
+    // no-break space is content, which `trim` would take for whitespace.
+    if (current.nodeType === TEXT_NODE && /[^ \t\n\r\f]/.test(current.nodeValue ?? '')) {
       return true;
     }
   }
@@ -465,8 +463,9 @@ function walk(
       const text = child.nodeValue ?? '';
 
       // Indentation between block elements is source formatting, not content.
-      // Without this, pretty-printed HTML pastes with blank leading lines.
-      if (text.trim().length === 0 && isBetweenBlocks(child)) {
+      // Without this, pretty-printed HTML pastes with blank leading lines. A
+      // no-break space is content, though `trim` would take it for layout.
+      if (!/[^ \t\n\r\f]/.test(text) && isBetweenBlocks(child)) {
         continue;
       }
 
@@ -510,13 +509,15 @@ function walk(
       continue;
     }
 
-    // A block element breaks the line on both edges: before it when something
-    // precedes it, and after it when something follows. `breakLine` collapses
-    // the two where blocks are adjacent, so they never double up.
+    // A block element breaks the line on both edges, where text stands on
+    // that side: before it when something precedes it and text follows, and
+    // after it when text follows. `breakLine` collapses the two where blocks
+    // are adjacent, so they never double up; both wait for the text, so an
+    // empty block after the last of it adds no line.
     const isBlock = BLOCK_TAGS.has(tag);
 
     if (isBlock) {
-      breakLine(out, marks, link);
+      breakLine(out, marks, link, true);
     }
 
     const { add, remove } = marksForElement(element);
@@ -547,8 +548,11 @@ function walk(
       }
     }
 
-    if (isBlock && hasContentAfter(element, root, skip)) {
-      breakLine(out, marks, link);
+    // Deferred rather than looked ahead for: looking from every block climbed
+    // to the root each time, quadratic in the depth of a structure read as
+    // text.
+    if (isBlock) {
+      breakLine(out, marks, link, true);
     }
   }
 }
@@ -563,7 +567,7 @@ export function parseRichText(root: Node, skip?: SkipPredicate): RichText {
   let lastText = -1;
 
   for (let index = out.length - 1; index >= 0 && lastText === -1; index -= 1) {
-    if (!DEFERRED_BREAKS.has(out[index]!) && out[index]!.text.trim().length > 0) {
+    if (!DEFERRED_BREAKS.has(out[index]!) && /[^ \t\n\r\f]/.test(out[index]!.text)) {
       lastText = index;
     }
   }
@@ -1432,22 +1436,6 @@ function distributeFormatting(
       run.pop();
     }
 
-    // Pretty-printing between two inline nodes is one space, as the inline
-    // buffer in `visitBlocks` reads it. Not inside a sealed block, which
-    // `parseRichText` reads as it stands, as it does any paragraph -- that is
-    // how this editor writes a line break between two runs.
-    if (!sealed) {
-      const content = run.map((node) => !isSourceWhitespace(node));
-      const from = content.indexOf(true);
-      const to = content.lastIndexOf(true);
-
-      for (let index = from + 1; index < to; index += 1) {
-        if (isIndentation(run[index]!)) {
-          run[index]!.nodeValue = ' ';
-        }
-      }
-    }
-
     const first = run[0];
     const nodes = run;
 
@@ -1675,11 +1663,11 @@ function pushTable(out: Block[], element: Element, depth: number): void {
   }
 
   // Rows and cells come from the children, so a nested table contributes no
-  // rows to this one, and each cell's text is read skipping nested tables.
-  // Not by a `:scope >` query, which walks -- recursively, in some DOMs -- the
-  // whole subtree, nor by cutting nested tables out of a copy: a table in a
-  // list item has its cells read, and a cell can hold the rest of the list, so
-  // either one read every level below once per level.
+  // rows to this one; it is read as its cell's text instead, which a cell is
+  // made of -- stripped, it was text gone. Not by a `:scope >` query, which
+  // walks -- recursively, in some DOMs -- the whole subtree: a table in a list
+  // item has its cells read, and a cell can hold the rest of the list, so that
+  // read every level below once per level.
   const rowElements = children.flatMap((child) => {
     const tag = tagNameOf(child);
 
@@ -1697,7 +1685,7 @@ function pushTable(out: Block[], element: Element, depth: number): void {
       const tag = tagNameOf(cell);
 
       if (tag === 'TH' || tag === 'TD') {
-        cells.push(parseRichText(cell, isNestedTable));
+        cells.push(parseRichText(cell));
       }
     }
 
@@ -1843,7 +1831,8 @@ function isItemBlock(element: Element): boolean {
   return (
     tag === 'IMG' ||
     tag === 'FIGURE' ||
-    ((tag === 'P' || tag === 'A') && holdsOnlyImage(element, tag === 'A'))
+    ((tag === 'P' || tag === 'A') &&
+      holdsOnlyImage(element, tag === 'A' && !containsBlockLevel(element)))
   );
 }
 
@@ -1875,11 +1864,16 @@ function textImages(root: Element, skip: SkipPredicate): Element[] {
  * first of either: `textContent` recurses through the subtree in some DOMs,
  * and counts a style sheet's source as text.
  *
- * @param strict Whether whitespace counts as text: it does in a link, which
- * sits in a sentence and whose space is the sentence's (`a<a><img> </a>b` read
- * `ab`), and not in a paragraph, which pretty-printing indents.
+ * @param strict Whether a space counts as text: it does in a link, which sits
+ * in a sentence and whose space is the sentence's (`a<a><img> </a>b` read
+ * `ab`), and not in a paragraph -- or in a link holding a block, which is no
+ * part of a sentence. Whitespace carrying a line break is pretty-printing in
+ * either, as around a link that is an item's only content.
  */
 function holdsOnlyImage(element: Element, strict: boolean): boolean {
+  const isText = (value: string, spaces: boolean): boolean =>
+    value.trim().length > 0 || (spaces && value.length > 0 && !value.includes('\n'));
+
   const walker = element.ownerDocument.createTreeWalker(element, SHOW_TEXT | SHOW_ELEMENT, {
     acceptNode: (candidate) =>
       SKIP_TAGS.has(tagNameOf(candidate)) ? FILTER_REJECT : FILTER_ACCEPT,
@@ -1888,8 +1882,7 @@ function holdsOnlyImage(element: Element, strict: boolean): boolean {
   for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
     if (
       tagNameOf(found) === 'INPUT' ||
-      (found.nodeType === TEXT_NODE &&
-        (strict ? (found.nodeValue ?? '') : (found.nodeValue ?? '').trim()).length > 0)
+      (found.nodeType === TEXT_NODE && isText(found.nodeValue ?? '', strict))
     ) {
       return false;
     }
@@ -1962,10 +1955,14 @@ function visitListItemInner(
   const itemDepth = depthOf(item, depth);
   const blocks = itemBlocks(item);
   // Read in place, never copied: an item holds the whole list below it.
-  const skip: SkipPredicate = (element, tag) => isNestedList(element, tag) || blocks.has(element);
+  // Only what is visited as a block is skipped: a list the item does not hold
+  // directly -- inside a wrapper, a paragraph, a toggle -- is never visited, so
+  // skipping it dropped its text. It is read as the item's text instead.
+  const skip: SkipPredicate = (element) => blocks.has(element);
+  // But a checkbox in a nested list, however deep, is that list's own.
   const checkbox = findWithin(
     item,
-    skip,
+    (element, tag) => isNestedList(element, tag) || blocks.has(element),
     (element) => tagNameOf(element) === 'INPUT' && element.getAttribute('type') === 'checkbox',
   );
   const state = item.getAttribute(TODO_ATTR);
@@ -2012,7 +2009,7 @@ function visitListItemInner(
   // as bare text after a block does.
   if (!declared && isRichEmpty(runs)) {
     for (const block of blocks) {
-      if (tagNameOf(block) === 'P' && !isItemBlock(block)) {
+      if (tagNameOf(block) === 'P') {
         const text = parseRichText(block);
 
         // The first that holds text: a blank one is a blank line, and stays.
@@ -2087,6 +2084,62 @@ function visitList(list: Element, depth: number, out: Block[]): void {
 }
 
 /**
+ * Reads inline content outside any paragraph as a browser lays it out
+ * (`white-space: normal`): each run of spaces, tabs and line breaks in the
+ * source is one space, and none stands at the start or end of the text or of a
+ * line a `<br>` ends. A no-break space is not whitespace here and stays.
+ *
+ * Only foreign HTML reaches this -- this editor writes every block's text
+ * inside a block element, where `parseRichText` reads whitespace as it stands,
+ * because that is how it writes a line break between two runs. Collapsing
+ * the text as a whole, rather than node by node, is what keeps a space that
+ * ends one element from doubling one that starts the next.
+ */
+function collapseWhitespace(root: Element): RichText {
+  const walker = root.ownerDocument.createTreeWalker(root, SHOW_TEXT);
+
+  for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
+    found.nodeValue = (found.nodeValue ?? '').replace(/[ \t\n\r\f]+/g, ' ');
+  }
+
+  // Every space left is collapsible; every newline is a break the walk wrote.
+  const runs = parseRichText(root);
+  const chars = runs.map((): string[] => []);
+  let suppress = true;
+  let lastSpace = -1;
+
+  for (const [index, run] of runs.entries()) {
+    for (const char of run.text) {
+      if (char === ' ') {
+        if (!suppress) {
+          chars[index]!.push(' ');
+          suppress = true;
+          lastSpace = index;
+        }
+      } else {
+        if (char === '\n' && lastSpace !== -1) {
+          chars[lastSpace]!.pop();
+        }
+
+        chars[index]!.push(char);
+        suppress = char === '\n';
+        lastSpace = -1;
+      }
+    }
+  }
+
+  if (lastSpace !== -1) {
+    chars[lastSpace]!.pop();
+  }
+
+  return normalizeRuns(
+    runs
+      .map((run, index) => ({ ...run, text: chars[index]!.join('') }))
+      .filter((run) => run.text.length > 0),
+  );
+}
+
+/**
  * Walks a subtree, emitting one block per block-level element.
  *
  * Inline nodes between block elements are buffered and flushed as a paragraph,
@@ -2135,71 +2188,14 @@ function visitBlocksInner(
       return;
     }
 
-    // Whitespace is a space only between two pieces of text, as a browser
-    // shows it: not before the first or after the last -- an empty `<span>` or
-    // an icon's `<i>` is no text -- not beside a line break, and once however
-    // many comments or empty elements sit inside it, counting a space the text
-    // before it already ends with. An element holding only whitespace
-    // (`<span> </span>`) is a space someone typed: it yields only to a space
-    // already there, and is otherwise kept where it stands.
-    const texts = buffer.map((node) =>
-      node.nodeType === TEXT_NODE ? (node.nodeValue ?? '') : subtreeText(node),
-    );
-    const kinds = buffer.map((node, index) => {
-      if (isSourceWhitespace(node)) {
-        return 'space';
-      }
-
-      if (tagNameOf(node) === 'BR') {
-        return 'break';
-      }
-
-      const text = texts[index]!;
-
-      return text.trim().length > 0 ? 'text' : text.length > 0 ? 'typed' : 'empty';
-    });
-    const following: string[] = [];
-    let after = 'none';
-
-    for (let index = kinds.length - 1; index >= 0; index -= 1) {
-      following[index] = after;
-      after = kinds[index] === 'text' || kinds[index] === 'break' ? kinds[index]! : after;
-    }
-
     const wrapper = doc.createElement('div');
-    let before = 'none';
-    let spaced = false;
 
-    for (const [index, inline] of buffer.entries()) {
-      const kind = kinds[index];
-
-      if (kind === 'space') {
-        if (before !== 'text' || following[index] !== 'text' || spaced) {
-          continue;
-        }
-
-        spaced = true;
-      } else if (kind === 'typed') {
-        if (spaced) {
-          continue;
-        }
-
-        spaced = true;
-      } else if (kind === 'text') {
-        const text = texts[index]!;
-
-        before = kind;
-        spaced = /\s/.test(text[text.length - 1] ?? '');
-      } else if (kind === 'break') {
-        before = kind;
-        spaced = false;
-      }
-
+    for (const inline of buffer) {
       wrapper.append(cloneDeep(inline));
     }
 
     buffer = [];
-    const runs = parseRichText(wrapper);
+    const runs = collapseWhitespace(wrapper);
 
     if (!isRichEmpty(runs)) {
       out.push(createBlock('paragraph', runs, depth));
@@ -2212,14 +2208,10 @@ function visitBlocksInner(
     }
 
     if (child.nodeType === TEXT_NODE) {
-      // Whitespace between two inline elements is content (`<b>bold</b>
-      // <i>it</i>` read `boldit`) -- one space where it is pretty-printing, as
-      // a browser shows it; on its own, or before a block, it is layout.
-      if ((child.nodeValue ?? '').trim().length > 0) {
-        buffer.push(child);
-      } else if (buffer.length > 0) {
-        buffer.push(isIndentation(child) ? doc.createTextNode(' ') : child);
-      }
+      // Whitespace too: between two inline elements it is content (`<b>bold</b>
+      // <i>it</i>` read `boldit`), and `collapseWhitespace` reads it as a
+      // browser does when the run is flushed -- on its own, nothing.
+      buffer.push(child);
 
       continue;
     }

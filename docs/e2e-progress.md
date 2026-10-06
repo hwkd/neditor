@@ -636,3 +636,31 @@ An independent review of 5ea98c5: the Markdown pair, both HTML round trips and t
 
 Against a browser-style whitespace model, the inline buffer now matches more inputs than f264ce5 and `main` with no input
 shape worse than f264ce5; an image fuzzer finds no input with fewer images than f264ce5, and about 880 in 3,000 with more.
+
+## Audit 33 (2026-10-07)
+
+An independent review of 0692a8a: the Markdown pair and both HTML round trips were clean on fresh seeds. Five findings, three
+of them whitespace again -- each round's per-node rule for the inline buffer had missed a case the next round found.
+
+| #   | Kind                 | What                                                                                                                                                                         | Resolution                                                                                                                                                                                                                                                                                                                                                        |
+| --- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AF1 | Regression (0692a8a) | The strict link test took a pretty-printed image link for text: a list of linked images read as bullets of linked whitespace, and an image in a list inside a link was lost. | Whitespace carrying a line break is layout in a link too, and a link holding a block is not strict at all.                                                                                                                                                                                                                                                        |
+| AF2 | Regression (0692a8a) | The space pass collapsed a no-break space, which no browser does.                                                                                                            | Replaced; see AF3.                                                                                                                                                                                                                                                                                                                                                |
+| AF3 | Regression (f264ce5) | The space pass looked only at the buffer's top-level nodes, so a space starting the next element doubled, and a `<br>` at an element's edge kept a space beside it.          | Replaced by `collapseWhitespace`: CSS `white-space: normal` over the text as a whole -- each run of `[ \t\n\r\f]` is one space, none at the start or end of a line, across element edges; a no-break space is content. Against Chromium's `innerText` on 12,000 generated inline runs: 12,000 identical, against about 26% for `main` and the last three commits. |
+| AF4 | Regression (0692a8a) | The buffer and `distributeFormatting` read the same pretty-printing differently.                                                                                             | A distributed run is read by the same buffer, so `wrapRun`'s own collapse is gone and the two agree by construction.                                                                                                                                                                                                                                              |
+| AF5 | Test gaps (0692a8a)  | `SKIP_TAGS` in `textImages` and two space-pass branches passed every test removed.                                                                                           | Asserted; the space-pass branches went with AF3.                                                                                                                                                                                                                                                                                                                  |
+
+Found while fixing, each checked against Chromium where it is a question of layout:
+
+- A no-break space is content in two more places that used `trim`: after a `<br>` (`a<br>&nbsp;` lost its break) and between
+  blocks (`<div>x</div>&nbsp;` in a cell lost the space).
+- A table nested in a cell was dropped with all its text (on `main`, at the top level too -- an HTML email laid out in nested tables
+  lost its content). It is the cell's text now. Reading it exposed a quadratic look-ahead: every block the walk left climbed to the
+  root for text after it, so both of a block's line breaks are now deferred and dropped in the one pass if no text follows. An empty
+  block after text no longer leaves a line break either.
+- A list the item does not hold directly -- inside a wrapper, a paragraph, a toggle -- was skipped in the item's text and never
+  visited, so its text was lost (on `main` too; the accepted "list in an inline wrapper is dropped"). Only what is visited as a block
+  is skipped now, so that list is read as the item's text; a checkbox inside it still does not make the item a to-do. A chain of
+  such wrappers reads in linear time, at about twice the constant.
+
+No longer accepted: a list in an inline wrapper inside a foreign item being dropped.

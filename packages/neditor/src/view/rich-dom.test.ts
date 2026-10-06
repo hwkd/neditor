@@ -2252,3 +2252,122 @@ describe('audit 32', () => {
     expect(shape(html)[0]?.text).toBe(text);
   });
 });
+
+describe('audit 33', () => {
+  const shape = (html: string) =>
+    blocksFromHtml(document, html).map((block) => ({
+      type: block.type,
+      depth: block.depth,
+      text: richToPlainText(block.content),
+    }));
+  const text = (html: string) => shape(html).map((block) => block.text);
+
+  // Outside a paragraph, whitespace collapses as a browser collapses it
+  // (white-space: normal), across element edges -- and a no-break space is
+  // never whitespace that collapses. Each expectation is what Chromium shows.
+  test.each([
+    ['<div><span>a </span><span>&nbsp;</span><b>b</b></div>', 'a \u00a0b'],
+    ['<div>a<br>&nbsp;&nbsp;<b>b</b></div>', 'a\n\u00a0\u00a0b'],
+    ['<div><a href="https://a.test/">x</a> <span> - desc</span></div>', 'x - desc'],
+    ['<div><u>a<br></u> <u>b</u></div>', 'a\nb'],
+    ['<div><b>a</b><span> </span> <b>b</b></div>', 'a b'],
+    ['<div><b>a </b><br><span> </span><b>b</b></div>', 'a\nb'],
+    ['<div>foo\nbar <b>x</b></div>', 'foo bar x'],
+    // ... and after a break, which therefore stands.
+    ['<div>w<br>&nbsp;</div>', 'w\n\u00a0'],
+    // A no-break space is content even where it comes first.
+    ['<div>&nbsp;<b> </b>w</div>', '\u00a0 w'],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)[0]).toBe(expected);
+  });
+
+  // A wrapper distributed over the same content reads it the same way.
+  test('the buffer and a distributed wrapper agree', () => {
+    expect(text('<div><p>A</p><i>x</i>\n<br>\n<i>y</i></div>')).toEqual(['A', 'x\ny']);
+    expect(text('<div><b><p>A</p><i>x</i>\n<br>\n<i>y</i></b></div>')).toEqual(['A', 'x\ny']);
+  });
+
+  // A link's pretty-printing is layout; only a space on its line is the
+  // sentence's.
+  test('a pretty-printed image link is the image', () => {
+    expect(
+      shape(
+        '<ul><li>\n  <a href="https://a.test/p1">\n    <img src="https://a.test/1.png">\n  </a>\n</li></ul>',
+      ),
+    ).toEqual([{ type: 'image', depth: 1, text: '' }]);
+  });
+
+  test('an image in a list inside a link is kept', () => {
+    expect(
+      shape(
+        '<ul><li><a href="https://l.test/">\n  <ul><li><img src="https://i.test/1.png"></li></ul>\n</a></li></ul>',
+      ).some((block) => block.type === 'image'),
+    ).toBe(true);
+  });
+
+  // A link holding a block is no part of a sentence, so its whitespace is
+  // layout: holding only an image besides, it is the image's block.
+  test('an image link holding a block keeps its image', () => {
+    expect(
+      shape(
+        '<ul><li>t<a href="https://l.test/"> <div><ul><li><img src="https://i.test/3.png"></li></ul></div></a></li></ul>',
+      ),
+    ).toEqual([
+      { type: 'bulleted_list', depth: 0, text: 't' },
+      { type: 'image', depth: 2, text: '' },
+    ]);
+  });
+
+  // An empty block after text adds no line: the break before it waits for text.
+  test('an empty block after text adds no line break', () => {
+    const [table] = blocksFromHtml(
+      document,
+      '<table><tr><td>t <div><span></span></div></td></tr></table>',
+    );
+    expect(richToPlainText(table?.rows?.[0]?.[0] ?? [])).toBe('t ');
+  });
+
+  // A list the item does not hold directly is never visited as a block, so it
+  // is read as the item's text rather than dropped -- and a checkbox in it
+  // does not make the item a to-do.
+  test.each([
+    ['<ul><li>a<b><ul><li>b</li></ul></b></li></ul>', 'a\nb', 'bulleted_list'],
+    [
+      '<ul><li><p>a<details><summary>s</summary><ul><li>F0</li></ul></details></p></li></ul>',
+      'a\ns\nF0',
+      'bulleted_list',
+    ],
+    [
+      '<ul><li>a<b><ul><li><input type="checkbox">x</li></ul></b></li></ul>',
+      'a\nx',
+      'bulleted_list',
+    ],
+  ])('%s keeps its text', (html, text, type) => {
+    expect(shape(html)[0]).toEqual({ type, depth: 0, text });
+  });
+
+  // A table nested in a cell is read as the cell's text, not dropped with it:
+  // a cell holds text, and that is the text it holds.
+  test('a table nested in a cell keeps its text', () => {
+    const [table] = blocksFromHtml(
+      document,
+      '<table><tr><td>a<table><tr><td>V0</td><td>W0</td></tr></table></td><td>b</td></tr></table>',
+    );
+    expect(table?.rows?.map((row) => row.map((cell) => richToPlainText(cell)))).toEqual([
+      ['a\nV0\nW0', 'b'],
+    ]);
+  });
+
+  // A no-break space after a block is text, so the line still breaks before it.
+  test('a no-break space after a block in a cell is on its own line', () => {
+    const [table] = blocksFromHtml(document, '<table><tr><td><div>x</div>&nbsp;</td></tr></table>');
+    expect(richToPlainText(table?.rows?.[0]?.[0] ?? [])).toBe('x\n\u00a0');
+  });
+
+  // An image in something never read is not handed on either.
+  test('an image in a <noscript> is not handed on', () => {
+    expect(
+      shape('<ul><li>a<noscript><img src="https://a.test/n.png"></noscript>b</li></ul>'),
+    ).toEqual([{ type: 'bulleted_list', depth: 0, text: 'ab' }]);
+  });
+});

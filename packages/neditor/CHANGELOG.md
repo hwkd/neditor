@@ -191,7 +191,13 @@ that changes what you store or what other applications receive is listed first.
   table, and a checkbox to-do (GitHub's task lists) no longer keeps the space
   after the box. A space between two inline elements outside a paragraph
   (`<b>bold</b> <i>it</i>`, links side by side in a `<div>`) was dropped and
-  joined the words; whitespace there now reads as a browser shows it -- one
-  space between two pieces of text, none before the first, after the last or
-  beside a line break. Inside a paragraph it is kept as it stands, which is
+  joined the words. Whitespace there is now collapsed as a browser lays it
+  out (`white-space: normal`): one space for each run of spaces and line
+  breaks, none at the start or end of a line, across element edges; a
+  no-break space is kept. Inside a paragraph it is kept as it stands, which is
   how this editor's own clipboard writes a line break between two runs.
+- HTML clipboard (also on earlier versions): a table nested in a table cell
+  is read as that cell's text instead of being dropped with it, so an HTML
+  email laid out in nested tables keeps its content; a list inside a wrapper
+  in a list item is read as the item's text instead of being dropped; a line
+  break followed only by a no-break space is kept.
