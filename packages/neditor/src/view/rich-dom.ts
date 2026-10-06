@@ -1841,16 +1841,45 @@ function isItemBlock(element: Element): boolean {
   // paragraph: one holding nothing but the image is the image. Holding text,
   // or a task list's checkbox, it is the item's text.
   return (
-    tag === 'IMG' || tag === 'FIGURE' || ((tag === 'P' || tag === 'A') && holdsOnlyImage(element))
+    tag === 'IMG' ||
+    tag === 'FIGURE' ||
+    ((tag === 'P' || tag === 'A') && holdsOnlyImage(element, tag === 'A'))
   );
+}
+
+/**
+ * The images in an element's own text, past whatever `skip` hides. `pushImage`
+ * refuses any whose source is unusable.
+ */
+function textImages(root: Element, skip: SkipPredicate): Element[] {
+  const images: Element[] = [];
+  const walker = root.ownerDocument.createTreeWalker(root, SHOW_ELEMENT, {
+    acceptNode: (candidate) => {
+      const tag = tagNameOf(candidate);
+
+      return SKIP_TAGS.has(tag) || skip(candidate as Element, tag) ? FILTER_REJECT : FILTER_ACCEPT;
+    },
+  });
+
+  for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
+    if (tagNameOf(found) === 'IMG') {
+      images.push(found as Element);
+    }
+  }
+
+  return images;
 }
 
 /**
  * Whether an element holds no text and no checkbox. Walked, and left at the
  * first of either: `textContent` recurses through the subtree in some DOMs,
  * and counts a style sheet's source as text.
+ *
+ * @param strict Whether whitespace counts as text: it does in a link, which
+ * sits in a sentence and whose space is the sentence's (`a<a><img> </a>b` read
+ * `ab`), and not in a paragraph, which pretty-printing indents.
  */
-function holdsOnlyImage(element: Element): boolean {
+function holdsOnlyImage(element: Element, strict: boolean): boolean {
   const walker = element.ownerDocument.createTreeWalker(element, SHOW_TEXT | SHOW_ELEMENT, {
     acceptNode: (candidate) =>
       SKIP_TAGS.has(tagNameOf(candidate)) ? FILTER_REJECT : FILTER_ACCEPT,
@@ -1859,7 +1888,8 @@ function holdsOnlyImage(element: Element): boolean {
   for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
     if (
       tagNameOf(found) === 'INPUT' ||
-      (found.nodeType === TEXT_NODE && (found.nodeValue ?? '').trim().length > 0)
+      (found.nodeType === TEXT_NODE &&
+        (strict ? (found.nodeValue ?? '') : (found.nodeValue ?? '').trim()).length > 0)
     ) {
       return false;
     }
@@ -1981,11 +2011,17 @@ function visitListItemInner(
   // a text paragraph inside the item. The paragraph reads before the block,
   // as bare text after a block does.
   if (!declared && isRichEmpty(runs)) {
-    const paragraph = [...blocks].find((block) => tagNameOf(block) === 'P' && !isItemBlock(block));
+    for (const block of blocks) {
+      if (tagNameOf(block) === 'P' && !isItemBlock(block)) {
+        const text = parseRichText(block);
 
-    if (paragraph) {
-      blocks.delete(paragraph);
-      runs = parseRichText(paragraph);
+        // The first that holds text: a blank one is a blank line, and stays.
+        if (richToPlainText(text).trim().length > 0) {
+          blocks.delete(block);
+          runs = text;
+          break;
+        }
+      }
     }
   }
 
@@ -2002,6 +2038,13 @@ function visitListItemInner(
     }
 
     out.push(block);
+  }
+
+  // An image in the item's text -- its own paragraph, a wrapper, a promoted
+  // paragraph, a loose to-do's line -- is handed on as a child image, as a
+  // bare one is. Read as text it was dropped: the text has no image.
+  for (const image of textImages(item, skip)) {
+    pushImage(out, image, itemDepth + 1);
   }
 
   // A list nested inside the item continues one level deeper, and so does
@@ -2092,25 +2135,67 @@ function visitBlocksInner(
       return;
     }
 
-    // Whitespace is buffered only after an inline node, and what follows the
-    // last one holding text -- an empty `<span>` included -- is the layout
-    // before whatever ended the run, not a space at the end of the text.
-    let last = buffer.length - 1;
+    // Whitespace is a space only between two pieces of text, as a browser
+    // shows it: not before the first or after the last -- an empty `<span>` or
+    // an icon's `<i>` is no text -- not beside a line break, and once however
+    // many comments or empty elements sit inside it, counting a space the text
+    // before it already ends with. An element holding only whitespace
+    // (`<span> </span>`) is a space someone typed: it yields only to a space
+    // already there, and is otherwise kept where it stands.
+    const texts = buffer.map((node) =>
+      node.nodeType === TEXT_NODE ? (node.nodeValue ?? '') : subtreeText(node),
+    );
+    const kinds = buffer.map((node, index) => {
+      if (isSourceWhitespace(node)) {
+        return 'space';
+      }
 
-    while (
-      last >= 0 &&
-      (isSourceWhitespace(buffer[last]!) ||
-        (buffer[last]!.nodeType === ELEMENT_NODE && subtreeText(buffer[last]!).trim().length === 0))
-    ) {
-      last -= 1;
+      if (tagNameOf(node) === 'BR') {
+        return 'break';
+      }
+
+      const text = texts[index]!;
+
+      return text.trim().length > 0 ? 'text' : text.length > 0 ? 'typed' : 'empty';
+    });
+    const following: string[] = [];
+    let after = 'none';
+
+    for (let index = kinds.length - 1; index >= 0; index -= 1) {
+      following[index] = after;
+      after = kinds[index] === 'text' || kinds[index] === 'break' ? kinds[index]! : after;
     }
 
     const wrapper = doc.createElement('div');
+    let before = 'none';
+    let spaced = false;
 
     for (const [index, inline] of buffer.entries()) {
-      if (index <= last || !isSourceWhitespace(inline)) {
-        wrapper.append(cloneDeep(inline));
+      const kind = kinds[index];
+
+      if (kind === 'space') {
+        if (before !== 'text' || following[index] !== 'text' || spaced) {
+          continue;
+        }
+
+        spaced = true;
+      } else if (kind === 'typed') {
+        if (spaced) {
+          continue;
+        }
+
+        spaced = true;
+      } else if (kind === 'text') {
+        const text = texts[index]!;
+
+        before = kind;
+        spaced = /\s/.test(text[text.length - 1] ?? '');
+      } else if (kind === 'break') {
+        before = kind;
+        spaced = false;
       }
+
+      wrapper.append(cloneDeep(inline));
     }
 
     buffer = [];

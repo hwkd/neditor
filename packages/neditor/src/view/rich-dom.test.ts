@@ -1954,13 +1954,17 @@ describe('audit 30', () => {
     expect(shape(html)).toEqual(blocks);
   });
 
-  // A link holding text as well as an image is the item's text, as before.
+  // A link holding text as well as an image is the item's text, and the
+  // image is handed on beside it rather than dropped.
   test('a link holding text and an image stays text', () => {
     expect(
       shape(
         '<ul><li>See <a href="https://a.test/"><img src="https://a.test/i.png">here</a></li></ul>',
       ),
-    ).toEqual([{ type: 'bulleted_list', depth: 0, text: 'See here' }]);
+    ).toEqual([
+      { type: 'bulleted_list', depth: 0, text: 'See here' },
+      { type: 'image', depth: 1, text: '' },
+    ]);
   });
 
   test("a table's footer rows are rows", () => {
@@ -2116,5 +2120,135 @@ describe('audit 31', () => {
     const wrapped = '<b><p><i>a</i>\n <i>b</i></p><p>c</p></b>';
     const byHand = '<p><b><i>a</i>\n <i>b</i></b></p><p><b>c</b></p>';
     expect(shape(wrapped)).toEqual(shape(byHand));
+  });
+});
+
+describe('audit 32', () => {
+  const shape = (html: string) =>
+    blocksFromHtml(document, html).map((block) => ({
+      type: block.type,
+      depth: block.depth,
+      text: richToPlainText(block.content),
+      ...(block.src === undefined ? {} : { src: block.src }),
+      ...(block.checked === undefined ? {} : { checked: block.checked }),
+    }));
+
+  // An image in the item's own text is handed on as a child image, as a bare
+  // one is: read as text it was dropped.
+  test.each([
+    [
+      'a loose task item opening with an image',
+      '<ul><li class="task-list-item"><p><input type="checkbox" disabled> <a href="https://a.test/shot.png"><img src="https://a.test/shot.png"></a></p></li></ul>',
+      [
+        { type: 'todo', depth: 0, text: '', checked: false },
+        { type: 'image', depth: 1, text: '', src: 'https://a.test/shot.png' },
+      ],
+    ],
+    [
+      'an image in a promoted paragraph',
+      '<ol><li><p><a href="https://a.test/a.png"><img src="https://a.test/a.png"></a></p><p>Click the <a href="https://a.test/g.png"><img src="https://a.test/g.png"></a> icon.</p></li></ol>',
+      [
+        { type: 'numbered_list', depth: 0, text: 'Click the  icon.' },
+        { type: 'image', depth: 1, text: '', src: 'https://a.test/g.png' },
+        { type: 'image', depth: 1, text: '', src: 'https://a.test/a.png' },
+      ],
+    ],
+    [
+      "Confluence's image wrapper",
+      '<ul><li>Step one<br><span class="confluence-embedded-file-wrapper"><img src="https://a.test/c.png"></span></li></ul>',
+      [
+        { type: 'bulleted_list', depth: 0, text: 'Step one' },
+        { type: 'image', depth: 1, text: '', src: 'https://a.test/c.png' },
+      ],
+    ],
+    [
+      "an image in the item's own paragraph",
+      '<ul><li><p>Click <img src="https://a.test/i.png"> here</p></li></ul>',
+      [
+        { type: 'bulleted_list', depth: 0, text: 'Click  here' },
+        { type: 'image', depth: 1, text: '', src: 'https://a.test/i.png' },
+      ],
+    ],
+  ])('%s keeps the image', (_name, html, blocks) => {
+    expect(shape(html)).toEqual(blocks);
+  });
+
+  // A link's whitespace is the sentence's: one holding a space beside its
+  // image is read as text, the space kept and the image handed on.
+  test('an image link holding a space keeps the space', () => {
+    expect(
+      shape('<ul><li>a<a href="https://l.test/"><img src="https://i.test/x.png"> </a>b</li></ul>'),
+    ).toEqual([
+      { type: 'bulleted_list', depth: 0, text: 'a b' },
+      { type: 'image', depth: 1, text: '', src: 'https://i.test/x.png' },
+    ]);
+  });
+
+  // A pretty-printed image paragraph is still only an image.
+  test('an image paragraph with layout around the image is the image', () => {
+    expect(
+      shape('<ul><li>a<p>\n  <img src="https://a.test/i.png">\n</p><p>t</p></li></ul>'),
+    ).toEqual([
+      { type: 'bulleted_list', depth: 0, text: 'a' },
+      { type: 'image', depth: 1, text: '', src: 'https://a.test/i.png' },
+      { type: 'paragraph', depth: 1, text: 't' },
+    ]);
+  });
+
+  // The paragraph promoted is the first that holds text.
+  test.each([
+    [
+      '<ol><li><pre>npm i</pre><p><br></p><p>Install it.</p></li></ol>',
+      [
+        { type: 'numbered_list', depth: 0, text: 'Install it.' },
+        { type: 'code', depth: 1, text: 'npm i' },
+        { type: 'paragraph', depth: 1, text: '' },
+      ],
+    ],
+    [
+      '<ol><li><pre>npm i</pre><p>&nbsp;</p><p>Install it.</p></li></ol>',
+      [
+        { type: 'numbered_list', depth: 0, text: 'Install it.' },
+        { type: 'code', depth: 1, text: 'npm i' },
+        { type: 'paragraph', depth: 1, text: '\u00a0' },
+      ],
+    ],
+    [
+      '<ol><li><pre>x</pre><p>first</p><p>second</p></li></ol>',
+      [
+        { type: 'numbered_list', depth: 0, text: 'first' },
+        { type: 'code', depth: 1, text: 'x' },
+        { type: 'paragraph', depth: 1, text: 'second' },
+      ],
+    ],
+  ])('%s promotes the first paragraph with text', (html, blocks) => {
+    expect(shape(html)).toEqual(blocks);
+  });
+
+  // Outside a paragraph, whitespace is a space only between two pieces of
+  // text: not before the first, not beside a line break, and once however many
+  // empty elements or comments sit in it.
+  test.each([
+    [
+      '<div>\n  <i class="fa fa-check"></i>\n  <span>Unlimited projects</span>\n</div>',
+      'Unlimited projects',
+    ],
+    [
+      '<div>\n  <strong>Acme Ltd</strong><br>\n  <span>1 Main St</span><br>\n  <span>Springfield</span>\n</div>',
+      'Acme Ltd\n1 Main St\nSpringfield',
+    ],
+    ['<div><span>x</span>\n  <br>\n  <span>y</span></div>', 'x\ny'],
+    ['<div><b>x</b> <br> <i>y</i></div>', 'x\ny'],
+    [
+      '<div><a href="https://a.test/1">One</a>\n  <!-- c -->\n  <a href="https://a.test/2">Two</a></div>',
+      'One Two',
+    ],
+    ['<div><b>One</b> <span></span> <b>Two</b></div>', 'One Two'],
+    // An element holding only a space is a space too.
+    ['<div><span>w0</span>\n  <span> </span><span>w3</span></div>', 'w0 w3'],
+    // And text that ends in a space already has one.
+    ['<div><a href="https://a.test/">w0</a> w1 <span></span>\n<!--c--><b>w5</b></div>', 'w0 w1 w5'],
+  ])('%j reads %j', (html, text) => {
+    expect(shape(html)[0]?.text).toBe(text);
   });
 });

@@ -177,10 +177,12 @@ that changes what you store or what other applications receive is listed first.
 - HTML clipboard, from other applications (also on earlier versions): an
   image, table, code block, quote, heading or rule inside a list item was
   dropped or flattened into the item's text, and a paragraph after a nested
-  list moved above it. An image counts on its own, inside a link (GitHub's
-  markup) or inside a paragraph (a loose list), as long as no text or checkbox
-  sits beside it there. An item whose blocks come before any text of its own
-  takes its first paragraph as its text, so it keeps its place and number. They are now the item's children, in order; the item
+  list moved above it. An image counts as a block on its own, inside a link
+  (GitHub's markup) or inside a paragraph (a loose list); one anywhere in the
+  item's text -- beside words, in a wrapper, beside a task's checkbox -- is
+  handed on as a child image rather than dropped with the text it sat in. An
+  item whose blocks come before any text of its own takes its first paragraph
+  that holds text as its text, so it keeps its place and number. They are now the item's children, in order; the item
   itself, its to-do box and its number stay, and bare text after one of them
   stays the item's text, on a line of its own rather than joined to the word
   before it. A list nested directly inside a list (Google Docs, and a browser's
@@ -189,7 +191,7 @@ that changes what you store or what other applications receive is listed first.
   table, and a checkbox to-do (GitHub's task lists) no longer keeps the space
   after the box. A space between two inline elements outside a paragraph
   (`<b>bold</b> <i>it</i>`, links side by side in a `<div>`) was dropped and
-  joined the words; pretty-printed whitespace there (a line break and
-  indentation) now reads as the one space a browser shows. Inside a
-  paragraph it is kept as it stands, which is how this editor's own
-  clipboard writes a line break between two runs.
+  joined the words; whitespace there now reads as a browser shows it -- one
+  space between two pieces of text, none before the first, after the last or
+  beside a line break. Inside a paragraph it is kept as it stands, which is
+  how this editor's own clipboard writes a line break between two runs.
