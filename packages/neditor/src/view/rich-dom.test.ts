@@ -2796,10 +2796,12 @@ describe('audit 38', () => {
     expect(blocks[1]?.content[0]?.link).toBe('https://a.test/1');
   });
 
-  test('a deep chain of formatting around items reads without overflowing', () => {
-    expect(() =>
+  // The wrappers take the list bound: past it, what is left is one block of
+  // text rather than an item per level.
+  test('a deep chain of formatting around items stops at the list bound', () => {
+    expect(
       blocksFromHtml(document, `<ul>${'<b><li>x</li>'.repeat(3000)}${'</b>'.repeat(3000)}</ul>`),
-    ).not.toThrow();
+    ).toHaveLength(257);
   });
 
   test.each([
@@ -2808,5 +2810,84 @@ describe('audit 38', () => {
     ['<ol><li>a</li><p>para</p></ol>', ['a', 'para']],
   ])('%j reads %j', (html, expected) => {
     expect(text(html)).toEqual(expected);
+  });
+});
+
+describe('audit 39', () => {
+  const text = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image' ? '[img]' : richToPlainText(block.content),
+    );
+  const shape = (html: string) =>
+    blocksFromHtml(document, html).map((block) => [
+      block.type,
+      block.depth,
+      richToPlainText(block.content),
+    ]);
+
+  // Two breaks after an open line: the first ends it, the second is a blank
+  // line -- each counted once.
+  test.each([
+    [
+      '<p>words</p><img src="https://example.test/a.png"><br><br><p>Next</p>',
+      ['words', '[img]', '', 'Next'],
+    ],
+    [
+      '<p>s</p><a href="https://h.test/"><div>T</div>more</a><br><br><p>x</p>',
+      ['s', 'T', 'more', '', 'x'],
+    ],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  // An item, a nested list or a wrapper of items starts a line of its own, so
+  // a break after it does not close a line the loose text before it opened.
+  test.each([
+    ['<ul>Lead<li>One item</li><br><li>Two item</li></ul>', ['Lead', 'One item', '', 'Two item']],
+    ['<ul>x<ul><br>y</ul></ul>', ['x', '\ny']],
+    ['<ul><img src="https://example.test/a.png"><li>a</li><br>z</ul>', ['[img]', 'a', '\nz']],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  // The wrapper branch for images asks the browser's layout too, and a figure
+  // is a block.
+  test.each([
+    ['<p>s</p><center><img src="https://example.test/a.png"></center><br>b', ['s', '[img]', '\nb']],
+    [
+      '<p>s</p>a<figure><img src="https://example.test/a.png"></figure><br>b',
+      ['s', 'a', '[img]', '\nb'],
+    ],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  // Wrapped items keep the list's type, its depth and whether we wrote it.
+  test.each([
+    ['<ol><div><li>a</li></div></ol>', [['numbered_list', 0, 'a']]],
+    ['<ul><div><li>a</li></div></ul>', [['bulleted_list', 0, 'a']]],
+    ['<ul data-neditor-list><span><li>[x] a</li></span></ul>', [['bulleted_list', 0, '[x] a']]],
+  ])('%j reads %j', (html, expected) => {
+    expect(shape(html)).toEqual(expected);
+  });
+
+  // An element a browser lays out as a block breaks the line in text as well:
+  // HTML email centres its lines with <center>.
+  test.each([
+    [
+      '<p>words</p><center>Title line</center><center>Sub line</center><p>Next</p>',
+      ['words', 'Title line\nSub line', 'Next'],
+    ],
+    ['<address>1 Main St</address>Phone 555', ['1 Main St\nPhone 555']],
+  ])('%j reads %j', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  test('centred lines in a cell', () => {
+    const [table] = blocksFromHtml(
+      document,
+      '<table><tr><td><center>Line A</center><center>Line B</center></td></tr></table>',
+    );
+    expect(richToPlainText(table?.rows?.[0]?.[0] ?? [])).toBe('Line A\nLine B');
   });
 });

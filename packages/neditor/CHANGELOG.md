@@ -217,7 +217,10 @@ that changes what you store or what other applications receive is listed first.
   were dropped, the whole list with them when every item was wrapped; they are
   items now, carrying the wrapper's link, and loose text or paragraphs directly
   in a list are read as blocks. An inline image followed by a `<br>`, as in an
-  email's image line, no longer adds a blank paragraph after the image.
+  email's image line, no longer adds a blank paragraph after the image. Text in
+  an element a browser lays out as a block but this reader had no name for --
+  `<center>` (HTML email centres its lines with it), `<address>`, `<aside>`,
+  `<form>` -- no longer runs into the text beside it.
 - HTML clipboard (also on earlier versions): a table nested in a table cell
   is read as that cell's text instead of being dropped with it, so an HTML
   email laid out in nested tables keeps its content; a list inside a wrapper

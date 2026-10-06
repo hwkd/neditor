@@ -342,7 +342,7 @@ function hasContentAfter(node: Node, root: Node, skip?: SkipPredicate): boolean 
  */
 function isBetweenBlocks(node: Node): boolean {
   const isBlock = (sibling: Node | null): boolean =>
-    sibling !== null && sibling.nodeType === ELEMENT_NODE && BLOCK_TAGS.has(tagNameOf(sibling));
+    sibling !== null && sibling.nodeType === ELEMENT_NODE && breaksLine(tagNameOf(sibling));
   const edge = (sibling: Node | null): boolean => sibling === null || isBlock(sibling);
   const previous = node.previousSibling;
   const next = node.nextSibling;
@@ -362,6 +362,15 @@ const SKIPPED_SPACES = new WeakSet<TextRun>();
 
 /** Blank paragraphs a lone `<br>` made between blocks; trimmed at a paste's ends. */
 const BLANK_LINES = new WeakSet<Block>();
+
+/**
+ * Whether an element starts and ends a line of text: what `BLOCK_TAGS` names,
+ * and everything a browser lays out as a block -- `<center>`, `<address>`,
+ * `<aside>` and the rest, whose text otherwise ran into its neighbours'.
+ */
+function breaksLine(tag: string): boolean {
+  return BLOCK_TAGS.has(tag) || DISPLAY_BLOCK_TAGS.has(tag);
+}
 
 /** Appends a newline unless the output is empty or already ends with one. */
 function breakLine(
@@ -439,10 +448,9 @@ let pasteFirst = new Set<Node>();
 let pasteLast = new Set<Node>();
 
 /**
- * Whether inline text has started a line that nothing has ended yet. A `<br>`
- * run ends such a line rather than making a blank one: the inline text a
- * wrapper holding blocks ends with goes on after the wrapper, and the line a
- * `<br>` after it closes is that one.
+ * Whether inline content has started a line that nothing has ended yet -- the
+ * text an inline wrapper holding blocks ends with, or an inline image -- so a
+ * `<br>` run after it ends that line rather than making a blank one.
  */
 let lineOpen = false;
 
@@ -546,10 +554,10 @@ function walk(
     // text on either side of it: `<li>a<ul>…</ul>c</li>` read `ac`. Deferred,
     // because whether text follows is only known once the walk gets there.
     if (skip?.(element, tag) === true) {
-      // A figure and a rule are blocks here though not in BLOCK_TAGS, which
-      // lists what breaks the line when read as text, and so is a link holding
-      // a block; an image, linked or not, is not.
-      if (BLOCK_TAGS.has(tag) || tag === 'FIGURE' || tag === 'HR' || containsBlockLevel(element)) {
+      // A block breaks the line here as anywhere (`breaksLine`: a figure and a
+      // rule included), and so does a link holding one; an image, linked or
+      // not, does not.
+      if (breaksLine(tag) || containsBlockLevel(element)) {
         breakLine(out, marks, link, true);
       } else if (/[ \t\n\r\f]/.test(subtreeText(element))) {
         // An inline one -- an image link -- keeps the space its whitespace
@@ -575,7 +583,7 @@ function walk(
     // after it when text follows. `breakLine` collapses the two where blocks
     // are adjacent, so they never double up; both wait for the text, so an
     // empty block after the last of it adds no line.
-    const isBlock = BLOCK_TAGS.has(tag);
+    const isBlock = breaksLine(tag);
 
     if (isBlock) {
       breakLine(out, marks, link, true);
@@ -2259,6 +2267,8 @@ function visitListChildren(
     }
 
     flushLoose();
+    // An item, a nested list or a wrapper of items starts a line of its own.
+    lineOpen = false;
 
     if (tag === 'LI') {
       visitListItem(child as Element, fallback, depth, out, declared);
@@ -2619,9 +2629,9 @@ function visitBlocksInner(
   let closeAfter = false;
 
   /**
-   * @param continues Whether what comes next goes on with the line -- a wrapper
-   * holding blocks, whose own inline text starts on it -- rather than a block
-   * that starts a new one.
+   * @param continues Whether what comes next goes on with the line -- an inline
+   * wrapper holding blocks or images, or an inline image -- rather than a
+   * block that starts a new one.
    */
   const flushInline = (continues = false): void => {
     if (!continues) {
@@ -2696,7 +2706,9 @@ function visitBlocksInner(
     // A run that starts with a break on an open line -- after an inline
     // image, or a wrapper's own text -- ends that line rather than leaving a
     // blank one at its head.
-    if (opened && richToPlainText(runs).startsWith('\n')) {
+    const stripped = opened && richToPlainText(runs).startsWith('\n');
+
+    if (stripped) {
       runs = richDelete(runs, 0, 1);
     }
 
@@ -2704,8 +2716,10 @@ function visitBlocksInner(
       out.push(createBlock('paragraph', runs, depth));
       lineOpen = !collapsed.endsLine;
     } else if (blankLine) {
-      // A `<br>` that ends an open line is no blank line of its own.
-      if (!opened) {
+      // A `<br>` that ends an open line is no blank line of its own -- but
+      // when the line was ended by a break taken off the run's head, the
+      // break that is left is one.
+      if (!opened || stripped) {
         const block = createBlock('paragraph', [], depth);
 
         BLANK_LINES.add(block);
