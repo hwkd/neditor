@@ -261,7 +261,9 @@ emphasised cost nothing, and underscores taken out of a URL do. A span may cross
 in CommonMark, but an emphasis delimiter (`*`, `_`, `~`) cannot sit against the break.
 
 An autolink, `<https://…>`, becomes the plain URL it holds when its `>` is typed, as
-the writer spells a bare URL that way; nothing closes inside one while it is open. A
+the writer spells a bare URL that way. While one is open nothing closes inside it except a
+code span that opened before its `<`, and it does not close inside a code span left open
+before it. A
 plain link destination may hold balanced parentheses, as CommonMark allows
 (`[wiki](https://en.wikipedia.org/wiki/Foo_(bar))`).
 

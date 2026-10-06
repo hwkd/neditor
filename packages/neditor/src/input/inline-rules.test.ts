@@ -276,3 +276,19 @@ test("a NUL in typed text is not read as the reader's placeholder", () => {
     matchInlineRule(`[x](https://bank${nul}.test/)`, { projection: true })?.link,
   ).toBeDefined();
 });
+
+// Typing reads the block's literal text, which can hold backticks a paste
+// brought in escaped -- so the run pairing is pinned here, where it is
+// reachable, rather than through the parser, which pairs a doubled run one
+// backtick at a time before an autolink can see it.
+describe('an autolink inside a code span left open', () => {
+  test.each([
+    // A single backtick does not close a double run.
+    ['``a` <https://a.test/>', false],
+    ['``a`` <https://a.test/>', true],
+    ['`a` <https://a.test/>', true],
+    ['`a <https://a.test/>', false],
+  ])('%j closes an autolink: %s', (text, closes) => {
+    expect(matchInlineRule(text) !== null).toBe(closes);
+  });
+});

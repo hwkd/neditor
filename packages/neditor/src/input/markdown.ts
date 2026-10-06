@@ -872,6 +872,9 @@ function columnsOf(line: string): number {
   return spaces;
 }
 
+/** A list item's marker, after its indentation. */
+const LIST_ITEM_START = /^\s*(?:[-*+]|\d+[.)])(?:\s|$)/;
+
 /**
  * Reads a block's depth from its indentation, relative to the blocks above it.
  *
@@ -880,9 +883,6 @@ function columnsOf(line: string): number {
  * at its parent's content column, which under `1. ` is three -- and what it
  * used to, two columns a level whatever the parent, at the same depths.
  */
-/** A list item's marker, after its indentation. */
-const LIST_ITEM_START = /^\s*(?:[-*+]|\d+[.)])(?:\s|$)/;
-
 function depthReader(): (line: string) => number {
   const open: Array<{ readonly column: number; readonly depth: number; readonly item: boolean }> =
     [];
@@ -895,10 +895,13 @@ function depthReader(): (line: string) => number {
     // paragraph's leading space raw, so a child of one sat a column short of
     // two more (`   b` then `    - c`). Not under a list item, whose child
     // sits at its content column: `1. Step` / `   - a` / `    - b` is two
-    // siblings, as in CommonMark.
+    // siblings, as in CommonMark. A line indented with tabs is the exception:
+    // its column counts each tab as two, an estimate a column either way, so
+    // `\t\t- c` under `   - b` is its child although it reads a column short.
+    const tabbed = line.startsWith('\t');
     const childOf = (parent: { readonly column: number; readonly item: boolean }): boolean =>
       column >= parent.column + 2 ||
-      (!parent.item && Math.floor(column / 2) > Math.floor(parent.column / 2));
+      ((!parent.item || tabbed) && Math.floor(column / 2) > Math.floor(parent.column / 2));
 
     while (open.length > 0 && !childOf(open.at(-1)!)) {
       open.pop();

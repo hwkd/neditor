@@ -1890,3 +1890,62 @@ describe('audit 25', () => {
     expect(back[1]?.content).toEqual(t('const a = 1;\n\treturn a;'));
   });
 });
+
+describe('audit 26', () => {
+  // The backticks of a code span refused inside an autolink stay text, and
+  // pair with nothing later: `with` is not swallowed into a span they open.
+  test.each([
+    [
+      'Compare <http://host/`path` with `other`.',
+      [
+        { text: 'Compare <http://host/`path` with ' },
+        { text: 'other', marks: ['code'] },
+        { text: '.' },
+      ],
+    ],
+    [
+      'Call <https://api.test/`v`/items> with `GET`.',
+      [
+        { text: 'Call https://api.test/`v`/items with ' },
+        { text: 'GET', marks: ['code'] },
+        { text: '.' },
+      ],
+    ],
+    // An autolink inside a double-backtick code span is code, brackets and all.
+    [
+      'x ``<https://a.test/>`` y',
+      [{ text: 'x ' }, { text: '<https://a.test/>', marks: ['code'] }, { text: ' y' }],
+    ],
+    // An autolink's `<` right after another `<` opens none: the second `>`
+    // would close the URL a second time and take both outer brackets with it.
+    ['see <<https://a.test/>> now', [{ text: 'see <<https://a.test/>> now' }]],
+  ])('%j is read as %j', (markdown, content) => {
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual(content);
+  });
+
+  // Runs pair by length, so a single backtick inside a double-backtick span
+  // leaves it open, and the autolink in it keeps its brackets. (Where the
+  // backticks go is the per-character pairing `main` already had.)
+  test('an autolink after a lone backtick in a double-backtick span', () => {
+    const content = blocksFromMarkdown('x ``a` <https://a.test/>`` y')[0]?.content ?? [];
+    expect(content.map((run) => run.text).join('')).toContain('<https://a.test/>');
+  });
+
+  // A tab-indented line's column is an estimate (a tab counts two), so the
+  // two-columns-a-level rule still applies to it under a list item.
+  test('a tab-indented item under a list item nests', () => {
+    expect(blocksFromMarkdown('1. a\n   - b\n\t\t- c').map((block) => block.depth)).toEqual([
+      0, 1, 2,
+    ]);
+  });
+
+  // What counts as a list item for that rule: both ordinal spellings, and not
+  // emphasis that happens to start with a bullet character.
+  test.each([
+    ['1. Step\n   1. a\n    - b', [0, 1, 1]],
+    ['1. Step\n   1) a\n    - b', [0, 1, 1]],
+    ['1. Step\n   *emph*\n    - b', [0, 1, 2]],
+  ])('%j nests as %j', (markdown, depths) => {
+    expect(blocksFromMarkdown(markdown).map((block) => block.depth)).toEqual(depths);
+  });
+});

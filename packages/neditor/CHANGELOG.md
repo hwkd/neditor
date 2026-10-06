@@ -159,8 +159,10 @@ that changes what you store or what other applications receive is listed first.
   is written as the line break it is read as -- in a code block too, where one
   ending the text used to take the last line break with it.
 - Markdown reader: `<https://…>` (an autolink) is read, and typed, as the
-  plain URL it holds, where it stayed text with its brackets; nothing closes
-  inside one. A plain link or image destination may hold balanced
+  plain URL it holds, where it stayed text with its brackets. No span closes
+  inside one but a code span that opened before it, and none inside a code
+  span (of any number of backticks) left open before it; `<<https://…>>` is
+  left as it is written. A plain link or image destination may hold balanced
   parentheses, so a pasted `[wiki](https://en.wikipedia.org/wiki/Foo_(bar))`
   links to the whole URL instead of ending at the first `)`.
 - A quote whose text opens with a link labelled `!…` was read back as a

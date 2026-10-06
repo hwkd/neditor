@@ -83,7 +83,10 @@ const INLINE_RULES: readonly InlineRule[] = [
   // An autolink is the URL it holds, as plain text: the writer spells a bare
   // URL this way so that nothing written against it joins it in GFM. Not the
   // `](<…>)` of a destination, which is a link's own spelling.
-  { closer: '>', pattern: /(?<!\]\()<(https?:\/\/[^\s<>]*)>$/i, autolink: true },
+  // Never one whose `<` follows another: once the inner one closed, its URL
+  // would stand behind the outer `<` and the second `>` would close it again,
+  // taking both outer brackets (`<<https://a.test/>>`).
+  { closer: '>', pattern: /(?<!\]\(|<)<(https?:\/\/[^\s<>]*)>$/i, autolink: true },
   // The angle-bracket form first: it is how a destination holding a `)` — the
   // character that would otherwise close the link — is written.
   { closer: ')', pattern: /\[([^\]]+)\]\(<([^<>\n]*)>\)$/, isLink: true, angled: true },
@@ -158,19 +161,36 @@ function balancedParens(destination: string): boolean {
 }
 
 /**
- * Whether the text ends inside a backtick code span: an odd number of
- * backticks behind the caret. (The code rule pairs single backticks, so an
- * odd count leaves one open.) Showing autolink syntax in code --
- * `` `<https://example.com>` `` -- lost its brackets without this.
+ * The length of the backtick run the text leaves open, or 0 if none: runs
+ * pair as in CommonMark, an open run closed only by one of the same length.
+ * Showing autolink syntax in code -- `` `<https://example.com>` `` -- lost its
+ * brackets without this, and counting single backticks lost them again inside
+ * a double-backtick span, whose two runs make an even count.
+ *
+ * Only what is behind the caret is known, so a run whose closer never arrives
+ * still reads as open here.
  */
-function inOpenCodeSpan(window: string): boolean {
-  let count = 0;
+function openCodeRun(text: string): number {
+  let open = 0;
+  let at = text.indexOf('`');
 
-  for (let at = window.indexOf('`'); at !== -1; at = window.indexOf('`', at + 1)) {
-    count += 1;
+  while (at !== -1) {
+    let end = at;
+
+    while (text.charCodeAt(end) === 96) {
+      end += 1;
+    }
+
+    if (open === 0) {
+      open = end - at;
+    } else if (end - at === open) {
+      open = 0;
+    }
+
+    at = text.indexOf('`', end);
   }
 
-  return count % 2 === 1;
+  return open;
 }
 
 /**
@@ -447,8 +467,26 @@ export function matchInlineRule(
       continue;
     }
 
-    if (rule.autolink && inOpenCodeSpan(window.slice(0, searchedFrom + match.index))) {
+    if (rule.autolink && openCodeRun(window.slice(0, searchedFrom + match.index)) !== 0) {
       continue;
+    }
+
+    // No code span opens while one is left open behind it. A backtick only
+    // stays text that way when a refusal above kept its span from closing, so
+    // the next one is that span's closer, and text too: `<http://host/`path`
+    // with `other`` otherwise paired `path`'s second backtick with the next and
+    // swallowed ` with ` into code. The run the opener ends is its own, not
+    // one left open: `` ``a`` `` opens on its second backtick.
+    if (rule.mark === 'code' && closer === '`') {
+      let run = searchedFrom + match.index;
+
+      while (run > 0 && window.charCodeAt(run - 1) === 96) {
+        run -= 1;
+      }
+
+      if (openCodeRun(window.slice(0, run)) !== 0) {
+        continue;
+      }
     }
 
     // Asked only once a `_` rule has matched: the answer needs a walk back to
