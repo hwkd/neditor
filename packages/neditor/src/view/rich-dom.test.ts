@@ -2954,3 +2954,92 @@ describe('audit 40', () => {
     ]);
   });
 });
+
+describe('audit 41', () => {
+  const I = '<img src="https://x.test/i.png">';
+  const text = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image' ? '[img]' : richToPlainText(block.content),
+    );
+
+  // A display-block element inside a wrapper holding an image keeps its
+  // lines: an HTML-email signature, as Chromium and Firefox copy it.
+  test.each([
+    [
+      `<p>s</p><font face="Arial">Best regards<center>${I}<br>ACME Corp</center>123 Main St</font><p>e</p>`,
+      ['Corp123', 'regardsACME'],
+    ],
+    [`<p>s</p><b>x<center>y${I}</center>z</b><p>e</p>`, ['xy', 'yz']],
+    [
+      `<p>s</p><a href="https://h.test/">Title<aside>Sub ${I}</aside>more</a><p>e</p>`,
+      ['TitleSub', 'Submore'],
+    ],
+  ])('%s joins no words', (html, joins) => {
+    const all = text(html).join('|');
+    for (const join of joins) {
+      expect(all).not.toContain(join);
+    }
+  });
+
+  // A white-space style above a wrapper holding an image still governs its text.
+  test.each([
+    [
+      `<p>s</p><div style="white-space:pre-wrap">AAA <b>line1\nline2 ${I} ok</b> ZZZ</div>`,
+      'line1\nline2',
+    ],
+    [`<p>s</p><span style="white-space:pre">a   b${I}</span><p>e</p>`, 'a   b'],
+  ])('%s keeps %j', (html, kept) => {
+    expect(text(html).join('|')).toContain(kept);
+  });
+
+  // Firefox keeps a selected edge space as text: inside such a wrapper too.
+  test('edge spaces in a wrapper holding an image', () => {
+    expect(text(`<a href="https://h.test/"> and ${I} more </a>`)).toEqual([
+      ' and',
+      '[img]',
+      'more ',
+    ]);
+  });
+
+  // The nearest wrapper decides, as it does for text read directly.
+  test('an inner wrapper turning a mark off wins', () => {
+    const blocks = blocksFromHtml(
+      document,
+      `<p>s</p><b>Note: <span style="font-weight:normal">see ${I} here</span> done</b><p>e</p>`,
+    );
+    const runs = blocks.flatMap((block) => block.content);
+    expect(runs.find((run) => run.text.includes('see'))?.marks ?? []).toEqual([]);
+    expect(runs.find((run) => run.text.includes('Note'))?.marks).toEqual(['bold']);
+  });
+
+  // An element that both adds and removes a mark -- Google Docs' own
+  // `<b style="font-weight:normal">` -- leaves it off, as the walk does.
+  test('a wrapper that adds and removes bold leaves it off', () => {
+    const blocks = blocksFromHtml(
+      document,
+      `<p>s</p><b style="font-weight:normal">plain ${I} text</b><p>e</p>`,
+    );
+    const run = blocks.flatMap((block) => block.content).find((one) => one.text.includes('plain'));
+    expect(run?.marks ?? []).toEqual([]);
+  });
+
+  test('formatting nested inside the wrapper is inherited', () => {
+    const blocks = blocksFromHtml(
+      document,
+      `<p>s</p><a href="https://h.test/"><b>more ${I}</b></a><p>e</p>`,
+    );
+    const run = blocks.flatMap((block) => block.content).find((one) => one.text.includes('more'));
+    expect(run?.marks).toEqual(['bold']);
+    expect(run?.link).toBe('https://h.test/');
+  });
+
+  test('an image in something never read is not split out', () => {
+    expect(text(`<p>s</p><b>x<object>${I}</object>y</b><p>e</p>`)).toEqual(['s', 'xy', 'e']);
+  });
+
+  // Space-only runs are looked past only while whitespace is collapsed; a
+  // paragraph reads its whitespace as it stands.
+  test('a paragraph keeps a space between a break and a block', () => {
+    expect(text('<p>a<br> <center>b</center></p>')).toEqual(['a\n \nb']);
+  });
+});

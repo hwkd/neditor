@@ -1359,6 +1359,42 @@ function formattingWithin(
 }
 
 /**
+ * That formatting, extended by one wrapper inside it, the wrapper winning: how
+ * `parseRichText` reads text where it stands. (`formattingWithin` lets the
+ * outermost win instead, for formatting pushed into blocks.)
+ */
+function nearestFormatting(format: InlineFormatting, wrapper: Element): InlineFormatting {
+  const marks = new Map(format.marks);
+  const { add, remove } = marksForElement(wrapper);
+
+  // `marksForElement` never names a mark in both.
+  for (const mark of add) {
+    marks.set(mark, true);
+  }
+
+  for (const mark of remove) {
+    marks.set(mark, false);
+  }
+
+  const href = tagNameOf(wrapper) === 'A' ? (wrapper.getAttribute('href') ?? '') : null;
+
+  return { link: href ?? format.link, marks, soft: new Set() };
+}
+
+const DISPLAY_BLOCK_DESCENDANTS = new WeakMap<Element, Element | null>();
+
+/** Whether an element holds one a browser lays out as a block. */
+function holdsDisplayBlock(element: Element): boolean {
+  return (
+    firstDescendant(
+      element,
+      (candidate) => DISPLAY_BLOCK_TAGS.has(tagNameOf(candidate)),
+      DISPLAY_BLOCK_DESCENDANTS,
+    ) !== null
+  );
+}
+
+/**
  * The inline style that turns off every mark the chain turned off.
  *
  * A wrapper says "not bold" the way Google Docs does, with a style rather than
@@ -2658,8 +2694,9 @@ function visitBlocksInner(
    * Walks an inline wrapper's subtree in document order, without recursion:
    * each image is flushed past as a block of its own, and everything else is
    * buffered inside one shell carrying the formatting and link of the wrappers
-   * above it -- worked out a level at a time, as `distributeFormatting` does,
-   * so a deep chain costs its depth once rather than once per piece of text.
+   * above it -- worked out a level at a time, so a deep chain costs its depth
+   * once rather than once per piece of text, and with the nearest wrapper
+   * winning, as it does for text read where it stands.
    */
   const splitAroundImages = (wrapper: Element): void => {
     const empty: InlineFormatting = { link: null, marks: new Map(), soft: new Set() };
@@ -2686,7 +2723,7 @@ function visitBlocksInner(
       }
 
       if (node === wrapper || (node.nodeType === ELEMENT_NODE && containsImage(node as Element))) {
-        const inner = formattingWithin(format, node as Element);
+        const inner = nearestFormatting(format, node as Element);
         const children = node.childNodes;
 
         for (let index = children.length - 1; index >= 0; index -= 1) {
@@ -2696,15 +2733,35 @@ function visitBlocksInner(
         continue;
       }
 
+      // The piece is read detached, so what it inherited where it stood goes
+      // with it: its `white-space`, and whether it is the paste's edge.
+      let piece = cloneDeep(node);
+      const mode = whiteSpaceOf(node.parentElement);
+
+      if (mode !== 'normal') {
+        const holder = doc.createElement('span');
+
+        holder.setAttribute('style', `white-space: ${mode === 'pre' ? 'pre-wrap' : 'pre-line'}`);
+        holder.appendChild(piece);
+        piece = holder;
+      }
+
       const shell = formattingShell(doc, format);
-      const copy = cloneDeep(node);
 
       if (shell) {
-        shell.inner.appendChild(copy);
-        buffer.push(shell.outer);
-      } else {
-        buffer.push(copy);
+        shell.inner.appendChild(piece);
+        piece = shell.outer;
       }
+
+      if (pasteFirst.has(node)) {
+        pasteFirst.add(piece);
+      }
+
+      if (pasteLast.has(node)) {
+        pasteLast.add(piece);
+      }
+
+      buffer.push(piece);
     }
   };
 
@@ -2928,7 +2985,14 @@ function visitBlocksInner(
     // an icon -- stays on its line: its images become image blocks, and its
     // text keeps the wrapper's link and marks, which visiting its children
     // bare lost.
-    if (containsImage(element) && !DISPLAY_BLOCK_TAGS.has(tag) && !containsBlockLevel(element)) {
+    // Not one holding a display block either: that block's line breaks are
+    // read from it where it stands, and copying its text out lost them.
+    if (
+      containsImage(element) &&
+      !DISPLAY_BLOCK_TAGS.has(tag) &&
+      !containsBlockLevel(element) &&
+      !holdsDisplayBlock(element)
+    ) {
       splitAroundImages(element);
       continue;
     }

@@ -2093,6 +2093,16 @@ describe('audit 28', () => {
     ).toBeLessThan(LINEAR);
   });
 
+  // The last run holding text is remembered as the output grows, so a long
+  // stretch of space-only runs is not looked back over at every break.
+  test('many space-only runs between empty blocks read in linear time', () => {
+    expect(
+      growth((size) => {
+        blocksFromHtml(document, `<p>s</p><div>${'<i> </i><center></center>'.repeat(size)}x</div>`);
+      }, 1000),
+    ).toBeLessThan(LINEAR);
+  });
+
   test.each(['*a*', '&amp;'])('icon %j', (icon) => {
     const callout = b({ type: 'callout', icon, content: t('x') });
     const markdown = toMarkdown({ blocks: [callout] });
