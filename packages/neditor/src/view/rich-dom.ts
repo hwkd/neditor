@@ -349,7 +349,6 @@ function isBetweenBlocks(node: Node): boolean {
   return (isBlock(previous) || isBlock(next)) && edge(previous) && edge(next);
 }
 
-/** Appends a newline unless the output is empty or already ends with one. */
 /**
  * Breaks that only stand if text follows them: `parseRichText` drops one with
  * no text after it once the walk is done, rather than every skipped block
@@ -357,6 +356,7 @@ function isBetweenBlocks(node: Node): boolean {
  */
 const DEFERRED_BREAKS = new WeakSet<TextRun>();
 
+/** Appends a newline unless the output is empty or already ends with one. */
 function breakLine(
   out: TextRun[],
   marks: Mark[],
@@ -500,7 +500,9 @@ function walk(
     // text on either side of it: `<li>a<ul>…</ul>c</li>` read `ac`. Deferred,
     // because whether text follows is only known once the walk gets there.
     if (skip?.(element, tag) === true) {
-      if (BLOCK_TAGS.has(tag)) {
+      // A figure and a rule are blocks here though not in BLOCK_TAGS, which
+      // lists what breaks the line when read as text; an image is not.
+      if (BLOCK_TAGS.has(tag) || tag === 'FIGURE' || tag === 'HR') {
         breakLine(out, marks, link, true);
       }
 
@@ -555,23 +557,17 @@ export function parseRichText(root: Node, skip?: SkipPredicate): RichText {
   const out: TextRun[] = [];
   walk(root, [], undefined, root, out, skip);
 
-  // Only trailing deferred breaks can lack text after them, so the splices
-  // happen at the tail.
-  let textAfter = false;
+  // Only the deferred breaks after the last text can lack text after them.
+  // Dropped in one pass: a splice each was quadratic in how many there were.
+  let lastText = -1;
 
-  for (let index = out.length - 1; index >= 0; index -= 1) {
-    const run = out[index]!;
-
-    if (DEFERRED_BREAKS.has(run)) {
-      if (!textAfter) {
-        out.splice(index, 1);
-      }
-    } else if (run.text.trim().length > 0) {
-      textAfter = true;
+  for (let index = out.length - 1; index >= 0 && lastText === -1; index -= 1) {
+    if (!DEFERRED_BREAKS.has(out[index]!) && out[index]!.text.trim().length > 0) {
+      lastText = index;
     }
   }
 
-  return normalizeRuns(out);
+  return normalizeRuns(out.filter((run, index) => index <= lastText || !DEFERRED_BREAKS.has(run)));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1517,37 +1513,57 @@ function extractTodoPrefix(runs: RichText): { runs: RichText; checked: boolean }
   return { runs: richDelete(runs, 0, marker.length), checked };
 }
 
-/** A copy of `element` with nested lists removed, since those are their own blocks. */
 /**
- * First descendant matching `match`, not descending into anything `skip` hides.
+ * First descendant matching `match`, in document order, not descending into
+ * anything `skip` hides.
  *
  * The pruning is the point: `querySelectorAll` over the whole subtree once per
- * nesting level is the quadratic term this file exists to avoid.
+ * nesting level is the quadratic term this file exists to avoid. An explicit
+ * stack, because the depth is the pasted document's to choose.
  */
 function findWithin(
   root: Element,
   skip: SkipPredicate,
   match: (element: Element) => boolean,
 ): Element | null {
-  for (const child of root.children) {
-    const tag = tagNameOf(child);
+  const stack: Element[] = [...root.children].reverse();
 
-    if (SKIP_TAGS.has(tag) || skip(child, tag)) {
+  for (let element = stack.pop(); element; element = stack.pop()) {
+    const tag = tagNameOf(element);
+
+    if (SKIP_TAGS.has(tag) || skip(element, tag)) {
       continue;
     }
 
-    if (match(child)) {
-      return child;
+    if (match(element)) {
+      return element;
     }
 
-    const deeper = findWithin(child, skip, match);
-
-    if (deeper) {
-      return deeper;
+    for (let index = element.children.length - 1; index >= 0; index -= 1) {
+      stack.push(element.children[index]!);
     }
   }
 
   return null;
+}
+
+/** A deep copy made without recursion, for the same reason. */
+function cloneDeep(node: Node): Node {
+  const copy = node.cloneNode(false);
+  const stack: Array<readonly [Node, Node]> = [[node, copy]];
+
+  for (let pair = stack.pop(); pair; pair = stack.pop()) {
+    const [source, target] = pair;
+
+    for (const child of source.childNodes) {
+      const childCopy = child.cloneNode(false);
+
+      target.appendChild(childCopy);
+      stack.push([child, childCopy]);
+    }
+  }
+
+  return copy;
 }
 
 /**
@@ -1796,8 +1812,21 @@ const ITEM_BLOCK_TAGS = new Set([
 function isItemBlock(element: Element): boolean {
   const tag = tagNameOf(element);
 
+  if (ITEM_BLOCK_TAGS.has(tag)) {
+    return true;
+  }
+
+  if (!hasUsableImage(element)) {
+    return false;
+  }
+
+  // GitHub wraps every image in a link, and a loose list every line in a
+  // paragraph: one holding no text at all beside a usable image is the image.
+  // Holding text too, it is text.
   return (
-    ITEM_BLOCK_TAGS.has(tag) || ((tag === 'IMG' || tag === 'FIGURE') && hasUsableImage(element))
+    tag === 'IMG' ||
+    tag === 'FIGURE' ||
+    ((tag === 'P' || tag === 'A') && (element.textContent ?? '').trim() === '')
   );
 }
 
@@ -1944,8 +1973,20 @@ function visitList(list: Element, depth: number, out: Block[]): void {
     } else if (tag === 'UL' || tag === 'OL') {
       // A list directly inside a list -- what Google Docs and a browser's own
       // indent command write -- is the item before it continuing a level in.
-      // It was skipped, with everything under it.
-      visitList(child, depth + 1, out);
+      // It was skipped, with everything under it. It nests without passing
+      // through an item, so it takes the list bound here.
+      if (listNesting >= MAX_LIST_NESTING) {
+        pushRemainder(out, child, depth + 1);
+        continue;
+      }
+
+      listNesting += 1;
+
+      try {
+        visitList(child, depth + 1, out);
+      } finally {
+        listNesting -= 1;
+      }
     }
   }
 }
@@ -1999,10 +2040,16 @@ function visitBlocksInner(
       return;
     }
 
+    // Whitespace is buffered only between inline nodes, and what trails the
+    // last of them is the layout before whatever ended the run.
+    while (buffer.length > 0 && isSourceWhitespace(buffer[buffer.length - 1]!)) {
+      buffer.pop();
+    }
+
     const wrapper = doc.createElement('div');
 
     for (const inline of buffer) {
-      wrapper.append(inline.cloneNode(true));
+      wrapper.append(cloneDeep(inline));
     }
 
     buffer = [];
@@ -2019,7 +2066,13 @@ function visitBlocksInner(
     }
 
     if (child.nodeType === TEXT_NODE) {
-      if ((child.nodeValue ?? '').trim().length > 0) {
+      // A space between two inline elements is content (`<b>bold</b> <i>it</i>`
+      // read `boldit`); on its own, before a block, or carrying a line break
+      // (pretty-printing, as `isIndentation` reads it), it is layout.
+      if (
+        (child.nodeValue ?? '').trim().length > 0 ||
+        (buffer.length > 0 && !isIndentation(child))
+      ) {
         buffer.push(child);
       }
 

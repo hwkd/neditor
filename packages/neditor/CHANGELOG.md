@@ -177,11 +177,15 @@ that changes what you store or what other applications receive is listed first.
 - HTML clipboard, from other applications (also on earlier versions): an
   image, table, code block, quote, heading or rule inside a list item was
   dropped or flattened into the item's text, and a paragraph after a nested
-  list moved above it. They are now the item's children, in order; the item
+  list moved above it. An image counts on its own, inside a link (GitHub's
+  markup) or inside a paragraph (a loose list), as long as no text sits beside
+  it there. They are now the item's children, in order; the item
   itself, its to-do box and its number stay, and bare text after one of them
   stays the item's text, on a line of its own rather than joined to the word
   before it. A list nested directly inside a list (Google Docs, and a browser's
   own indent command) was dropped with everything under it; it is a level
   deeper. A table's `<caption>`, which was dropped, is a paragraph above the
   table, and a checkbox to-do (GitHub's task lists) no longer keeps the space
-  after the box.
+  after the box. A space between two inline elements outside a paragraph
+  (`<b>bold</b> <i>it</i>`, links side by side in a `<div>`) was dropped and
+  joined the words.

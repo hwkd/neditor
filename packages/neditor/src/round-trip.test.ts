@@ -2069,6 +2069,16 @@ describe('audit 28', () => {
     expect(least).toBeLessThan(40);
   });
 
+  // Breaks deferred past skipped blocks are dropped in one pass, not one
+  // splice each. Splicing is a fast copy, so it only shows at this size.
+  test('many skipped blocks with only whitespace after them read in linear time', () => {
+    expect(
+      growth((size) => {
+        blocksFromHtml(document, `<h1>a${'<ul></ul><b> </b>'.repeat(size)}</h1>`);
+      }, 12000),
+    ).toBeLessThan(LINEAR);
+  }, 60_000);
+
   test.each(['*a*', '&amp;'])('icon %j', (icon) => {
     const callout = b({ type: 'callout', icon, content: t('x') });
     const markdown = toMarkdown({ blocks: [callout] });

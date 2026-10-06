@@ -1872,11 +1872,119 @@ describe('audit 29: list items holding blocks', () => {
   // At the nesting bound the item's blocks are still not dropped.
   test('an item past the nesting bound keeps all its text', () => {
     const html = `${'<div>'.repeat(1023)}<ul><li>a<pre>x</pre>b<p>c</p></li></ul>${'</div>'.repeat(1023)}`;
-    const text = blocksFromHtml(document, html)
-      .map((block) => richToPlainText(block.content))
-      .join('|');
-    for (const part of ['a', 'x', 'b', 'c']) {
-      expect(text).toContain(part);
-    }
+    // Exactly once each: the bound reads the item's blocks as text, not the
+    // item again.
+    expect(shape(html)).toEqual([
+      { type: 'bulleted_list', depth: 0, text: 'a\nb' },
+      { type: 'paragraph', depth: 1, text: 'x' },
+      { type: 'paragraph', depth: 1, text: 'c' },
+    ]);
+  });
+});
+
+describe('audit 30', () => {
+  const shape = (html: string) =>
+    blocksFromHtml(document, html).map((block) => ({
+      type: block.type,
+      depth: block.depth,
+      text: richToPlainText(block.content),
+    }));
+
+  // A list directly inside a list counts against the list bound like any other.
+  test('lists nested directly in lists, 4,000 deep, read without overflowing', () => {
+    expect(() =>
+      blocksFromHtml(document, `${'<ul>'.repeat(4000)}<li>x</li>${'</ul>'.repeat(4000)}`),
+    ).not.toThrow();
+  });
+
+  // A figure or a rule between two pieces of an item's text breaks the line,
+  // as any other block does; an image inline in the text does not.
+  test.each([
+    [
+      '<ul><li>Before<figure><img src="https://a.test/i.png"><figcaption>cap</figcaption></figure>After</li></ul>',
+      'Before\nAfter',
+    ],
+    ['<ul><li>Before<hr>After</li></ul>', 'Before\nAfter'],
+    ['<ul><li>Click <img src="https://a.test/i.png"> to open</li></ul>', 'Click  to open'],
+  ])('%s reads its text as %j', (html, text) => {
+    expect(shape(html)[0]?.text).toBe(text);
+  });
+
+  // A space between two inline elements is content wherever it is read.
+  test.each([
+    ['<b>bold</b> <i>it</i>', 'bold it'],
+    ['<div><a href="https://a.test/1">one</a> <a href="https://a.test/2">two</a></div>', 'one two'],
+    // A paragraph holding an image is split around it, through the same path.
+    [
+      '<ul><li>x<pre>c</pre><p><a href="https://a.test/1">one</a> <a href="https://a.test/2">two</a> <img src="https://a.test/i.png"></p></li></ul>',
+      'one two',
+    ],
+  ])('%s keeps its space', (html, text) => {
+    expect(
+      shape(html)
+        .filter((block) => block.type === 'paragraph')
+        .at(-1)?.text,
+    ).toBe(text);
+  });
+
+  // But whitespace before a block is still layout.
+  test('whitespace between inline text and a block is not kept', () => {
+    expect(shape('<div><b>x</b> <p>y</p></div>').map((block) => block.text)).toEqual(['x', 'y']);
+  });
+
+  // GitHub wraps every image in a link, and a loose list wraps it in a
+  // paragraph: an element holding nothing but a usable image is the image.
+  test.each([
+    [
+      '<ol><li><p>Open settings</p><p><img src="https://a.test/s.png" alt="s"></p></li><li><p>Save</p></li></ol>',
+      [
+        { type: 'numbered_list', depth: 0, text: 'Open settings' },
+        { type: 'image', depth: 1, text: '' },
+        { type: 'numbered_list', depth: 0, text: 'Save' },
+      ],
+    ],
+    [
+      '<ul><li class="task-list-item"><input type="checkbox" disabled checked> <a href="https://a.test/i.png"><img src="https://a.test/i.png" alt=""></a> Ship</li></ul>',
+      [
+        { type: 'todo', depth: 0, text: 'Ship' },
+        { type: 'image', depth: 1, text: '' },
+      ],
+    ],
+  ])('%s keeps the image', (html, blocks) => {
+    expect(shape(html)).toEqual(blocks);
+  });
+
+  // A link holding text as well as an image is the item's text, as before.
+  test('a link holding text and an image stays text', () => {
+    expect(
+      shape(
+        '<ul><li>See <a href="https://a.test/"><img src="https://a.test/i.png">here</a></li></ul>',
+      ),
+    ).toEqual([{ type: 'bulleted_list', depth: 0, text: 'See here' }]);
+  });
+
+  test("a table's footer rows are rows", () => {
+    const [table] = blocksFromHtml(
+      document,
+      '<table><thead><tr><th>h</th></tr></thead><tbody><tr><td>b</td></tr></tbody><tfoot><tr><td>f</td></tr></tfoot></table>',
+    );
+    expect(table?.rows?.map((row) => row.map((cell) => richToPlainText(cell)))).toEqual([
+      ['h'],
+      ['b'],
+      ['f'],
+    ]);
+  });
+
+  // Only beside an item's blocks is whitespace-only text layout.
+  test('a foreign item holding only a space keeps it', () => {
+    expect(shape('<ul><li> </li></ul>')).toEqual([{ type: 'bulleted_list', depth: 0, text: ' ' }]);
+  });
+
+  // Deep inline chains are walked without recursion.
+  test.each([
+    ['a checkbox search', `<ul><li>a${'<span>'.repeat(5000)}x</li></ul>`],
+    ['a buffered inline run', `${'<b>'.repeat(5000)}x`],
+  ])('%s 5,000 deep reads without overflowing', (_name, html) => {
+    expect(() => blocksFromHtml(document, html)).not.toThrow();
   });
 });
