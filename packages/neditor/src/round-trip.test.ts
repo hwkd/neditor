@@ -1949,3 +1949,23 @@ describe('audit 26', () => {
     expect(blocksFromMarkdown(markdown).map((block) => block.depth)).toEqual(depths);
   });
 });
+
+describe('audit 27', () => {
+  // The opener's own run is walked back over whole, however long: a triple
+  // run opens on its last backtick, not on a run left open behind it.
+  test('an inline triple-backtick span is code', () => {
+    expect(blocksFromMarkdown('x ```a``` y')[0]?.content).toEqual([
+      { text: 'x ' },
+      { text: 'a', marks: ['code'] },
+      { text: ' y' },
+    ]);
+  });
+
+  // Every bullet, and a bare marker with nothing after it, is a list item.
+  test.each(['*', '+', '-\n', '1.\n'])('%j under a list item takes its child column', (marker) => {
+    const line = marker.endsWith('\n') ? `   ${marker.trimEnd()}` : `   ${marker} a`;
+    expect(blocksFromMarkdown(`1. Step\n${line}\n    - b`).map((block) => block.depth)).toEqual([
+      0, 1, 1,
+    ]);
+  });
+});

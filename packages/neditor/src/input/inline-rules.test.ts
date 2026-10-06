@@ -288,6 +288,8 @@ describe('an autolink inside a code span left open', () => {
     ['``a`` <https://a.test/>', true],
     ['`a` <https://a.test/>', true],
     ['`a <https://a.test/>', false],
+    // Nor a longer run a shorter one.
+    ['`a`` b` <https://a.test/>', true],
   ])('%j closes an autolink: %s', (text, closes) => {
     expect(matchInlineRule(text) !== null).toBe(closes);
   });

@@ -29,7 +29,10 @@ interface InlineRule {
   readonly isLink?: boolean;
   /** The `](<…>)` form, whose destination is delimited rather than run-length. */
   readonly angled?: boolean;
-  /** `<https://…>`, which nothing else may close inside while it is open. */
+  /**
+   * `<https://…>`. While one is open nothing closes inside it but a code span
+   * that opened before its `<`.
+   */
   readonly autolink?: boolean;
 }
 
@@ -127,22 +130,6 @@ function isSpace(code: number): boolean {
   );
 }
 
-/**
- * Whether the text ends inside a link destination whose `)` has not arrived.
- *
- * Only the last `](` can be the open one, so the pattern runs on the tail from
- * there -- run unanchored over the window, it retried from every `](` in it and
- * a pasted line of them took seconds. Neither spelling of a destination the
- * writer emits holds whitespace (it percent-encodes it in the `<…>` form too),
- * and stopping at it is what keeps an unclosed `](<` from swallowing the rest
- * of a line of prose.
- *
- * The cost is foreign Markdown: the angled link rule itself admits a space, so
- * in `[a](<https://a.test/my docs/__init__.py>)` the text after the space is
- * not protected and `__init__` is emboldened out of the URL. Telling that
- * destination from prose needs the `>)` that has not been typed yet; the
- * reader could look ahead and typing cannot, and the two are kept identical.
- */
 /** Whether a destination's parentheses balance, never closing more than opened. */
 function balancedParens(destination: string): boolean {
   let depth = 0;
@@ -196,8 +183,9 @@ function openCodeRun(text: string): number {
 /**
  * Whether the text ends inside an autolink whose `>` has not arrived.
  *
- * Its text is the URL as it stands, so no span closes in it: `<https://a/*x*>`
- * would otherwise lose its asterisks a character before the `>` arrived.
+ * Its text is the URL as it stands, so no span closes in it but a code span
+ * that opened before its `<`: `<https://a/*x*>` would otherwise lose its
+ * asterisks a character before the `>` arrived.
  */
 function inOpenAutolink(window: string): boolean {
   const at = window.lastIndexOf('<');
@@ -205,6 +193,22 @@ function inOpenAutolink(window: string): boolean {
   return at !== -1 && /^<https?:\/\/[^\s<>]*$/i.test(window.slice(at));
 }
 
+/**
+ * Whether the text ends inside a link destination whose `)` has not arrived.
+ *
+ * Only the last `](` can be the open one, so the pattern runs on the tail from
+ * there -- run unanchored over the window, it retried from every `](` in it and
+ * a pasted line of them took seconds. Neither spelling of a destination the
+ * writer emits holds whitespace (it percent-encodes it in the `<…>` form too),
+ * and stopping at it is what keeps an unclosed `](<` from swallowing the rest
+ * of a line of prose.
+ *
+ * The cost is foreign Markdown: the angled link rule itself admits a space, so
+ * in `[a](<https://a.test/my docs/__init__.py>)` the text after the space is
+ * not protected and `__init__` is emboldened out of the URL. Telling that
+ * destination from prose needs the `>)` that has not been typed yet; the
+ * reader could look ahead and typing cannot, and the two are kept identical.
+ */
 function inOpenDestination(window: string): boolean {
   const at = window.lastIndexOf('](');
 
@@ -254,12 +258,6 @@ export interface InlineRuleMatch {
   readonly link?: string;
 }
 
-/**
- * Tests the text before the caret for a completed inline span.
- *
- * `textBeforeCaret` is the block's plain-text projection up to the caret, so
- * offsets returned here are block offsets.
- */
 /**
  * Where the link that ends at the caret begins, or -1 if none does.
  *
@@ -370,6 +368,12 @@ function opensInBareUrl(window: string, opener: number): boolean {
   return BARE_URL_IN_TOKEN.test(window.slice(token, opener));
 }
 
+/**
+ * Tests the text before the caret for a completed inline span.
+ *
+ * `textBeforeCaret` is the block's plain-text projection up to the caret, so
+ * offsets returned here are block offsets.
+ */
 export function matchInlineRule(
   textBeforeCaret: string,
   options: {
