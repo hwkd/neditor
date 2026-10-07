@@ -3315,6 +3315,16 @@ describe('audit 46', () => {
     ).toEqual(['bulleted_list@0:Item', 'paragraph@1:Cap ', '[img c.png]@1:', 'table@1:']);
   });
 
+  // A list item asks the same question: a figure whose only image is in its
+  // caption is no image block of the item's, so the bullet keeps the text.
+  test('a figure with only a caption image is the item text', () => {
+    expect(
+      show(
+        '<ul><li><figure><figcaption>Cap <img src="https://x.test/flag.png"></figcaption></figure></li></ul>',
+      ),
+    ).toEqual(['bulleted_list@0:Cap ', '[img flag.png]@1:']);
+  });
+
   // Only the first caption is the figure's; a second one is content, so the
   // figure is read block by block rather than losing it.
   test('a second caption is not dropped', () => {

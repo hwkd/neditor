@@ -1201,7 +1201,11 @@ function containsBlockLevel(element: Element): boolean {
   );
 }
 
-/** The image a `<figure>` or a wrapper shows, in the order a query would find it. */
+/**
+ * The first `<img>` in document order, remembered per element. For the
+ * picture a `<figure>` shows, which may come after its caption, ask
+ * `pictureOf`.
+ */
 function firstImage(element: Element): Element | null {
   return firstDescendant(element, (candidate) => tagNameOf(candidate) === 'IMG', IMAGE_DESCENDANTS);
 }
@@ -1218,6 +1222,8 @@ function ownCaption(figure: Element): Element | undefined {
  * The image an element shows: itself, or for a `<figure>` the first image
  * outside its own caption -- an image in the caption, a flag icon, belongs to
  * the caption and is handed on after the figure -- or any other's first.
+ * A figure's answer is assembled from its children's, which `firstImage`
+ * remembers, so asking again costs its child count, not its subtree.
  */
 function pictureOf(element: Element): Element | null {
   const tag = tagNameOf(element);
@@ -2086,9 +2092,8 @@ function outermostLists(element: Element): Element[] {
 
 /** A `<figure>` carries the caption; a bare `<img>` is just the image. */
 function pushImage(out: Block[], element: Element, depth: number): boolean {
-  // The remembered answer, not a fresh query: a `<figure>` with nothing usable
-  // in it is asked this again for every wrapper the visitor descends through on
-  // its way down, and a query walks the whole subtree each time.
+  // An `<img>` is itself; a `<figure>` arrives here once, already accepted by
+  // `isImageFigure` or carrying our own marker.
   const image = pictureOf(element);
   const src = sanitizeImageUrl(image?.getAttribute('src') ?? '');
 
