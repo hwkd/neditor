@@ -1253,6 +1253,100 @@ function containsImage(element: Element): boolean {
   return firstImage(element) !== null;
 }
 
+/** What HTML counts as whitespace between attribute tokens. */
+const HTML_SPACE = new Set([' ', '\t', '\n', '\r', '\f']);
+
+/**
+ * The best usable candidate in a `srcset`, split as the HTML standard splits
+ * one: a URL runs to whitespace, so a `data:` URL keeps its comma, and only a
+ * comma ending the URL or its descriptors separates candidates. The largest
+ * width or density wins, as the sharpest copy of the picture.
+ */
+function srcsetSource(srcset: string): string | null {
+  let best: string | null = null;
+  let bestSize = -Infinity;
+  let index = 0;
+
+  while (index < srcset.length) {
+    while (index < srcset.length && (HTML_SPACE.has(srcset[index]!) || srcset[index] === ',')) {
+      index += 1;
+    }
+
+    const start = index;
+
+    while (index < srcset.length && !HTML_SPACE.has(srcset[index]!)) {
+      index += 1;
+    }
+
+    let end = index;
+    let descriptor = '';
+
+    if (srcset[end - 1] === ',') {
+      while (end > start && srcset[end - 1] === ',') {
+        end -= 1;
+      }
+    } else {
+      const from = index;
+
+      while (index < srcset.length && srcset[index] !== ',') {
+        index += 1;
+      }
+
+      descriptor = srcset.slice(from, index);
+    }
+
+    const url = end > start ? sanitizeImageUrl(srcset.slice(start, end)) : null;
+    // `640w` and `2x` both read as their number; no descriptor means `1x`.
+    const size = Number.parseFloat(descriptor.trim());
+    const weight = Number.isNaN(size) ? 1 : size;
+
+    if (url !== null && weight > bestSize) {
+      best = url;
+      bestSize = weight;
+    }
+  }
+
+  return best;
+}
+
+/**
+ * The source an `<img>` shows. Its `src` first; without a usable one -- Medium
+ * writes none -- the candidates the browser chose from instead: the image's
+ * own `srcset`, then its `<picture>`'s `<source>`s, untyped ones first, since
+ * they are the fallback every browser can show. Each passes the same gate.
+ */
+function imageSource(image: Element): string | null {
+  const src = sanitizeImageUrl(image.getAttribute('src') ?? '');
+
+  if (src !== null) {
+    return src;
+  }
+
+  const own = srcsetSource(image.getAttribute('srcset') ?? '');
+  const picture = image.parentNode;
+
+  if (own !== null || picture === null || tagNameOf(picture) !== 'PICTURE') {
+    return own;
+  }
+
+  const sources = [...picture.childNodes].filter(
+    (node): node is Element => tagNameOf(node) === 'SOURCE',
+  );
+
+  for (const source of [
+    ...sources.filter((candidate) => !candidate.hasAttribute('type')),
+    ...sources.filter((candidate) => candidate.hasAttribute('type')),
+  ]) {
+    const found = srcsetSource(source.getAttribute('srcset') ?? '');
+
+    if (found !== null) {
+      return found;
+    }
+  }
+
+  return null;
+}
+
 /**
  * Whether the image here is one `pushImage` will actually take.
  *
@@ -1264,7 +1358,7 @@ function containsImage(element: Element): boolean {
 function hasUsableImage(element: Element): boolean {
   const image = pictureOf(element);
 
-  return sanitizeImageUrl(image?.getAttribute('src') ?? '') !== null;
+  return image !== null && imageSource(image) !== null;
 }
 
 /**
@@ -2095,7 +2189,7 @@ function pushImage(out: Block[], element: Element, depth: number): boolean {
   // An `<img>` is itself; a `<figure>` arrives here once, already accepted by
   // `isImageFigure` or carrying our own marker.
   const image = pictureOf(element);
-  const src = sanitizeImageUrl(image?.getAttribute('src') ?? '');
+  const src = image === null ? null : imageSource(image);
 
   // Our own empty image block (see blocksToHtml) -- only ours: a foreign
   // `<img>` with no usable source is still skipped, not made a placeholder.

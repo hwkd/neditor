@@ -2116,6 +2116,18 @@ describe('audit 28', () => {
     ).toBeLessThan(LINEAR);
   });
 
+  // A srcset is read in one pass, however many candidates or separators.
+  test('a long srcset reads in linear time', () => {
+    expect(
+      growth((size) => {
+        blocksFromHtml(
+          document,
+          `<img srcset="${'https://x.test/i.png 1x, '.repeat(size)}${', '.repeat(size)}${'a,'.repeat(size)}">`,
+        );
+      }, 500),
+    ).toBeLessThan(LINEAR);
+  });
+
   test.each(['*a*', '&amp;'])('icon %j', (icon) => {
     const callout = b({ type: 'callout', icon, content: t('x') });
     const markdown = toMarkdown({ blocks: [callout] });

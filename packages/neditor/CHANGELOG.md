@@ -238,6 +238,10 @@ that changes what you store or what other applications receive is listed first.
   caption written before the picture no longer lends the figure its own
   image, which lost the picture and doubled the caption's; a second
   `<figcaption>` is content rather than dropped (on `main` too).
+  An `<img>` with no usable `src` is read from its own `srcset` or its
+  `<picture>`'s `<source>`s, largest candidate first, so a Medium article's
+  pictures -- every one written without a `src` -- are no longer dropped on
+  paste (on `main` too).
 - HTML clipboard (also on earlier versions): a table nested in a table cell
   is read as that cell's text instead of being dropped with it, so an HTML
   email laid out in nested tables keeps its content; a list inside a wrapper

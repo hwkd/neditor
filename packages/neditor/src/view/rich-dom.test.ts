@@ -3338,3 +3338,59 @@ describe('audit 46', () => {
     expect(out).toContain('[img b.png]@0:');
   });
 });
+
+describe('audit 48', () => {
+  const images = (html: string) =>
+    blocksFromHtml(document, html)
+      .filter((block) => block.type === 'image')
+      .map((block) => `${block.src} "${block.alt}"`);
+
+  // Medium writes every article image as a <picture> whose <img> has no src:
+  // the browser shows a <source> candidate. Copied whole (Chromium; Firefox
+  // writes the same tree), the picture was dropped with no trace.
+  const medium =
+    '<figure class="ni nj nk nl nm nn nf ng paragraph-image"><div role="button" tabindex="0" class="no np fj nq bh nr"><div class="nf ng nt"><picture><source srcset="https://miro.medium.com/v2/resize:fit:640/format:webp/1*6EB1Xue1wM_QP0IIzXphQA.png 640w, https://miro.medium.com/v2/resize:fit:720/format:webp/1*6EB1Xue1wM_QP0IIzXphQA.png 720w, https://miro.medium.com/v2/resize:fit:750/format:webp/1*6EB1Xue1wM_QP0IIzXphQA.png 750w, https://miro.medium.com/v2/resize:fit:786/format:webp/1*6EB1Xue1wM_QP0IIzXphQA.png 786w, https://miro.medium.com/v2/resize:fit:828/format:webp/1*6EB1Xue1wM_QP0IIzXphQA.png 828w, https://miro.medium.com/v2/resize:fit:1100/format:webp/1*6EB1Xue1wM_QP0IIzXphQA.png 1100w, https://miro.medium.com/v2/resize:fit:1400/format:webp/1*6EB1Xue1wM_QP0IIzXphQA.png 1400w" sizes="(min-resolution: 4dppx) and (max-width: 700px) 50vw, (-webkit-min-device-pixel-ratio: 4) and (max-width: 700px) 50vw, (min-resolution: 3dppx) and (max-width: 700px) 67vw, (-webkit-min-device-pixel-ratio: 3) and (max-width: 700px) 65vw, (min-resolution: 2.5dppx) and (max-width: 700px) 80vw, (-webkit-min-device-pixel-ratio: 2.5) and (max-width: 700px) 80vw, (min-resolution: 2dppx) and (max-width: 700px) 100vw, (-webkit-min-device-pixel-ratio: 2) and (max-width: 700px) 100vw, 700px" type="image/webp"><source data-testid="og" srcset="https://miro.medium.com/v2/resize:fit:640/1*6EB1Xue1wM_QP0IIzXphQA.png 640w, https://miro.medium.com/v2/resize:fit:720/1*6EB1Xue1wM_QP0IIzXphQA.png 720w, https://miro.medium.com/v2/resize:fit:750/1*6EB1Xue1wM_QP0IIzXphQA.png 750w, https://miro.medium.com/v2/resize:fit:786/1*6EB1Xue1wM_QP0IIzXphQA.png 786w, https://miro.medium.com/v2/resize:fit:828/1*6EB1Xue1wM_QP0IIzXphQA.png 828w, https://miro.medium.com/v2/resize:fit:1100/1*6EB1Xue1wM_QP0IIzXphQA.png 1100w, https://miro.medium.com/v2/resize:fit:1400/1*6EB1Xue1wM_QP0IIzXphQA.png 1400w" sizes="(min-resolution: 4dppx) and (max-width: 700px) 50vw, (-webkit-min-device-pixel-ratio: 4) and (max-width: 700px) 50vw, (min-resolution: 3dppx) and (max-width: 700px) 67vw, (-webkit-min-device-pixel-ratio: 3) and (max-width: 700px) 65vw, (min-resolution: 2.5dppx) and (max-width: 700px) 80vw, (-webkit-min-device-pixel-ratio: 2.5) and (max-width: 700px) 80vw, (min-resolution: 2dppx) and (max-width: 700px) 100vw, (-webkit-min-device-pixel-ratio: 2) and (max-width: 700px) 100vw, 700px"><img alt="" class="bh lo ns c" width="700" height="435" loading="lazy" role="presentation"></picture></div></div></figure>';
+
+  test('a Medium picture with no src is read from its sources', () => {
+    const blocks = blocksFromHtml(document, `<p>a</p>${medium}<p>b</p>`);
+
+    expect(blocks.map((block) => block.type)).toEqual(['paragraph', 'image', 'paragraph']);
+    // The untyped source is the fallback every browser can show; its largest
+    // candidate is the best copy of the picture.
+    expect(blocks[1]?.src).toBe(
+      'https://miro.medium.com/v2/resize:fit:1400/1*6EB1Xue1wM_QP0IIzXphQA.png',
+    );
+  });
+
+  test("an image's own srcset stands in for a missing src", () => {
+    expect(
+      images('<p>a <img srcset="https://x.test/b.png 1x, https://x.test/b2.png 2x" alt="x"> b</p>'),
+    ).toEqual(['https://x.test/b2.png "x"']);
+    expect(images('<img srcset="https://x.test/c.png">')).toEqual(['https://x.test/c.png ""']);
+  });
+
+  test('a src the reader can use still wins', () => {
+    expect(images('<img src="https://x.test/a.png" srcset="https://x.test/b.png 2x">')).toEqual([
+      'https://x.test/a.png ""',
+    ]);
+  });
+
+  // Every candidate passes the same gate a src does.
+  test('unsafe candidates are passed over, and none leaves no image', () => {
+    expect(images('<img srcset="javascript:alert(1) 4x, https://x.test/ok.png 1x">')).toEqual([
+      'https://x.test/ok.png ""',
+    ]);
+    expect(images('<p>a <img srcset="javascript:alert(1) 2x, cid:x 1x"> b</p>')).toEqual([]);
+  });
+
+  // A data: URL holds a comma; only a comma after whitespace, or at the
+  // URL's end, separates candidates.
+  test('a data URL in a srcset keeps its comma', () => {
+    expect(
+      images('<img srcset="data:image/png;base64,iVBORw0KGgo= 1x,https://x.test/d.png 0.5x">'),
+    ).toEqual(['data:image/png;base64,iVBORw0KGgo= ""']);
+    expect(images('<img srcset="https://x.test/e.png,, https://x.test/f.png 0.5x">')).toEqual([
+      'https://x.test/e.png ""',
+    ]);
+  });
+});
