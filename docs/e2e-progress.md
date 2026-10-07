@@ -964,3 +964,12 @@ a real capture.
 | AZ5 | Lines lost (1972e1f), low | In code, a block tag declared inline was no stop -- including the code block's own `<pre>`, so a `<pre>` declared inline-block became the box and its block line spans joined (`a = 1b = 2`). | The `<pre>` is a stop whatever it declares: it is the root the lines are read from. A `<code>` declared inline-block is unchanged, as on `main`. |
 | AZ6 | Blank line (1972e1f), low | Taking a tentative gap back with a splice moved the runs after it, under the indices `lastSolidRun` had remembered, so a later break read the wrong run.                                      | The memo's indices past the gap move down with the runs; the gap itself was never solid.                                                         |
 | AZ7 | Test gap (1972e1f), low   | Resetting the gap's index when no gap was pushed was unpinned: without it, a cell holding only a `<br>` or a zero-width space after `a ` lost it.                                             | Both asserted, with the memo's two halves.                                                                                                       |
+
+## Audit 55 (2026-10-07)
+
+An independent review of e9f6bf9 reported no findings. It mutated the latest commit (every non-equivalent mutant caught), checked that
+the gap splice moves no other cached index (every other memo is keyed by run or node), fuzzed `lastSolidRun` against an unmemoised
+copy over 16,000 targeted cases, and re-read 378 stored and real captures identically to 1972e1f. New captures from Google Sheets,
+six Google Docs, Monaco, Safari (WebKit) and Firefox, and app-shaped HTML from Cocoa's HTML writer, Excel, LibreOffice, Outlook web,
+Gmail, Thunderbird, OneNote and Evernote, lost nothing and joined no words the source HTML had apart. The fuzz battery was clean on
+two new seed sets.
