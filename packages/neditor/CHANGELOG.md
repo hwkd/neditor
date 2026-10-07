@@ -255,8 +255,10 @@ that changes what you store or what other applications receive is listed first.
   across items, as GitLab's file-name truncation does, reads split) -- and
   a span declared a block is one, except inside an inline-block or
   inline-table, where it stays in the line (MathJax 2 draws every glyph as
-  one, KaTeX every superscript) and only two stacked one on the other are
-  words apart (a fraction's parts); a link or other formatting around a
+  one, KaTeX every superscript) and only two stacked one on the other,
+  each drawing text, are words apart (a fraction's parts); two table cells
+  side by side are too (MediaWiki's contents: `10 Algebraic Proof`, joined
+  on `main`); a link or other formatting around a
   container reaches each item. Inside a code block a `<div>` per line and a
   `<br>` now start lines too (a trailing `<br>` is the line's filler), an
   element declared inline stays in its line (Stripe's linked parameters), a

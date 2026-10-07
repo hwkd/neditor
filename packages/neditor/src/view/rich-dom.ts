@@ -525,7 +525,7 @@ function codeText(root: Element): string {
   // Inside code, a block that declares itself inline is drawn in its line:
   // Stripe wraps each linked API parameter in a `display: inline` <div>.
   const isCodeLine = (element: Element): boolean =>
-    startsLine(element) && (isItem(element) || displayOf(element).outer !== 'inline');
+    startsLine(element, true) && (isItem(element) || displayOf(element).outer !== 'inline');
   const lineOf = new Map<Node, Node | null>();
   const findLine = (node: Node): Node | null => {
     const chain: Node[] = [];
@@ -625,8 +625,8 @@ function walk(
   out: TextRun[],
   skip?: SkipPredicate,
 ): void {
-  // Where the last block stacked in an inline box among these ended.
-  let stackedEnd = -1;
+  // Where the last of these drawn apart from its neighbour ended.
+  let apartEnd = -1;
 
   for (const child of [...node.childNodes]) {
     if (child.nodeType === TEXT_NODE) {
@@ -641,6 +641,10 @@ function walk(
 
       if (text.length > 0) {
         out.push({ text, marks: [...marks], link });
+
+        if (/[^ \t\n\r\f\u200b]/.test(text)) {
+          solidTexts += 1;
+        }
       }
 
       continue;
@@ -711,13 +715,22 @@ function walk(
     // stacked one on the other with nothing written between, a fraction's
     // parts or a badge's two lines, are drawn apart: a word gap between them,
     // never a line break. Wikipedia writes a hidden `/` between its
-    // fraction's parts, and that already keeps them apart.
-    const stacked = !isBlock && isStackedInBox(element);
+    // fraction's parts, and that already keeps them apart. Two table cells
+    // side by side are apart the same way: MediaWiki's contents set number
+    // and title as cells, and Chromium drops the space between. Only text
+    // counts: an empty one -- KaTeX's rule line or radical -- draws nothing,
+    // so it takes no gap and passes on the one before it.
+    const apart = !isBlock && (isStackedInBox(element) || displayOf(element).cell);
+    const armed = apart && apartEnd === out.length;
+    const solidBefore = solidTexts;
+    let gapAt = -1;
 
     if (isBlock) {
       breakLine(out, marks, link, true);
-    } else if (stacked && stackedEnd === out.length) {
+    } else if (armed) {
+      gapAt = out.length;
       wordGap(out, marks, link);
+      gapAt = out.length > gapAt ? gapAt : -1;
     }
 
     const { add, remove } = marksForElement(element);
@@ -737,6 +750,7 @@ function walk(
 
       if (remainder.length > 0) {
         out.push({ text: remainder, marks: [...nextMarks], link: nextLink });
+        solidTexts += 1;
       }
     } else {
       inlineNesting += 1;
@@ -753,11 +767,23 @@ function walk(
     // text.
     if (isBlock) {
       breakLine(out, marks, link, true);
-    } else if (stacked) {
-      stackedEnd = out.length;
+    } else if (apart && solidTexts > solidBefore) {
+      apartEnd = out.length;
+    } else if (apart) {
+      // Nothing drawn: the gap goes, and an armed neighbour stays armed.
+      if (gapAt !== -1) {
+        out.splice(gapAt, 1);
+      }
+
+      if (armed) {
+        apartEnd = out.length;
+      }
     }
   }
 }
+
+/** How many runs holding more than whitespace the walk has written. */
+let solidTexts = 0;
 
 /**
  * A space between two words, where one is not already there: dropped once the
@@ -2970,10 +2996,12 @@ interface Display {
   box: boolean;
   /** Whether it lays its children out as flex or grid items. */
   items: boolean;
+  /** Whether it is a table cell, drawn beside its neighbours. */
+  cell: boolean;
 }
 
 const DISPLAYS = new WeakMap<Node, Display>();
-const NO_DISPLAY: Display = { outer: null, box: false, items: false };
+const NO_DISPLAY: Display = { outer: null, box: false, items: false, cell: false };
 const BLOCK_DISPLAYS = new Set(['block', 'list-item', 'flow-root', 'table', 'flex', 'grid']);
 const INLINE_DISPLAYS = new Set([
   'inline',
@@ -3017,6 +3045,7 @@ function displayOf(node: Node | null): Display {
         inline &&
         keywords.some((keyword) => /^(?:inline-)?(?:block|table|flow-root)$/.test(keyword)),
       items: keywords.some((keyword) => /^(?:inline-)?(?:flex|grid)$/.test(keyword)),
+      cell: keywords.includes('table-cell'),
     };
     DISPLAYS.set(node, known);
   }
@@ -3042,24 +3071,27 @@ function isItem(element: Element): boolean {
  * here: copied pages write it on blocks whose separators were generated
  * content (Wikipedia's `v t e`), and honouring it joined their words.
  */
-function startsLine(element: Element): boolean {
+function startsLine(element: Element, code = false): boolean {
   const tag = tagNameOf(element);
 
   return (
     breaksLine(tag) ||
     isItem(element) ||
-    (tag !== 'BR' && displayOf(element).outer === 'block' && !inInlineBox(element))
+    (tag !== 'BR' && displayOf(element).outer === 'block' && !inInlineBox(element, code))
   );
 }
 
 /** A block by its declared display that `inInlineBox` keeps in its line. */
 function isStackedInBox(element: Element): boolean {
   return (
-    tagNameOf(element) !== 'BR' && displayOf(element).outer === 'block' && inInlineBox(element)
+    tagNameOf(element) !== 'BR' &&
+    displayOf(element).outer === 'block' &&
+    inInlineBox(element, false)
   );
 }
 
 const IN_INLINE_BOX = new WeakMap<Node, boolean>();
+const IN_INLINE_BOX_IN_CODE = new WeakMap<Node, boolean>();
 
 /**
  * Whether an element is inside an inline-block, inline-table or inline
@@ -3069,9 +3101,11 @@ const IN_INLINE_BOX = new WeakMap<Node, boolean>();
  * an inline-table inside an inline-block, and MathJax 2 every glyph as one
  * inside an inline-block; reading those as lines broke every sentence
  * holding a formula. Each ancestor's answer for its children is remembered,
- * so a deep tree is climbed once.
+ * so a deep tree is climbed once -- separately for code, where a block tag
+ * declared inline is drawn in its line (`codeText`), so can be the box.
  */
-function inInlineBox(element: Element): boolean {
+function inInlineBox(element: Element, code: boolean): boolean {
+  const memo = code ? IN_INLINE_BOX_IN_CODE : IN_INLINE_BOX;
   const chain: Node[] = [];
   let found: boolean | undefined;
   let at: Node | null = element.parentNode;
@@ -3079,11 +3113,14 @@ function inInlineBox(element: Element): boolean {
   while (found === undefined) {
     if (at === null || at.nodeType !== ELEMENT_NODE) {
       found = false;
-    } else if (IN_INLINE_BOX.has(at)) {
-      found = IN_INLINE_BOX.get(at);
-    } else if (breaksLine(tagNameOf(at)) || isItem(at as Element)) {
-      // A block tag is a block here whatever it declares, as everywhere
-      // outside code: what it holds is read by lines.
+    } else if (memo.has(at)) {
+      found = memo.get(at);
+    } else if (
+      (breaksLine(tagNameOf(at)) && !(code && displayOf(at).outer === 'inline')) ||
+      isItem(at as Element)
+    ) {
+      // Outside code a block tag is a block here whatever it declares: what
+      // it holds is read by lines.
       found = false;
     } else if (displayOf(at).box) {
       found = true;
@@ -3094,7 +3131,7 @@ function inInlineBox(element: Element): boolean {
   }
 
   for (const node of chain) {
-    IN_INLINE_BOX.set(node, found === true);
+    memo.set(node, found === true);
   }
 
   return found === true;

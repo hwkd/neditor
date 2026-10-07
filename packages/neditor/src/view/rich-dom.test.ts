@@ -3833,3 +3833,86 @@ describe('audit 51', () => {
     ).toEqual(['paragraph:a\nb']);
   });
 });
+
+describe('audit 53', () => {
+  const read = (html: string) =>
+    blocksFromHtml(document, html).map(
+      (block) => `${block.type}:${richToPlainText(block.content)}`,
+    );
+
+  // KaTeX's fraction, as Chromium copies it (styles cut to `display`, the
+  // hidden MathML left out): two parts stacked apart, an empty rule between.
+  test('a KaTeX fraction: its parts apart, its empty rule no gap', () => {
+    expect(
+      read(
+        '<p>Half is <span class="m"><span class="katex"><span class="katex-html"><span class="base" style="display: inline-block"><span class="strut" style="display: inline-block"></span><span class="mord"><span class="mopen" style="display: inline-block"></span><span class="mfrac"><span class="vlist-t" style="display: inline-table"><span class="vlist-r" style="display: table-row"><span class="vlist" style="display: table-cell"><span style="display: block"><span class="pstrut" style="display: inline-block"></span><span class="sizing" style="display: inline-block"><span class="mord"><span class="mord">2</span></span></span></span><span style="display: block"><span class="pstrut" style="display: inline-block"></span><span class="frac-line" style="display: inline-block"></span></span><span style="display: block"><span class="pstrut" style="display: inline-block"></span><span class="sizing" style="display: inline-block"><span class="mord"><span class="mord">1</span></span></span></span></span><span class="vlist-s" style="display: table-cell">\u200b</span></span><span class="vlist-r" style="display: table-row"><span class="vlist" style="display: table-cell"><span style="display: block"></span></span></span></span></span><span class="mclose" style="display: inline-block"></span></span></span></span></span></span> of it.</p>',
+      ),
+    ).toEqual(['paragraph:Half is 2 1​ of it.']);
+  });
+
+  // An empty block -- KaTeX's rule line, strike or radical -- draws no text,
+  // so it neither takes a gap nor makes one.
+  test('an empty stacked block makes no word gap', () => {
+    expect(
+      read(
+        '<p>abcde<span style="display:inline-block"><span style="display:block"></span><span style="display:block"></span></span>fg</p>',
+      ),
+    ).toEqual(['paragraph:abcdefg']);
+    // \underline{AB}: the rule first, then the text.
+    expect(
+      read(
+        '<p>x<span style="display:inline-block"><span style="display:block"></span><span style="display:block">AB</span></span>y</p>',
+      ),
+    ).toEqual(['paragraph:xABy']);
+    // \sqrt{2}x: the text first, then the radical's rule.
+    expect(
+      read(
+        '<p><span style="display:inline-block"><span style="display:block">2</span><span style="display:block"></span></span>x</p>',
+      ),
+    ).toEqual(['paragraph:2x']);
+    // One that draws only a zero-width space is as empty: the parts either
+    // side of it are still apart.
+    expect(
+      read(
+        '<p><span style="display:inline-block"><span style="display:block">a</span><span style="display:block">\u200b</span><span style="display:block">b</span></span></p>',
+      ),
+    ).toEqual(['paragraph:a\u200b b']);
+    // An empty one between two stacked parts keeps them apart.
+    expect(
+      read(
+        '<p><span style="display:inline-block"><span style="display:block">a</span><span style="display:block"></span><span style="display:block">b</span></span></p>',
+      ),
+    ).toEqual(['paragraph:a b']);
+  });
+
+  // In code a block tag's declared inline display is honoured (Stripe), so a
+  // <div> declared inline-block is a box there.
+  test('in code, a div declared inline-block is a box', () => {
+    expect(
+      read(
+        '<pre><code>call(<div style="display:inline-block"><span style="display:block">arg</span></div>, x)</code></pre>',
+      ),
+    ).toEqual(['code:call(arg, x)']);
+  });
+
+  // MediaWiki's table of contents: number and title are table cells, and
+  // Chromium drops the space between them.
+  test('adjacent table cells holding text are words apart (Wikipedia contents)', () => {
+    expect(
+      read(
+        '<ul><li><a href="#x"><span class="tocnumber" style="display: table-cell">10</span><span class="toctext" style="display: table-cell">Algebraic Proof</span></a></li></ul>',
+      ),
+    ).toEqual(['bulleted_list:10 Algebraic Proof']);
+    // Firefox keeps the space; it is not doubled.
+    expect(
+      read(
+        '<ul><li><a href="#x"><span class="tocnumber">10</span> <span class="toctext">Algebraic Proof</span></a></li></ul>',
+      ),
+    ).toEqual(['bulleted_list:10 Algebraic Proof']);
+    expect(
+      read(
+        '<p><span style="display: table-cell">a</span><span style="display: table-cell">\u200b</span>b</p>',
+      ),
+    ).toEqual(['paragraph:a\u200bb']);
+  });
+});
