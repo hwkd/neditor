@@ -2988,6 +2988,8 @@ describe('audit 41', () => {
       'line1\nline2',
     ],
     [`<p>s</p><span style="white-space:pre">a   b${I}</span><p>e</p>`, 'a   b'],
+    // pre-line keeps its line breaks and collapses its spaces.
+    [`<p>s</p><span style="white-space:pre-line">a   b\nc${I}</span><p>e</p>`, 'a b\nc'],
   ])('%s keeps %j', (html, kept) => {
     expect(text(html).join('|')).toContain(kept);
   });
@@ -3031,6 +3033,14 @@ describe('audit 41', () => {
     const run = blocks.flatMap((block) => block.content).find((one) => one.text.includes('more'));
     expect(run?.marks).toEqual(['bold']);
     expect(run?.link).toBe('https://h.test/');
+  });
+
+  // An image one level further in -- an emoji's span inside a link -- is
+  // reached and split out too.
+  test('an image nested in a wrapper inside the wrapper is kept', () => {
+    expect(
+      text(`<p>s</p><a href="https://h.test/">see <span>the ${I}</span> docs</a><p>e</p>`),
+    ).toEqual(['s', 'see the', '[img]', 'docs', 'e']);
   });
 
   test('an image in something never read is not split out', () => {

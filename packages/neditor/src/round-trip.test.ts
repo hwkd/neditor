@@ -2103,6 +2103,19 @@ describe('audit 28', () => {
     ).toBeLessThan(LINEAR);
   });
 
+  // Whether a wrapper holds a display block is remembered per element, so a
+  // deep chain is asked once, not once per level.
+  test('a deep chain holding an image and a display block reads in linear time', () => {
+    expect(
+      growth((size) => {
+        blocksFromHtml(
+          document,
+          `${'<b><i>t'.repeat(size)}<img src="https://x.test/i.png">${'<span>w</span>'.repeat(10 * size)}<center>c</center>${'</i></b>'.repeat(size)}`,
+        );
+      }, 25),
+    ).toBeLessThan(LINEAR);
+  });
+
   test.each(['*a*', '&amp;'])('icon %j', (icon) => {
     const callout = b({ type: 'callout', icon, content: t('x') });
     const markdown = toMarkdown({ blocks: [callout] });

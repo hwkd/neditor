@@ -222,7 +222,9 @@ that changes what you store or what other applications receive is listed first.
   `<center>` (HTML email centres its lines with it), `<address>`, `<aside>`,
   `<form>` -- no longer runs into the text beside it. Text in a link or a
   bold, italic or similar wrapper that also holds an image (an icon in a
-  link) keeps its link and formatting; it was read bare (on `main` too).
+  link) keeps its link and formatting; it was read bare (on `main` too). One
+  that also holds a block such as `<center>` is still read bare, as on `main`,
+  so that block keeps its lines.
 - HTML clipboard (also on earlier versions): a table nested in a table cell
   is read as that cell's text instead of being dropped with it, so an HTML
   email laid out in nested tables keeps its content; a list inside a wrapper

@@ -791,3 +791,18 @@ scored 931 against 9437621's 903. Four findings in the new path that splits an i
 | AN3 | Regression (9620bf8) | The copies were not the paste's edge, so Firefox's selected edge space inside such a wrapper was dropped.                                                                           | A piece whose original is an edge is one too.                                                                                                                                                                          |
 | AN4 | Regression (9620bf8) | The formatting was worked out outermost-first, as for formatting pushed into blocks, so an inner `font-weight:normal` around the image's text was ignored.                          | Nearest wins on this path, as for text read where it stands, links included.                                                                                                                                           |
 | AN5 | Test gaps (9620bf8)  | Nested formatting, the `SKIP_TAGS` check, the `collapsing` condition and the memo in `lastSolidRun` each passed every test removed.                                                 | Each asserted; the memo by a growth test.                                                                                                                                                                              |
+
+## Audit 42 (2026-10-07)
+
+An independent review of 45ac276 found no behaviour defect: no regression against 9620bf8, 9437621 or `main`; per-word bold,
+italic and link against Chromium's computed styles over 7,500 cases with 0 mismatches (9620bf8: about 470; `main`: about 1,050);
+whitespace against Chromium never worse than the earlier commits; no word joins of its own over 8,000 Chromium-parsed trees; the
+round trips clean. Three test gaps and two docs.
+
+| #   | Kind               | What                                                                                                                                                         | Resolution                                                                         |
+| --- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| AO1 | Test gap (9620bf8) | The split's descent into a nested element holding an image passed every test removed -- and removing it drops an emoji's `<span><img></span>` inside a link. | The block list for that shape is asserted, image included.                         |
+| AO2 | Test gap (45ac276) | The `pre-line` half of the white-space holder was untested.                                                                                                  | Asserted.                                                                          |
+| AO3 | Test gap (45ac276) | `holdsDisplayBlock`'s memo was untested; without it a deep chain is quadratic.                                                                               | A growth test.                                                                     |
+| AO4 | Docs (45ac276)     | `InlineFormatting`'s field comments said outermost wins, which `nearestFormatting` does not.                                                                 | Say which builder means which.                                                     |
+| AO5 | Docs (45ac276)     | The CHANGELOG said text beside an image in a wrapper keeps its formatting, which AN1 narrowed.                                                               | Says a wrapper also holding a block such as `<center>` is read bare, as on `main`. |

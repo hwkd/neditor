@@ -1297,9 +1297,13 @@ function sealsFormatting(element: Element, tag: string): boolean {
 
 /** What a chain of inline wrappers leaves on the content inside it. */
 interface InlineFormatting {
-  /** Each mark the chain mentioned, on or off as its outermost mention left it. */
+  /**
+   * Each mark the chain mentioned, on or off -- as its outermost mention left
+   * it when built by `formattingWithin`, for formatting pushed into blocks, or
+   * its nearest when built by `nearestFormatting`, for text read in place.
+   */
   marks: Map<Mark, boolean>;
-  /** The outermost anchor's href, or null where the chain holds no anchor. */
+  /** The chain's anchor's href, outermost or nearest by the same rule; null if none. */
   link: string | null;
   /** Marks a container only implied, which a tag inside it may still overrule. */
   readonly soft: ReadonlySet<Mark>;
