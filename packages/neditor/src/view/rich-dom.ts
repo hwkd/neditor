@@ -1089,8 +1089,9 @@ const STRUCTURE_TAGS = new Set([
  * from the original, never sees it at all.
  *
  * The elements the visitor descends *through* — `<div>`, `<section>`, a
- * `<figure>` with no usable image — are deliberately absent: their children are
- * read one block at a time, and a wrapper among them is this pass's to take.
+ * `<figure>` that is not one image (`isImageFigure`) — are deliberately
+ * absent: their children are read one block at a time, and a wrapper among
+ * them is this pass's to take.
  */
 const SEALED_TAGS = new Set([
   ...Object.keys(HEADING_TYPES),
@@ -1250,19 +1251,19 @@ function isInlineWrapper(element: Element): boolean {
  */
 const DISTRIBUTED = new WeakSet<Element>();
 
-/**
- * Whether descending into this element takes the walk out of the chain's reach.
- *
- * A `<figure>` around an image becomes the image, and only its caption is read
- * — from the caption element, so nothing above that is part of the parse. With
- * no image to show, the same figure is descended into block by block instead,
- * and a wrapper inside it is reached and pushed inward there.
- */
 /** Whether the element is itself block-level, as opposed to merely holding one. */
 function isBlockLevel(element: Element): boolean {
   return BLOCK_TAGS.has(tagNameOf(element));
 }
 
+/**
+ * Whether descending into this element takes the walk out of the chain's reach.
+ *
+ * A `<figure>` that is one image becomes the image, and only its caption is
+ * read -- from the caption element, so nothing above that is part of the
+ * parse. Any other figure is descended into block by block instead, and a
+ * wrapper inside it is reached and pushed inward there.
+ */
 function sealsFormatting(element: Element, tag: string): boolean {
   // A seal says `parseRichText` will read this whole subtree as one block's
   // text. For most of SEALED_TAGS that holds by construction, but `visitBlocks`
@@ -1901,6 +1902,13 @@ function pushTable(out: Block[], element: Element, depth: number): void {
     out.push(createBlock('paragraph', captionRuns, depthOf(element, depth)));
   }
 
+  // And its images after it, as a heading's are.
+  if (caption && containsImage(caption)) {
+    for (const image of textImages(caption, () => false).filter(hasUsableImage)) {
+      pushImage(out, image, depthOf(element, depth));
+    }
+  }
+
   // Rows and cells come from the children, so a nested table contributes no
   // rows to this one; it is read as its cell's text instead, which a cell is
   // made of -- stripped, it was text gone. Not by a `:scope >` query, which
@@ -2069,6 +2077,14 @@ function pushImage(out: Block[], element: Element, depth: number): boolean {
   block.alt = image?.getAttribute('alt') ?? element.getAttribute('data-neditor-alt') ?? '';
   out.push(block);
 
+  // An image in the caption -- a Wikipedia thumbnail's flag icon -- is handed
+  // on after it, as one in a heading is; the caption holds text.
+  if (caption && containsImage(caption)) {
+    for (const inner of textImages(caption, () => false).filter(hasUsableImage)) {
+      pushImage(out, inner, block.depth);
+    }
+  }
+
   return true;
 }
 
@@ -2157,13 +2173,14 @@ function isImageFigure(figure: Element): boolean {
     },
   });
 
+  // Left at the first text or the second image, either of which settles it.
   for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
     if (found.nodeType === TEXT_NODE && /[^ \t\n\r\f]/.test(found.nodeValue ?? '')) {
       return false;
     }
 
-    if (tagNameOf(found) === 'IMG') {
-      images += 1;
+    if (tagNameOf(found) === 'IMG' && ++images > 1) {
+      return false;
     }
   }
 

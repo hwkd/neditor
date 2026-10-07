@@ -3231,3 +3231,40 @@ describe('audit 44', () => {
     expect(show(html)).toEqual(expected);
   });
 });
+
+describe('audit 45', () => {
+  const show = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image'
+        ? `[img ${block.src?.split('/').pop()}${isRichEmpty(block.content) ? '' : ` "${richToPlainText(block.content)}"`}]`
+        : `${block.type}:${richToPlainText(block.content)}`,
+    );
+
+  // Only the figure's own caption is set aside: a WordPress gallery of one
+  // image is that image, with its caption.
+  test('a gallery of one image keeps its caption', () => {
+    expect(
+      show(
+        '<figure class="wp-block-gallery has-nested-images"><figure class="wp-block-image"><img src="https://x.test/a.png"><figcaption>Only image caption</figcaption></figure></figure>',
+      ),
+    ).toEqual(['[img a.png "Only image caption"]']);
+  });
+
+  // An image in a caption -- a Wikipedia thumbnail's flag icon, a table's
+  // caption -- is handed on after it, as one in a heading or a cell is.
+  test('an image in an image figure caption is kept', () => {
+    expect(
+      show(
+        '<figure><a href="https://x.test/"><img src="https://upload.wikimedia.org/map.png"></a><figcaption>Map of <span class="flagicon"><img src="https://upload.wikimedia.org/flag.svg"></span>&nbsp;France</figcaption></figure>',
+      ),
+    ).toEqual(['[img map.png "Map of \u00a0France"]', '[img flag.svg]']);
+  });
+
+  test('an image in a table caption is kept', () => {
+    expect(
+      show(
+        '<table><caption>Prices <img src="https://x.test/c.png"></caption><tr><td>x</td></tr></table>',
+      ),
+    ).toEqual(['paragraph:Prices ', '[img c.png]', 'table:']);
+  });
+});

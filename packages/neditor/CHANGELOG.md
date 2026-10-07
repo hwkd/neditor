@@ -233,7 +233,8 @@ that changes what you store or what other applications receive is listed first.
   is read as an image only when, its own caption aside, it holds one image and
   no text; any other -- a WordPress table block, a gallery, a bookmark card --
   is read block by block, where everything but its first image was lost (on
-  `main` too).
+  `main` too). An image in a figure's or a table's caption -- a Wikipedia
+  thumbnail's flag icon -- is handed on after it rather than dropped.
 - HTML clipboard (also on earlier versions): a table nested in a table cell
   is read as that cell's text instead of being dropped with it, so an HTML
   email laid out in nested tables keeps its content; a list inside a wrapper
