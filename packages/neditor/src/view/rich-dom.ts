@@ -625,6 +625,9 @@ function walk(
   out: TextRun[],
   skip?: SkipPredicate,
 ): void {
+  // Where the last block stacked in an inline box among these ended.
+  let stackedEnd = -1;
+
   for (const child of [...node.childNodes]) {
     if (child.nodeType === TEXT_NODE) {
       const text = child.nodeValue ?? '';
@@ -703,14 +706,17 @@ function walk(
     // are adjacent, so they never double up; both wait for the text, so an
     // empty block after the last of it adds no line.
     const isBlock = startsLine(element);
-    // A block stacked inside an inline box -- a button's label, a KaTeX
-    // superscript -- is drawn apart from the text beside it without leaving
-    // the line: a word gap, not a line break.
+    // A block inside an inline box stays in the line. Alone there it touches
+    // the text beside it -- MathJax 2 draws every glyph as one -- but two
+    // stacked one on the other with nothing written between, a fraction's
+    // parts or a badge's two lines, are drawn apart: a word gap between them,
+    // never a line break. Wikipedia writes a hidden `/` between its
+    // fraction's parts, and that already keeps them apart.
     const stacked = !isBlock && isStackedInBox(element);
 
     if (isBlock) {
       breakLine(out, marks, link, true);
-    } else if (stacked) {
+    } else if (stacked && stackedEnd === out.length) {
       wordGap(out, marks, link);
     }
 
@@ -748,7 +754,7 @@ function walk(
     if (isBlock) {
       breakLine(out, marks, link, true);
     } else if (stacked) {
-      wordGap(out, marks, link);
+      stackedEnd = out.length;
     }
   }
 }
@@ -2956,7 +2962,11 @@ const DISPLAY_KEYWORDS = new Set([
 interface Display {
   /** Whether the element is a block in its parent's line, or sits in it. */
   outer: 'block' | 'inline' | null;
-  /** Whether it sits in its line as one box, whatever is inside it. */
+  /**
+   * Whether it sits in its line as one box, whatever is inside it. Not an
+   * inline flex or grid container: what is inside one is an item, and items
+   * start lines (`isItem`) before any box is asked about.
+   */
   box: boolean;
   /** Whether it lays its children out as flex or grid items. */
   items: boolean;
@@ -3005,9 +3015,7 @@ function displayOf(node: Node | null): Display {
           : null,
       box:
         inline &&
-        keywords.some((keyword) =>
-          /^(?:inline-)?(?:block|table|flex|grid|flow-root)$/.test(keyword),
-        ),
+        keywords.some((keyword) => /^(?:inline-)?(?:block|table|flow-root)$/.test(keyword)),
       items: keywords.some((keyword) => /^(?:inline-)?(?:flex|grid)$/.test(keyword)),
     };
     DISPLAYS.set(node, known);
@@ -3054,13 +3062,14 @@ function isStackedInBox(element: Element): boolean {
 const IN_INLINE_BOX = new WeakMap<Node, boolean>();
 
 /**
- * Whether an element is inside an inline-block, inline-table or other inline
- * box, with no line-starting element between: a block in there stacks inside
- * the box, and the box sits in the line. KaTeX sets every superscript,
- * subscript and fraction part as a `display: block` span inside an
- * inline-table inside an inline-block, and reading those as lines broke
- * every sentence holding a formula. Each ancestor's answer for its children
- * is remembered, so a deep tree is climbed once.
+ * Whether an element is inside an inline-block, inline-table or inline
+ * flow-root box, with no line-starting element between: a block in there
+ * stacks inside the box, and the box sits in the line. KaTeX sets every
+ * superscript, subscript and fraction part as a `display: block` span inside
+ * an inline-table inside an inline-block, and MathJax 2 every glyph as one
+ * inside an inline-block; reading those as lines broke every sentence
+ * holding a formula. Each ancestor's answer for its children is remembered,
+ * so a deep tree is climbed once.
  */
 function inInlineBox(element: Element): boolean {
   const chain: Node[] = [];
@@ -3072,10 +3081,12 @@ function inInlineBox(element: Element): boolean {
       found = false;
     } else if (IN_INLINE_BOX.has(at)) {
       found = IN_INLINE_BOX.get(at);
+    } else if (breaksLine(tagNameOf(at)) || isItem(at as Element)) {
+      // A block tag is a block here whatever it declares, as everywhere
+      // outside code: what it holds is read by lines.
+      found = false;
     } else if (displayOf(at).box) {
       found = true;
-    } else if (breaksLine(tagNameOf(at)) || isItem(at as Element)) {
-      found = false;
     } else {
       chain.push(at);
       at = at.parentNode;
