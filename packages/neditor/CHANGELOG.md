@@ -228,7 +228,12 @@ that changes what you store or what other applications receive is listed first.
   heading, a quote or a table cell -- a README's logo, a quoted screenshot, an
   email's banner -- is handed on as an image block after it rather than
   dropped (on `main` too), and an image the reader cannot use (Outlook's
-  `cid:`, Word's `file:`) no longer splits the sentence around it in two.
+  `cid:`, Word's `file:`) no longer splits the sentence around it in two. A
+  heading or table holding nothing but an image is that image. A `<figure>`
+  is read as an image only when, its own caption aside, it holds one image and
+  no text; any other -- a WordPress table block, a gallery, a bookmark card --
+  is read block by block, where everything but its first image was lost (on
+  `main` too).
 - HTML clipboard (also on earlier versions): a table nested in a table cell
   is read as that cell's text instead of being dropped with it, so an HTML
   email laid out in nested tables keeps its content; a list inside a wrapper

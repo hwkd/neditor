@@ -1292,7 +1292,7 @@ function sealsFormatting(element: Element, tag: string): boolean {
     );
   }
 
-  return SEALED_TAGS.has(tag) || (tag === 'FIGURE' && hasUsableImage(element));
+  return SEALED_TAGS.has(tag) || (tag === 'FIGURE' && isImageFigure(element));
 }
 
 /** What a chain of inline wrappers leaves on the content inside it. */
@@ -1812,7 +1812,11 @@ function pushBlock(
     runs = richDelete(runs, 0, 1);
   }
 
-  out.push(createBlock(type, runs, depthOf(element, depth)));
+  // Holding nothing but images, it is those images: an empty heading above a
+  // README's logo would be a block the source never had.
+  if (images.length === 0 || !isRichEmpty(runs)) {
+    out.push(createBlock(type, runs, depthOf(element, depth)));
+  }
 
   for (const image of images) {
     pushImage(out, image, imagesAt!);
@@ -1935,29 +1939,38 @@ function pushTable(out: Block[], element: Element, depth: number): void {
 
   const block = createBlock('table', [], depthOf(element, depth));
   block.rows = normalizeTableRows(rows);
-  out.push(block);
 
   // A cell holds text, so its images -- an email's banner, laid out in a
-  // table -- are handed on after the table rather than dropped.
+  // table -- are handed on after the table rather than dropped; a table of
+  // nothing but images is those images, with no empty table above them.
+  const images: Element[] = [];
+
   for (const row of rowElements) {
     for (const cell of row.children) {
       const tag = tagNameOf(cell);
 
       if ((tag === 'TH' || tag === 'TD') && containsImage(cell)) {
-        for (const image of textImages(cell, () => false)) {
-          pushImage(out, image, block.depth);
-        }
+        images.push(...textImages(cell, () => false).filter(hasUsableImage));
       }
     }
+  }
+
+  if (images.length === 0 || rows.some((row) => row.some((cell) => !isRichEmpty(cell)))) {
+    out.push(block);
+  }
+
+  for (const image of images) {
+    pushImage(out, image, block.depth);
   }
 }
 
 /**
  * A blockquote becomes a quote (or callout), with any list it held underneath.
  *
- * The quote's own text is read from a copy with every list stripped out, so
- * without visiting them separately a quoted list — the ordinary shape on
- * GitHub, Wikipedia and Stack Overflow — is dropped on the floor.
+ * The quote's own text is read skipping every list in it, so without visiting
+ * them separately a quoted list — the ordinary shape on GitHub, Wikipedia and
+ * Stack Overflow — is dropped on the floor. Its images are handed on after it,
+ * a level in, except those in its lists, which are the lists' own.
  */
 function visitQuote(element: Element, depth: number, out: Block[]): void {
   const icon = element.getAttribute(CALLOUT_ATTR);
@@ -2045,7 +2058,8 @@ function pushImage(out: Block[], element: Element, depth: number): boolean {
     return false;
   }
 
-  const caption = element.querySelector('figcaption');
+  // Its own caption: a figure nested in it has its own.
+  const caption = [...element.children].find((child) => tagNameOf(child) === 'FIGCAPTION');
   const block = createBlock(
     'image',
     caption ? parseRichText(caption) : [],
@@ -2118,6 +2132,42 @@ function textImages(root: Element, skip: SkipPredicate): Element[] {
   }
 
   return images;
+}
+
+/**
+ * Whether a `<figure>` is one picture: its own caption aside, it holds a
+ * single usable image -- bare, linked, in a `<picture>` -- and no text. Only
+ * then is it read as an image block; any other figure is read block by block.
+ * Our own image blocks are written this way, and so is every image figure
+ * WordPress or Ghost writes; their tables, galleries and cards are not.
+ */
+function isImageFigure(figure: Element): boolean {
+  if (!hasUsableImage(figure)) {
+    return false;
+  }
+
+  let images = 0;
+  const walker = figure.ownerDocument.createTreeWalker(figure, SHOW_TEXT | SHOW_ELEMENT, {
+    acceptNode: (candidate) => {
+      const tag = tagNameOf(candidate);
+
+      return SKIP_TAGS.has(tag) || (tag === 'FIGCAPTION' && candidate.parentNode === figure)
+        ? FILTER_REJECT
+        : FILTER_ACCEPT;
+    },
+  });
+
+  for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
+    if (found.nodeType === TEXT_NODE && /[^ \t\n\r\f]/.test(found.nodeValue ?? '')) {
+      return false;
+    }
+
+    if (tagNameOf(found) === 'IMG') {
+      images += 1;
+    }
+  }
+
+  return images === 1;
 }
 
 /**
@@ -3025,8 +3075,13 @@ function visitBlocksInner(
     if (tag === 'FIGURE') {
       flushInline();
 
-      if (!pushImage(out, element, depth)) {
-        // No usable image, but the figure may still hold a caption or a table.
+      // A figure that is not one image -- a table with its caption, a
+      // gallery of figures, a bookmark card -- is read block by block. Read
+      // as its first image, everything else in it was lost.
+      // Our own empty image block carries a marker and no picture yet.
+      const image = isImageFigure(element) || element.hasAttribute('data-neditor-image');
+
+      if (!image || !pushImage(out, element, depth)) {
         visitBlocks(doc, element, depth, out, exclude);
       }
 

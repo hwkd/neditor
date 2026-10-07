@@ -4,7 +4,7 @@ import { describe, expect, test } from 'vitest';
 import type { Block } from '../model/document.ts';
 import { blockText } from '../model/document.ts';
 import type { RichText } from '../model/rich-text.ts';
-import { richToPlainText } from '../model/rich-text.ts';
+import { isRichEmpty, richToPlainText } from '../model/rich-text.ts';
 import {
   blocksFromHtml,
   blocksToHtml,
@@ -3108,5 +3108,126 @@ describe('audit 43', () => {
     ],
   ])('%s is one paragraph', (html, expected) => {
     expect(text(html)).toEqual(expected);
+  });
+});
+
+describe('audit 44', () => {
+  const show = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image'
+        ? `[img ${block.src?.split('/').pop()}${isRichEmpty(block.content) ? '' : ` "${richToPlainText(block.content)}"`}]@${block.depth}`
+        : block.type === 'table'
+          ? `table${JSON.stringify(block.rows?.map((row) => row.map((cell) => richToPlainText(cell))))}@${block.depth}`
+          : `${block.type}:${richToPlainText(block.content)}@${block.depth}`,
+    );
+
+  // A figure is an image only when, its own caption aside, it holds one
+  // usable image and no text; any other is read block by block -- a WordPress
+  // table block, a gallery, a bookmark card.
+  test('a WordPress table block keeps its table and caption', () => {
+    expect(
+      show(
+        '<figure class="wp-block-table"><table><tr><th>Logo</th><th>Name</th></tr><tr><td><img src="https://x.test/a.png"></td><td>Product A</td></tr><tr><td><img src="https://x.test/b.png"></td><td>Product B</td></tr></table><figcaption>Comparison</figcaption></figure>',
+      ),
+    ).toEqual([
+      'table[["Logo","Name"],["","Product A"],["","Product B"]]@0',
+      '[img a.png]@0',
+      '[img b.png]@0',
+      'paragraph:Comparison@0',
+    ]);
+  });
+
+  test('a gallery keeps every image with its own caption', () => {
+    expect(
+      show(
+        '<figure class="wp-block-gallery"><figure class="wp-block-image"><img src="https://x.test/1.jpg"><figcaption>First</figcaption></figure><figure class="wp-block-image"><img src="https://x.test/2.jpg"></figure><figure class="wp-block-image"><img src="https://x.test/3.jpg"><figcaption>Third</figcaption></figure><figcaption>Our trip</figcaption></figure>',
+      ),
+    ).toEqual([
+      '[img 1.jpg "First"]@0',
+      '[img 2.jpg]@0',
+      '[img 3.jpg "Third"]@0',
+      'paragraph:Our trip@0',
+    ]);
+  });
+
+  test('a bookmark card keeps its text', () => {
+    const blocks = show(
+      '<figure class="kg-bookmark-card"><a class="kg-bookmark-container" href="https://x.test/"><div class="kg-bookmark-content"><div class="kg-bookmark-title">Title</div><div class="kg-bookmark-description">Desc</div><div class="kg-bookmark-metadata"><img class="kg-bookmark-icon" src="https://x.test/fav.png"><span>Author</span></div></div></a></figure>',
+    ).join('|');
+    for (const word of ['Title', 'Desc', 'Author', 'fav.png']) {
+      expect(blocks).toContain(word);
+    }
+  });
+
+  test('a figure holding text and an image in a list item keeps the text', () => {
+    expect(
+      show('<ul><li><figure>text<img src="https://x.test/i.png"></figure></li></ul>').join('|'),
+    ).toContain('text');
+  });
+
+  // Two images and no caption -- a gallery row -- is two images, not the first.
+  test('a figure of two images keeps both', () => {
+    expect(
+      show('<figure><img src="https://x.test/a.png"><img src="https://x.test/b.png"></figure>'),
+    ).toEqual(['[img a.png]@0', '[img b.png]@0']);
+  });
+
+  // An image figure's caption is its own, not one nested further in.
+  test("an image figure's caption is its direct one", () => {
+    expect(
+      show(
+        '<figure><a href="https://x.test/"><img src="https://x.test/i.png"><figcaption></figcaption></a><figcaption>Real</figcaption></figure>',
+      ),
+    ).toEqual(['[img i.png "Real"]@0']);
+  });
+
+  // An image figure -- ours, linked, in a picture -- is still the image.
+  test.each([
+    [
+      '<figure><img src="https://x.test/i.png" alt="a"><figcaption>Cap</figcaption></figure>',
+      ['[img i.png "Cap"]@0'],
+    ],
+    [
+      '<figure><a href="https://x.test/"><img src="https://x.test/i.png"></a></figure>',
+      ['[img i.png]@0'],
+    ],
+    [
+      '<figure><picture><source srcset="https://x.test/i.webp"><img src="https://x.test/i.png"></picture></figure>',
+      ['[img i.png]@0'],
+    ],
+  ])('%s is an image', (html, expected) => {
+    expect(show(html)).toEqual(expected);
+  });
+
+  // Images in a quote's nested list are the list's own, handed on once.
+  test.each([
+    [
+      '<blockquote><p>Steps:</p><ul><li>Open it<br><img src="https://x.test/i.png"></li></ul></blockquote>',
+      ['quote:Steps:@0', 'bulleted_list:Open it@1', '[img i.png]@2'],
+    ],
+    [
+      '<blockquote><ul><li><img src="https://x.test/i.png"></li></ul></blockquote>',
+      ['[img i.png]@1'],
+    ],
+    [
+      '<p>a</p><blockquote><p><img src="https://x.test/i.png"></p></blockquote>',
+      ['paragraph:a@0', '[img i.png]@0'],
+    ],
+  ])('%s reads %j', (html, expected) => {
+    expect(show(html)).toEqual(expected);
+  });
+
+  // A heading or a table holding nothing but an image is that image.
+  test.each([
+    [
+      '<h1 align="center"><a href="https://x.test/"><img src="https://x.test/logo.png" alt="Project"></a></h1>',
+      ['[img logo.png]@0'],
+    ],
+    [
+      '<table><tr><td><a href="https://x.test/"><img src="https://x.test/banner.jpg"></a></td></tr></table>',
+      ['[img banner.jpg]@0'],
+    ],
+  ])('%s is only the image', (html, expected) => {
+    expect(show(html)).toEqual(expected);
   });
 });
