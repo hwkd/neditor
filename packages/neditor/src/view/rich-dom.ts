@@ -1792,10 +1792,31 @@ function cloneDeep(node: Node): Node {
  * round trip: `blocksToHtml` writes an empty block as an empty element, so
  * dropping it here loses a paragraph, heading or quote on every copy-paste.
  */
-function pushBlock(out: Block[], type: BlockType, element: Element, depth: number): void {
-  const runs = parseRichText(element, isNestedList);
+function pushBlock(
+  out: Block[],
+  type: BlockType,
+  element: Element,
+  depth: number,
+  imagesAt?: number,
+): void {
+  let runs = parseRichText(element, isNestedList);
+  // Given a depth, the block hands its images on after it, as a list item
+  // does: read as text, a heading's logo or a quote's screenshot was dropped.
+  const images =
+    imagesAt !== undefined && containsImage(element)
+      ? textImages(element, isNestedList).filter(hasUsableImage)
+      : [];
+
+  // A break that followed the image ended the image's line, not the text's.
+  if (images.length > 0 && richToPlainText(runs).startsWith('\n')) {
+    runs = richDelete(runs, 0, 1);
+  }
 
   out.push(createBlock(type, runs, depthOf(element, depth)));
+
+  for (const image of images) {
+    pushImage(out, image, imagesAt!);
+  }
 }
 
 /** Our own serializer records depth explicitly; other sources have none. */
@@ -1915,6 +1936,20 @@ function pushTable(out: Block[], element: Element, depth: number): void {
   const block = createBlock('table', [], depthOf(element, depth));
   block.rows = normalizeTableRows(rows);
   out.push(block);
+
+  // A cell holds text, so its images -- an email's banner, laid out in a
+  // table -- are handed on after the table rather than dropped.
+  for (const row of rowElements) {
+    for (const cell of row.children) {
+      const tag = tagNameOf(cell);
+
+      if ((tag === 'TH' || tag === 'TD') && containsImage(cell)) {
+        for (const image of textImages(cell, () => false)) {
+          pushImage(out, image, block.depth);
+        }
+      }
+    }
+  }
 }
 
 /**
@@ -1929,17 +1964,29 @@ function visitQuote(element: Element, depth: number, out: Block[]): void {
   const lists = outermostLists(element);
   const quoteDepth = depthOf(element, depth);
 
-  // A blockquote holding nothing but a list is that list: an empty quote above
-  // it would be a block the source never had. Our own callouts keep theirs,
-  // since the marker says the block was really there.
+  const images =
+    icon === null && containsImage(element)
+      ? textImages(element, isNestedList).filter(hasUsableImage)
+      : [];
+
+  // A blockquote holding nothing but a list is that list, and one holding
+  // nothing but an image -- a quoted screenshot -- is that image: an empty
+  // quote above it would be a block the source never had. Our own callouts
+  // keep theirs, since the marker says the block was really there.
   const bare =
-    icon === null && lists.length > 0 && isRichEmpty(parseRichText(element, isNestedList));
+    icon === null &&
+    (lists.length > 0 || images.length > 0) &&
+    isRichEmpty(parseRichText(element, isNestedList));
 
   if (!bare) {
     if (icon === null) {
-      pushBlock(out, 'quote', element, depth);
+      pushBlock(out, 'quote', element, depth, quoteDepth + 1);
     } else {
       pushCallout(out, element, depth, icon.length > 0 ? icon : DEFAULT_CALLOUT_ICON);
+    }
+  } else {
+    for (const image of images) {
+      pushImage(out, image, quoteDepth);
     }
   }
 
@@ -2716,10 +2763,11 @@ function visitBlocksInner(
         continue;
       }
 
+      // An image the reader cannot use is no block, so it splits nothing.
       if (tag === 'IMG') {
-        flushInline(true);
-
-        if (pushImage(out, node as Element, depth)) {
+        if (hasUsableImage(node as Element)) {
+          flushInline(true);
+          pushImage(out, node as Element, depth);
           lineOpen = true;
         }
 
@@ -2914,7 +2962,7 @@ function visitBlocksInner(
 
     if (heading) {
       flushInline();
-      pushBlock(out, heading, element, depth);
+      pushBlock(out, heading, element, depth, depthOf(element, depth));
       continue;
     }
 
@@ -2963,9 +3011,11 @@ function visitBlocksInner(
     // An inline `<img>` sits on a line, which a `<br>` after it ends; a
     // `<figure>` is a block.
     if (tag === 'IMG') {
-      flushInline(true);
-
-      if (pushImage(out, element, depth)) {
+      // One the reader cannot use (Outlook's `cid:`, Word's `file:`) is no
+      // block, so it splits no sentence.
+      if (hasUsableImage(element)) {
+        flushInline(true);
+        pushImage(out, element, depth);
         lineOpen = true;
       }
 

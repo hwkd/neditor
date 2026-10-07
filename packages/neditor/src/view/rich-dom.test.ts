@@ -3053,3 +3053,60 @@ describe('audit 41', () => {
     expect(text('<p>a<br> <center>b</center></p>')).toEqual(['a\n \nb']);
   });
 });
+
+describe('audit 43', () => {
+  const text = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image'
+        ? `[img ${block.src?.split('/').pop()}]`
+        : `${block.type}:${richToPlainText(block.content)}`,
+    );
+
+  // A heading, a quote or a table cell holding an image hands it on, as a list
+  // item does; read as text it was dropped. GitHub READMEs, quoted
+  // screenshots and HTML-email layout tables, as Chromium copies them.
+  test.each([
+    [
+      '<h1 align="center"><a href="https://github.com/o/r"><img src="https://github.com/o/r/raw/main/logo.png" alt="Logo"></a><br>Project</h1>',
+      ['heading1:Project', '[img logo.png]'],
+    ],
+    [
+      '<blockquote><p><a href="https://github.com/o/r"><img src="https://user-images.test/shot.png"></a></p></blockquote>',
+      ['[img shot.png]'],
+    ],
+    [
+      '<blockquote><p><img src="https://x.test/n.png"> Note: careful</p></blockquote>',
+      ['quote: Note: careful', '[img n.png]'],
+    ],
+    [
+      '<table><tr><td><a href="https://x.test/"><img src="https://x.test/banner.jpg"></a></td></tr><tr><td>text</td></tr></table>',
+      ['table:', '[img banner.jpg]'],
+    ],
+  ])('%s keeps its image', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  test('a handed-on image from a quote sits a level in', () => {
+    const blocks = blocksFromHtml(
+      document,
+      '<blockquote><p><img src="https://x.test/n.png"> Note: careful</p></blockquote>',
+    );
+    expect(blocks.map((block) => [block.type, block.depth])).toEqual([
+      ['quote', 0],
+      ['image', 1],
+    ]);
+  });
+
+  // An image the reader cannot use is no block, so it splits no sentence:
+  // Outlook's cid: images, Word's file: ones.
+  test.each([
+    ['<p>Click <img src="cid:x"> to open</p>', ['paragraph:Click to open']],
+    ['<div>see <b>bold <img src="cid:y"> text</b> here</div>', ['paragraph:see bold text here']],
+    [
+      '<p class="MsoNormal">See the logo <span><img src="file:///C:/x/clip_image002.png"></span> in the header.</p>',
+      ['paragraph:See the logo in the header.'],
+    ],
+  ])('%s is one paragraph', (html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+});
