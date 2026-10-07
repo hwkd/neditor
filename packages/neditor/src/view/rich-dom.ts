@@ -342,7 +342,7 @@ function hasContentAfter(node: Node, root: Node, skip?: SkipPredicate): boolean 
  */
 function isBetweenBlocks(node: Node): boolean {
   const isBlock = (sibling: Node | null): boolean =>
-    sibling !== null && sibling.nodeType === ELEMENT_NODE && breaksLine(tagNameOf(sibling));
+    sibling !== null && sibling.nodeType === ELEMENT_NODE && startsLine(sibling as Element);
   const edge = (sibling: Node | null): boolean => sibling === null || isBlock(sibling);
   const previous = node.previousSibling;
   const next = node.nextSibling;
@@ -511,6 +511,103 @@ function subtreeText(node: Node): string {
   return text;
 }
 
+/**
+ * A code block's text: `subtreeText`, except that a block inside it -- a
+ * `<div>` per line, or a flex or grid item (see `startsLine`) -- is a line of
+ * its own, joined to its neighbours by a newline wherever none already
+ * separates them, and the whitespace between flex or grid items is not
+ * drawn. Each text's line is its nearest such ancestor, remembered as the
+ * walk goes so a deep tree is climbed once. A `<br>` is a newline where text
+ * follows it on its line; the last one before a line ends, or before the
+ * end, is that line's filler, as `parseRichText` reads one.
+ */
+function codeText(root: Element): string {
+  const lineOf = new Map<Node, Node | null>();
+  const findLine = (node: Node): Node | null => {
+    const chain: Node[] = [];
+    let found: Node | null | undefined;
+
+    let at: Node | null = node;
+
+    while (found === undefined) {
+      if (at === null || at === root) {
+        found = null;
+      } else if (lineOf.has(at)) {
+        found = lineOf.get(at);
+      } else if (at.nodeType === ELEMENT_NODE && startsLine(at as Element)) {
+        found = at;
+      } else {
+        chain.push(at);
+        at = at.parentNode;
+      }
+    }
+
+    for (const at of chain) {
+      lineOf.set(at, found ?? null);
+    }
+
+    return found ?? null;
+  };
+
+  const walker = root.ownerDocument.createTreeWalker(root, SHOW_TEXT | SHOW_ELEMENT, {
+    acceptNode: (candidate) => {
+      const tag = tagNameOf(candidate);
+
+      return SKIP_TAGS.has(tag)
+        ? FILTER_REJECT
+        : candidate.nodeType === TEXT_NODE || tag === 'BR'
+          ? FILTER_ACCEPT
+          : FILTER_SKIP;
+    },
+  });
+  let text = '';
+  let lastLine: Node | null = null;
+  // Whether the current line holds text not yet ended, and how many `<br>`s
+  // stand on it since: the last of them ends it, so it is not one of its own.
+  let open = false;
+  let breaks = 0;
+
+  for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
+    const isBreak = found.nodeType !== TEXT_NODE;
+    const value = isBreak ? '' : (found.nodeValue ?? '');
+
+    if (
+      !isBreak &&
+      (value === '' || (laysOutItems(found.parentNode) && !/[^ \t\n\r\f]/.test(value)))
+    ) {
+      continue;
+    }
+
+    const line = findLine(found);
+
+    if (line !== lastLine) {
+      // Leaving a line ends it once: its own last `<br>` does, or a newline.
+      if (breaks > 0) {
+        text += '\n'.repeat(breaks);
+      } else if (open) {
+        text += '\n';
+      }
+
+      open = false;
+      breaks = 0;
+      lastLine = line;
+    }
+
+    if (isBreak) {
+      breaks += 1;
+      continue;
+    }
+
+    // Text after `<br>`s on the same line: every one of them stands.
+    text += '\n'.repeat(breaks) + value;
+    breaks = 0;
+    open = !text.endsWith('\n');
+  }
+
+  // The last `<br>` of all is the filler of the line it ends.
+  return text + '\n'.repeat(Math.max(0, breaks - 1));
+}
+
 function walk(
   node: Node,
   marks: Mark[],
@@ -580,7 +677,7 @@ function walk(
       // A block breaks the line here as anywhere (`breaksLine`: a figure and a
       // rule included), and so does a link holding one; an image, linked or
       // not, does not.
-      if (breaksLine(tag) || containsBlockLevel(element)) {
+      if (startsLine(element) || containsBlockLevel(element)) {
         breakLine(out, marks, link, true);
       } else if (/[ \t\n\r\f]/.test(subtreeText(element))) {
         // An inline one -- an image link -- keeps the space its whitespace
@@ -606,7 +703,7 @@ function walk(
     // after it when text follows. `breakLine` collapses the two where blocks
     // are adjacent, so they never double up; both wait for the text, so an
     // empty block after the last of it adds no line.
-    const isBlock = breaksLine(tag);
+    const isBlock = startsLine(element);
 
     if (isBlock) {
       breakLine(out, marks, link, true);
@@ -1253,6 +1350,11 @@ function containsImage(element: Element): boolean {
   return firstImage(element) !== null;
 }
 
+const INHERITING_KEYWORDS = ['inherit', 'unset', 'revert', 'revert-layer'];
+
+/** A URL that names its own scheme, or its own host. */
+const ABSOLUTE_URL = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
+
 /** What HTML counts as whitespace between attribute tokens. */
 const HTML_SPACE = new Set([' ', '\t', '\n', '\r', '\f']);
 
@@ -1295,7 +1397,11 @@ function srcsetSource(srcset: string): string | null {
       descriptor = srcset.slice(from, index);
     }
 
-    const url = end > start ? sanitizeImageUrl(srcset.slice(start, end)) : null;
+    // A browser resolves `src` when it copies, but writes `srcset` as the page
+    // did: with no base URL to resolve it against, a relative candidate would
+    // load from the editor's own site, or name a host.
+    const candidate = srcset.slice(start, end);
+    const url = ABSOLUTE_URL.test(candidate) ? sanitizeImageUrl(candidate) : null;
     // `640w` and `2x` both read as their number; no descriptor means `1x`.
     const size = Number.parseFloat(descriptor.trim());
     const weight = Number.isNaN(size) ? 1 : size;
@@ -2721,21 +2827,27 @@ function whiteSpaceOf(element: Element | null): WhiteSpace {
   return mode;
 }
 
-/** The `white-space` an element's own `style` declares last, if any. */
-function declaredWhiteSpace(element: Element): WhiteSpace | null {
+/**
+ * The value CSS applies for `property` among an element's own inline `style`
+ * declarations, lower-cased: the last valid one, an `!important` one over any
+ * that is not, and an invalid one ignored, as CSS ignores it. Null if none.
+ */
+function declaredValue(
+  element: Element,
+  property: 'white-space' | 'display',
+  valid: (value: string) => boolean,
+): string | null {
   const style = element.getAttribute('style') ?? '';
 
-  if (!style.toLowerCase().includes('white-space')) {
+  if (!style.toLowerCase().includes(property)) {
     return null;
   }
 
-  // The last valid declaration wins, an `!important` one over any that is not;
-  // an invalid one is ignored, as CSS ignores it, and `inherit`, `unset` and
-  // `revert` inherit (null).
-  let declared: WhiteSpace | null = null;
-  let important: WhiteSpace | null | undefined;
+  let declared: string | null = null;
+  let important: string | null = null;
+  const pattern = property === 'display' ? DISPLAY_DECLARATION : WHITE_SPACE_DECLARATION;
 
-  for (const match of style.matchAll(/(?:^|;)\s*white-space\s*:([^;]*)/gi)) {
+  for (const match of style.matchAll(pattern)) {
     let value = (match[1] ?? '').trim().toLowerCase();
     const isImportant = /!\s*important$/.test(value);
 
@@ -2743,21 +2855,126 @@ function declaredWhiteSpace(element: Element): WhiteSpace | null {
       value = value.slice(0, value.lastIndexOf('!')).trim();
     }
 
-    const mode = WHITE_SPACE_VALUES.get(value);
-    const valid = mode !== undefined || INHERITING.has(value);
-
-    if (!valid) {
+    if (!valid(value)) {
       continue;
     }
 
     if (isImportant) {
-      important = mode ?? null;
+      important = value;
     } else {
-      declared = mode ?? null;
+      declared = value;
     }
   }
 
-  return important === undefined ? declared : important;
+  return important ?? declared;
+}
+
+const WHITE_SPACE_DECLARATION = /(?:^|;)\s*white-space\s*:([^;]*)/gi;
+const DISPLAY_DECLARATION = /(?:^|;)\s*display\s*:([^;]*)/gi;
+
+/**
+ * The `white-space` an element's own `style` declares, if any; `inherit`,
+ * `unset` and `revert` inherit (null).
+ */
+function declaredWhiteSpace(element: Element): WhiteSpace | null {
+  const value = declaredValue(
+    element,
+    'white-space',
+    (candidate) => WHITE_SPACE_VALUES.has(candidate) || INHERITING.has(candidate),
+  );
+
+  return value === null ? null : (WHITE_SPACE_VALUES.get(value) ?? null);
+}
+
+/** Every keyword a `display` value is made of; one with another is invalid. */
+const DISPLAY_KEYWORDS = new Set([
+  'none',
+  'contents',
+  'block',
+  'inline',
+  'run-in',
+  'flow',
+  'flow-root',
+  'table',
+  'flex',
+  'grid',
+  'ruby',
+  'list-item',
+  'inline-block',
+  'inline-table',
+  'inline-flex',
+  'inline-grid',
+  'inline-list-item',
+  'table-row-group',
+  'table-header-group',
+  'table-footer-group',
+  'table-row',
+  'table-cell',
+  'table-column-group',
+  'table-column',
+  'table-caption',
+  'ruby-base',
+  'ruby-text',
+  'ruby-base-container',
+  'ruby-text-container',
+  'initial',
+  ...INHERITING_KEYWORDS,
+]);
+
+const LAYOUTS = new WeakMap<Node, 'block' | 'inline' | null>();
+
+/**
+ * Whether a node's own inline `style` lays its children out as flex or grid
+ * items, and whether the container itself is then a block (`flex`, `grid`)
+ * or sits in its line (`inline-flex`, `inline-grid`). Chromium writes a
+ * container's `display` inline when it copies, and leaves out the
+ * whitespace between its items, which is not drawn: read by tag alone, a
+ * Shiki code block (a grid of line spans) came out as one line, and a flex
+ * row's links ran together. Remembered per element: a container with many
+ * items is asked once per item.
+ */
+function itemLayout(node: Node | null): 'block' | 'inline' | null {
+  if (node === null || node.nodeType !== ELEMENT_NODE) {
+    return null;
+  }
+
+  let known = LAYOUTS.get(node);
+
+  if (known === undefined) {
+    const value = declaredValue(node as Element, 'display', (candidate) =>
+      candidate.split(/[ \t\n\r\f]+/).every((keyword) => DISPLAY_KEYWORDS.has(keyword)),
+    );
+    const keywords = value?.split(/[ \t\n\r\f]+/) ?? [];
+
+    known = keywords.some((keyword) => keyword === 'inline-flex' || keyword === 'inline-grid')
+      ? 'inline'
+      : keywords.some((keyword) => keyword === 'flex' || keyword === 'grid')
+        ? keywords.includes('inline')
+          ? 'inline'
+          : 'block'
+        : null;
+    LAYOUTS.set(node, known);
+  }
+
+  return known;
+}
+
+function laysOutItems(node: Node | null): boolean {
+  return itemLayout(node) !== null;
+}
+
+/**
+ * Whether an element starts and ends a line: a block by its tag
+ * (`breaksLine`), a flex or grid container that is not inline, or an item of
+ * one -- each element item is a block, as `innerText` reads it in both
+ * browsers. Loose text in a container is not: it stays on the line beside it.
+ */
+function startsLine(element: Element): boolean {
+  return (
+    breaksLine(tagNameOf(element)) ||
+    laysOutItems(element.parentNode) ||
+    itemLayout(element) === 'block'
+  );
 }
 
 const WHITE_SPACE_VALUES = new Map<string, WhiteSpace>([
@@ -2770,7 +2987,7 @@ const WHITE_SPACE_VALUES = new Map<string, WhiteSpace>([
   ['pre-line', 'pre-line'],
 ]);
 
-const INHERITING = new Set(['inherit', 'unset', 'revert', 'revert-layer']);
+const INHERITING = new Set(INHERITING_KEYWORDS);
 
 /**
  * Reads inline content outside any paragraph as a browser lays it out: under
@@ -3065,19 +3282,35 @@ function visitBlocksInner(
     const wrapper = doc.createElement('div');
 
     for (const inline of buffer) {
-      const copy = cloneDeep(inline);
+      // An element that is a flex or grid item is a block of its own, which
+      // the copy, taken out of its container, would no longer know; the
+      // whitespace between items is not drawn at all.
+      const item = laysOutItems(inline.parentNode);
+
+      if (item && inline.nodeType === TEXT_NODE && !/[^ \t\n\r\f]/.test(inline.nodeValue ?? '')) {
+        continue;
+      }
+
+      let copy: Node = cloneDeep(inline);
       // A style on an ancestor outside the run still governs it.
       const mode = whiteSpaceOf(inline.parentElement);
 
-      if (mode === 'normal') {
-        wrapper.append(copy);
-      } else {
+      if (mode !== 'normal') {
         const holder = doc.createElement('span');
 
         holder.setAttribute('style', `white-space: ${mode === 'pre' ? 'pre-wrap' : 'pre-line'}`);
         holder.append(copy);
-        wrapper.append(holder);
+        copy = holder;
       }
+
+      if (item && inline.nodeType === ELEMENT_NODE) {
+        const block = doc.createElement('div');
+
+        block.append(copy);
+        copy = block;
+      }
+
+      wrapper.append(copy);
     }
 
     // A lone `<br>` between two blocks is a blank line of its own, as two of
@@ -3197,7 +3430,7 @@ function visitBlocksInner(
       // instead. It is inert -- parsing happens in a detached template and this
       // is text either way -- but it is still somebody else's code appearing in
       // the user's document.
-      out.push(createBlock('code', subtreeText(element), depthOf(element, depth)));
+      out.push(createBlock('code', codeText(element), depthOf(element, depth)));
       continue;
     }
 

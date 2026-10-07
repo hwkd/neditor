@@ -2124,7 +2124,33 @@ describe('audit 28', () => {
           document,
           `<img srcset="${'https://x.test/i.png 1x, '.repeat(size)}${', '.repeat(size)}${'a,'.repeat(size)}">`,
         );
-      }, 500),
+      }, 4000),
+    ).toBeLessThan(LINEAR);
+  });
+
+  // Whether an element lays out items is read from its style once, not once
+  // per item asking about its container.
+  test('many flex items under a long style read in linear time', () => {
+    expect(
+      growth((size) => {
+        blocksFromHtml(
+          document,
+          `<div style="${'color: red; '.repeat(size)}display: flex">${'<a>w</a> '.repeat(size)}</div>`,
+        );
+      }, 400),
+    ).toBeLessThan(LINEAR);
+  });
+
+  // Each text in a code grid finds its line by climbing, and the climb is
+  // remembered: deep markup inside one line is climbed once, not per text.
+  test('deep markup in a code grid reads in linear time', () => {
+    expect(
+      growth((size) => {
+        blocksFromHtml(
+          document,
+          `<pre><code style="display: grid">${'<span><i>c</i>c<i>c</i>'.repeat(size)}${'</span>'.repeat(size)}</code></pre>`,
+        );
+      }, 300),
     ).toBeLessThan(LINEAR);
   });
 

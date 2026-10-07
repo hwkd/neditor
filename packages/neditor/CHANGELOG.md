@@ -241,7 +241,18 @@ that changes what you store or what other applications receive is listed first.
   An `<img>` with no usable `src` is read from its own `srcset` or its
   `<picture>`'s `<source>`s, largest candidate first, so a Medium article's
   pictures -- every one written without a `src` -- are no longer dropped on
-  paste (on `main` too).
+  paste (on `main` too). A relative `srcset` candidate is passed over: a
+  browser resolves `src` when it copies but not `srcset`, and the reader
+  has no base URL to resolve one against.
+- HTML clipboard (also on earlier versions): a flex or grid layout reads as
+  the browser draws it. Chromium writes a container's `display` inline and
+  drops the whitespace between its items, so a Shiki code block (nextjs.org,
+  shadcn) read as one line and a flex row's links ran together
+  (`HomeBrowse`); each element item is now a line of its own, a `flex` or
+  `grid` container is a block whatever its tag, and an `inline-flex` one
+  stays in its sentence. Inside a code block a `<div>` per line and a `<br>`
+  now start lines too (a trailing `<br>` is the line's filler), and a
+  newline beside a block is the blank line Chromium draws.
 - HTML clipboard (also on earlier versions): a table nested in a table cell
   is read as that cell's text instead of being dropped with it, so an HTML
   email laid out in nested tables keeps its content; a list inside a wrapper

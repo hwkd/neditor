@@ -3394,3 +3394,200 @@ describe('audit 48', () => {
     ]);
   });
 });
+
+describe('audit 49', () => {
+  const images = (html: string) =>
+    blocksFromHtml(document, html)
+      .filter((block) => block.type === 'image')
+      .map((block) => block.src);
+  const read = (html: string) =>
+    blocksFromHtml(document, html).map(
+      (block) => `${block.type}:${richToPlainText(block.content)}`,
+    );
+
+  // A browser resolves `src` when it copies, but writes `srcset` as the page
+  // did, and the reader has no base URL to resolve one against.
+  test('a relative srcset candidate is no image source', () => {
+    expect(
+      images(
+        '<p>Before.</p><img srcset="/images/bayon-800.jpg 800w, /images/bayon-1600.jpg 1600w" alt="Bayon face"><p>Between.</p><img srcset="bayon-800.jpg 1x, bayon-1600.jpg 2x" alt="Bayon two"><p>After.</p>',
+      ),
+    ).toEqual([]);
+    expect(images('<img srcset="/a.png 4x, https://x.test/b.png 1x">')).toEqual([
+      'https://x.test/b.png',
+    ]);
+    expect(images('<img srcset="//cdn.x.test/c.png 2x">')).toEqual(['https://cdn.x.test/c.png']);
+  });
+
+  test('a srcset splits on every kind of HTML whitespace', () => {
+    expect(images('<img srcset="https://x.test/a.png\n1x,\thttps://x.test/b.png\t2x">')).toEqual([
+      'https://x.test/b.png',
+    ]);
+    expect(images('<img srcset="https://x.test/a.png\f3x,\rhttps://x.test/b.png\r2x">')).toEqual([
+      'https://x.test/a.png',
+    ]);
+  });
+
+  test("the image's own srcset comes before its picture's sources", () => {
+    expect(
+      images(
+        '<picture><source srcset="https://x.test/s.png"><img srcset="https://x.test/o.png"></picture>',
+      ),
+    ).toEqual(['https://x.test/o.png']);
+  });
+
+  test('an unusable src falls back to the srcset', () => {
+    expect(images('<img src="javascript:alert(1)" srcset="https://x.test/f.png">')).toEqual([
+      'https://x.test/f.png',
+    ]);
+  });
+
+  // Chromium writes a flex or grid container's `display` inline when it
+  // copies, and leaves out the whitespace between its items, which is not
+  // rendered. Each item is a line of its own, in both browsers.
+  test('a Shiki code block laid out as a grid keeps its lines (nextjs.org, Chromium)', () => {
+    expect(
+      read(
+        '<pre><code style="box-sizing: border-box; display: grid; white-space: pre"><span data-line=""><span># Use the new automated upgrade CLI</span></span><span data-line=""><span>npx</span><span> @next/codemod@canary</span><span> upgrade</span><span> latest</span></span><span data-line=""> </span><span data-line=""><span># ...or upgrade manually</span></span><span data-line=""><span>npm</span><span> install</span><span> next@latest</span><span> react@rc</span><span> react-dom@rc</span></span></code></pre>',
+      ),
+    ).toEqual([
+      'code:# Use the new automated upgrade CLI\nnpx @next/codemod@canary upgrade latest\n \n# ...or upgrade manually\nnpm install next@latest react@rc react-dom@rc',
+    ]);
+  });
+
+  test('the same block copied by Firefox, with its newlines, reads the same', () => {
+    expect(
+      read(
+        '<pre><code style="display: grid"><span data-line=""><span>a</span></span>\n<span data-line=""> </span>\n<span data-line=""><span>b</span></span></code></pre>',
+      ),
+    ).toEqual(['code:a\n \nb']);
+  });
+
+  test('spaces between the items of a code grid are not drawn', () => {
+    expect(
+      read('<pre><code style="display:grid"><span>a</span> <span>b</span>\t</code></pre>'),
+    ).toEqual(['code:a\nb']);
+  });
+
+  test('a code block: a block inside starts a line, and loose text in a grid does not', () => {
+    expect(read('<pre>x<div>a</div><div>b</div>y</pre>')).toEqual(['code:x\na\nb\ny']);
+    expect(read('<pre><code style="display:grid">a<!-- -->b</code></pre>')).toEqual(['code:ab']);
+  });
+
+  // A `<br>` is a newline where text follows it on its line; the last one
+  // before a line ends is that line's filler, as everywhere else.
+  test('a <br> in a code block', () => {
+    expect(read('<pre>a<br>b</pre>')).toEqual(['code:a\nb']);
+    expect(read('<pre><code>a<br><br>b</code></pre>')).toEqual(['code:a\n\nb']);
+    expect(read('<pre>a<br></pre>')).toEqual(['code:a']);
+    expect(read('<pre>a<br><br></pre>')).toEqual(['code:a\n']);
+    expect(read('<pre>a\n<br></pre>')).toEqual(['code:a\n']);
+    expect(read('<pre><div>a<br></div><div>b</div></pre>')).toEqual(['code:a\nb']);
+    expect(read('<pre><div>a<br><br></div><div>b</div></pre>')).toEqual(['code:a\n\nb']);
+    expect(read('<pre><div>a</div><div><br></div><div>b</div></pre>')).toEqual(['code:a\n\nb']);
+  });
+
+  // A newline after a block in a <pre> is a line of its own: Chromium draws
+  // three lines for each of these.
+  test('a newline beside a block in a code block is a blank line', () => {
+    expect(read('<pre><div>a</div>\nb</pre>')).toEqual(['code:a\n\nb']);
+    expect(read('<pre><div>a</div>\n<div>b</div></pre>')).toEqual(['code:a\n\nb']);
+  });
+
+  test('a code grid: loose text after an item, and what follows the grid, start lines', () => {
+    expect(
+      read(
+        '<pre><code style="display:grid"><span>echo one</span><span>echo two</span>tail</code>after</pre>',
+      ),
+    ).toEqual(['code:echo one\necho two\ntail\nafter']);
+  });
+
+  test("a flex row's links do not run together", () => {
+    const blocks = blocksFromHtml(
+      document,
+      '<div style="display: flex"><a href="https://x.test/h">Back to Home</a><a href="https://x.test/t">Browse Tags</a></div>',
+    );
+
+    expect(blocks.map((block) => richToPlainText(block.content))).toEqual([
+      'Back to Home\nBrowse Tags',
+    ]);
+    expect(blocks[0]?.content.map((run) => run.link)).toEqual([
+      'https://x.test/h',
+      undefined,
+      'https://x.test/t',
+    ]);
+    expect(
+      read(
+        '<div style="display:flex"><a href="#">Back to Home</a> <a href="#">Browse Tags</a></div>',
+      ),
+    ).toEqual(['paragraph:Back to Home\nBrowse Tags']);
+  });
+
+  // Each element item is a block; loose text stays on the line beside it.
+  test('loose text beside the items of a flex container', () => {
+    expect(read('<div style="display:flex">text <b>bold</b> more</div>')).toEqual([
+      'paragraph:text\nbold\nmore',
+    ]);
+    expect(read('<div style="display:grid">a<span> </span>b</div>')).toEqual(['paragraph:a\nb']);
+    // Loose text is one item however many nodes it spans.
+    expect(read('<div style="display:flex">a<!-- -->b</div>')).toEqual(['paragraph:ab']);
+  });
+
+  test('an inline-flex container inside a sentence', () => {
+    expect(
+      read('<p>x <span style="display:inline-flex"><b>a</b> <i>b</i></span> y</p>')[0]
+        ?.split('\n')
+        .map((line) => line.trim()),
+    ).toEqual(['paragraph:x', 'a', 'b', 'y']);
+  });
+
+  test('an inline flex container sits in its line; a flex or grid one is a block', () => {
+    expect(read('<p>x<span style="display:inline-flex">a<b>b</b>c</span></p>')).toEqual([
+      'paragraph:xa\nb\nc',
+    ]);
+    expect(read('<p>a<span style="display:inline-flex">b</span>c</p>')).toEqual(['paragraph:abc']);
+    expect(read('<p>a<span style="display:flex">b</span>c</p>')).toEqual(['paragraph:a\nb\nc']);
+    expect(read('<p>a<span style="display:grid"><span>b</span>c</span>d</p>')).toEqual([
+      'paragraph:a\nb\nc\nd',
+    ]);
+    expect(read('<p>a<span style="display: inline grid">b</span>c</p>')).toEqual(['paragraph:abc']);
+  });
+
+  test('flex containers side by side, and an item read elsewhere', () => {
+    expect(
+      read('<p><span style="display:flex">a</span> <span style="display:flex">b</span></p>'),
+    ).toEqual(['paragraph:a\nb']);
+    expect(
+      read(
+        '<ul><li style="display:flex">a<a href="https://h.test/"><img src="https://x.test/i.png"></a>b</li></ul>',
+      ),
+    ).toEqual(['bulleted_list:a\nb', 'image:']);
+  });
+
+  // Not drawn even where a style preserves whitespace.
+  test('preserved whitespace between flex items is still not drawn', () => {
+    expect(read('<div style="display:flex; white-space:pre"><a>a</a> <a>b</a></div>')).toEqual([
+      'paragraph:a\nb',
+    ]);
+  });
+
+  // The declaration CSS would apply, not the first one written.
+  test('only a display that lays out items counts', () => {
+    expect(read('<div style="display:block"><a>a</a> <a>b</a></div>')).toEqual(['paragraph:a b']);
+    expect(read('<div style="display:flex; display: bogus">c<span>d</span></div>')).toEqual([
+      'paragraph:c\nd',
+    ]);
+    expect(
+      read('<div style="display:flex !important; display:block">c<span>d</span></div>'),
+    ).toEqual(['paragraph:c\nd']);
+    expect(read('<div style="display:grid; display:inline">c<span>d</span></div>')).toEqual([
+      'paragraph:cd',
+    ]);
+    expect(read('<div style="display: inline flex">c<span>d</span></div>')).toEqual([
+      'paragraph:c\nd',
+    ]);
+    expect(read('<div style="-webkit-display: flex">c<span>d</span></div>')).toEqual([
+      'paragraph:cd',
+    ]);
+  });
+});
