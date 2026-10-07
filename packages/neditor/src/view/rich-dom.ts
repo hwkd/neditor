@@ -691,17 +691,7 @@ function walk(
       } else if (/[ \t\n\r\f]/.test(subtreeText(element))) {
         // An inline one -- an image link -- keeps the space its whitespace
         // made in the sentence, or the words either side of it join.
-        // Only between two words: it is dropped once the walk is done if
-        // nothing follows it, or what follows starts with whitespace or a
-        // line break of its own.
-        const previous = out.at(-1)?.text ?? '';
-
-        if (previous !== '' && !/[ \t\n\r\f]/.test(previous[previous.length - 1]!)) {
-          const run = { text: ' ', marks: [...marks], link };
-
-          SKIPPED_SPACES.add(run);
-          out.push(run);
-        }
+        wordGap(out, marks, link);
       }
 
       continue;
@@ -713,9 +703,15 @@ function walk(
     // are adjacent, so they never double up; both wait for the text, so an
     // empty block after the last of it adds no line.
     const isBlock = startsLine(element);
+    // A block stacked inside an inline box -- a button's label, a KaTeX
+    // superscript -- is drawn apart from the text beside it without leaving
+    // the line: a word gap, not a line break.
+    const stacked = !isBlock && isStackedInBox(element);
 
     if (isBlock) {
       breakLine(out, marks, link, true);
+    } else if (stacked) {
+      wordGap(out, marks, link);
     }
 
     const { add, remove } = marksForElement(element);
@@ -751,7 +747,25 @@ function walk(
     // text.
     if (isBlock) {
       breakLine(out, marks, link, true);
+    } else if (stacked) {
+      wordGap(out, marks, link);
     }
+  }
+}
+
+/**
+ * A space between two words, where one is not already there: dropped once the
+ * walk is done if nothing follows it, or what follows starts with whitespace
+ * or a line break of its own.
+ */
+function wordGap(out: TextRun[], marks: Mark[], link: string | undefined): void {
+  const previous = out.at(-1)?.text ?? '';
+
+  if (previous !== '' && !/[ \t\n\r\f]/.test(previous[previous.length - 1]!)) {
+    const run = { text: ' ', marks: [...marks], link };
+
+    SKIPPED_SPACES.add(run);
+    out.push(run);
   }
 }
 
@@ -2942,12 +2956,14 @@ const DISPLAY_KEYWORDS = new Set([
 interface Display {
   /** Whether the element is a block in its parent's line, or sits in it. */
   outer: 'block' | 'inline' | null;
+  /** Whether it sits in its line as one box, whatever is inside it. */
+  box: boolean;
   /** Whether it lays its children out as flex or grid items. */
   items: boolean;
 }
 
 const DISPLAYS = new WeakMap<Node, Display>();
-const NO_DISPLAY: Display = { outer: null, items: false };
+const NO_DISPLAY: Display = { outer: null, box: false, items: false };
 const BLOCK_DISPLAYS = new Set(['block', 'list-item', 'flow-root', 'table', 'flex', 'grid']);
 const INLINE_DISPLAYS = new Set([
   'inline',
@@ -2987,6 +3003,11 @@ function displayOf(node: Node | null): Display {
         : keywords.some((keyword) => BLOCK_DISPLAYS.has(keyword))
           ? 'block'
           : null,
+      box:
+        inline &&
+        keywords.some((keyword) =>
+          /^(?:inline-)?(?:block|table|flex|grid|flow-root)$/.test(keyword),
+        ),
       items: keywords.some((keyword) => /^(?:inline-)?(?:flex|grid)$/.test(keyword)),
     };
     DISPLAYS.set(node, known);
@@ -3014,7 +3035,58 @@ function isItem(element: Element): boolean {
  * content (Wikipedia's `v t e`), and honouring it joined their words.
  */
 function startsLine(element: Element): boolean {
-  return breaksLine(tagNameOf(element)) || isItem(element) || displayOf(element).outer === 'block';
+  const tag = tagNameOf(element);
+
+  return (
+    breaksLine(tag) ||
+    isItem(element) ||
+    (tag !== 'BR' && displayOf(element).outer === 'block' && !inInlineBox(element))
+  );
+}
+
+/** A block by its declared display that `inInlineBox` keeps in its line. */
+function isStackedInBox(element: Element): boolean {
+  return (
+    tagNameOf(element) !== 'BR' && displayOf(element).outer === 'block' && inInlineBox(element)
+  );
+}
+
+const IN_INLINE_BOX = new WeakMap<Node, boolean>();
+
+/**
+ * Whether an element is inside an inline-block, inline-table or other inline
+ * box, with no line-starting element between: a block in there stacks inside
+ * the box, and the box sits in the line. KaTeX sets every superscript,
+ * subscript and fraction part as a `display: block` span inside an
+ * inline-table inside an inline-block, and reading those as lines broke
+ * every sentence holding a formula. Each ancestor's answer for its children
+ * is remembered, so a deep tree is climbed once.
+ */
+function inInlineBox(element: Element): boolean {
+  const chain: Node[] = [];
+  let found: boolean | undefined;
+  let at: Node | null = element.parentNode;
+
+  while (found === undefined) {
+    if (at === null || at.nodeType !== ELEMENT_NODE) {
+      found = false;
+    } else if (IN_INLINE_BOX.has(at)) {
+      found = IN_INLINE_BOX.get(at);
+    } else if (displayOf(at).box) {
+      found = true;
+    } else if (breaksLine(tagNameOf(at)) || isItem(at as Element)) {
+      found = false;
+    } else {
+      chain.push(at);
+      at = at.parentNode;
+    }
+  }
+
+  for (const node of chain) {
+    IN_INLINE_BOX.set(node, found === true);
+  }
+
+  return found === true;
 }
 
 const WHITE_SPACE_VALUES = new Map<string, WhiteSpace>([

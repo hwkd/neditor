@@ -2141,6 +2141,19 @@ describe('audit 28', () => {
     ).toBeLessThan(LINEAR);
   });
 
+  // Whether a block sits in an inline box is found by climbing, and the
+  // climb is remembered: a deep chain of them is climbed once.
+  test('deep blocks declared inside inline spans read in linear time', () => {
+    expect(
+      growth((size) => {
+        blocksFromHtml(
+          document,
+          `<pre>${'<span><span style="display:block">x</span><span>'.repeat(size)}${'</span></span>'.repeat(size)}</pre>`,
+        );
+      }, 150),
+    ).toBeLessThan(LINEAR);
+  });
+
   // Each text in a code grid finds its line by climbing, and the climb is
   // remembered: deep markup inside one line is climbed once, not per text.
   test('deep markup in a code grid reads in linear time', () => {

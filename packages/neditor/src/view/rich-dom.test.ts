@@ -3700,3 +3700,83 @@ describe('audit 50', () => {
     ]);
   });
 });
+
+describe('audit 51', () => {
+  const read = (html: string) =>
+    blocksFromHtml(document, html).map(
+      (block) => `${block.type}:${richToPlainText(block.content)}`,
+    );
+
+  // KaTeX sets a superscript in a zero-height `display: block` span inside
+  // an inline-table, inside an inline-block: drawn within the line, so the
+  // sentence is not broken (Chromium's copy, its hidden MathML left out).
+  // Drawn apart from the text beside it, it is a word of its own.
+  test('a block inside an inline-block or inline-table box stays in its line (KaTeX)', () => {
+    const katex =
+      '<p>The area is <span class="katex"><span class="katex-html" aria-hidden="true"><span class="base" style="position: relative; display: inline-block"><span class="strut" style="display: inline-block; height: 0.8141em"></span><span class="mord"><span class="mord">x</span><span class="msupsub"><span class="vlist-t" style="display: inline-table"><span class="vlist-r" style="display: table-row"><span class="vlist" style="display: table-cell; position: relative; vertical-align: bottom; height: 0.8141em"><span class="" style="display: block; height: 0px; position: relative; top: -3.063em"><span class="pstrut" style="display: inline-block; height: 2.7em"></span><span class="sizing" style="display: inline-block"><span class="mord">2</span></span></span></span></span></span></span></span></span></span></span> square units.</p>';
+
+    expect(read(katex)).toEqual(['paragraph:The area is x 2 square units.']);
+    expect(
+      read(
+        '<p>a<span style="display:inline-block"><span style="display:block">b</span></span>c</p>',
+      ),
+    ).toEqual(['paragraph:a b c']);
+    expect(
+      read(
+        '<p>a <span style="display:inline-block"><span style="display:block">b</span></span> c</p>',
+      ),
+    ).toEqual(['paragraph:a b c']);
+    // Slack's feedback buttons: two inline-blocks, a block label in each.
+    expect(
+      read(
+        '<p><a role="button" title="Yes, thanks!" style="display: inline-block"><span style="display: block">Yes, thanks!</span></a><a role="button" title="Not really" style="display: inline-block"><span style="display: block">Not really</span></a></p>',
+      ),
+    ).toEqual(['paragraph:Yes, thanks! Not really']);
+    // Code keeps its spaces as written: stacked in a box, the text joins.
+    expect(
+      read(
+        '<pre>s<span style="display:inline-block"><span style="display:block">t</span></span>u</pre>',
+      ),
+    ).toEqual(['code:stu']);
+    expect(
+      read(
+        '<p>a<span style="display:inline-table"><span style="display:block">b</span></span>c</p>',
+      ),
+    ).toEqual(['paragraph:a b c']);
+    // A block between them starts its own lines, inside the box or not.
+    expect(
+      read(
+        '<p>a<span style="display:inline-block"><div>x<span style="display:block">y</span>z</div></span>b</p>',
+      )[0],
+    ).toContain('x\ny\nz');
+    // A plain inline span is no box: a block inside it breaks the line.
+    expect(read('<p>a<span><span style="display:block">b</span></span>c</p>')).toEqual([
+      'paragraph:a\nb\nc',
+    ]);
+  });
+
+  test('a <br> declared a block is still one line break', () => {
+    expect(
+      read('<pre>alpha<br style="display: block">beta<br style="display: block">gamma</pre>'),
+    ).toEqual(['code:alpha\nbeta\ngamma']);
+    expect(read('<p>alpha<br style="display: block">beta</p>')).toEqual(['paragraph:alpha\nbeta']);
+  });
+
+  test('every block-level and inline-level display value', () => {
+    expect(read('<p>a<span style="display:table">b</span>c</p>')).toEqual(['paragraph:a\nb\nc']);
+    expect(read('<p>a<span style="display:flow-root">b</span>c</p>')).toEqual([
+      'paragraph:a\nb\nc',
+    ]);
+    for (const display of ['inline-flex', 'inline-grid', 'inline-table', 'inline-list-item']) {
+      expect(read(`<pre>s.<div style="display:${display}">create</div>()</pre>`)).toEqual([
+        'code:s.create()',
+      ]);
+    }
+  });
+
+  test('whitespace between spans declared blocks is not a line', () => {
+    expect(
+      read('<p><span style="display:block">a</span> <span style="display:block">b</span></p>'),
+    ).toEqual(['paragraph:a\nb']);
+  });
+});
