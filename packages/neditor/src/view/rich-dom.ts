@@ -1206,6 +1206,43 @@ function firstImage(element: Element): Element | null {
   return firstDescendant(element, (candidate) => tagNameOf(candidate) === 'IMG', IMAGE_DESCENDANTS);
 }
 
+/**
+ * A `<figure>`'s caption: its first `<figcaption>` child, which may come
+ * before the picture. A second one is content, not the figure's caption.
+ */
+function ownCaption(figure: Element): Element | undefined {
+  return [...figure.children].find((child) => tagNameOf(child) === 'FIGCAPTION');
+}
+
+/**
+ * The image an element shows: itself, or for a `<figure>` the first image
+ * outside its own caption -- an image in the caption, a flag icon, belongs to
+ * the caption and is handed on after the figure -- or any other's first.
+ */
+function pictureOf(element: Element): Element | null {
+  const tag = tagNameOf(element);
+
+  if (tag === 'IMG') {
+    return element;
+  }
+
+  if (tag !== 'FIGURE') {
+    return firstImage(element);
+  }
+
+  const caption = ownCaption(element);
+
+  for (const child of element.children) {
+    const found = child === caption ? null : tagNameOf(child) === 'IMG' ? child : firstImage(child);
+
+    if (found) {
+      return found;
+    }
+  }
+
+  return null;
+}
+
 function containsImage(element: Element): boolean {
   return firstImage(element) !== null;
 }
@@ -1219,7 +1256,7 @@ function containsImage(element: Element): boolean {
  * else. Sealing on the weaker question sealed a subtree that does get split.
  */
 function hasUsableImage(element: Element): boolean {
-  const image = tagNameOf(element) === 'IMG' ? element : firstImage(element);
+  const image = pictureOf(element);
 
   return sanitizeImageUrl(image?.getAttribute('src') ?? '') !== null;
 }
@@ -2052,7 +2089,7 @@ function pushImage(out: Block[], element: Element, depth: number): boolean {
   // The remembered answer, not a fresh query: a `<figure>` with nothing usable
   // in it is asked this again for every wrapper the visitor descends through on
   // its way down, and a query walks the whole subtree each time.
-  const image = tagNameOf(element) === 'IMG' ? element : firstImage(element);
+  const image = pictureOf(element);
   const src = sanitizeImageUrl(image?.getAttribute('src') ?? '');
 
   // Our own empty image block (see blocksToHtml) -- only ours: a foreign
@@ -2067,7 +2104,7 @@ function pushImage(out: Block[], element: Element, depth: number): boolean {
   }
 
   // Its own caption: a figure nested in it has its own.
-  const caption = [...element.children].find((child) => tagNameOf(child) === 'FIGCAPTION');
+  const caption = ownCaption(element);
   const block = createBlock(
     'image',
     caption ? parseRichText(caption) : [],
@@ -2151,7 +2188,7 @@ function textImages(root: Element, skip: SkipPredicate): Element[] {
 }
 
 /**
- * Whether a `<figure>` is one picture: its own caption aside, it holds a
+ * Whether a `<figure>` is one picture: its own (first) caption aside, it holds a
  * single usable image -- bare, linked, in a `<picture>` -- and no text. Only
  * then is it read as an image block; any other figure is read block by block.
  * Our own image blocks are written this way, and so is every image figure
@@ -2163,14 +2200,10 @@ function isImageFigure(figure: Element): boolean {
   }
 
   let images = 0;
+  const caption = ownCaption(figure);
   const walker = figure.ownerDocument.createTreeWalker(figure, SHOW_TEXT | SHOW_ELEMENT, {
-    acceptNode: (candidate) => {
-      const tag = tagNameOf(candidate);
-
-      return SKIP_TAGS.has(tag) || (tag === 'FIGCAPTION' && candidate.parentNode === figure)
-        ? FILTER_REJECT
-        : FILTER_ACCEPT;
-    },
+    acceptNode: (candidate) =>
+      SKIP_TAGS.has(tagNameOf(candidate)) || candidate === caption ? FILTER_REJECT : FILTER_ACCEPT,
   });
 
   // Left at the first text or the second image, either of which settles it.

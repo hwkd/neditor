@@ -3268,3 +3268,63 @@ describe('audit 45', () => {
     ).toEqual(['paragraph:Prices ', '[img c.png]', 'table:']);
   });
 });
+
+describe('audit 46', () => {
+  const show = (html: string) =>
+    blocksFromHtml(document, html).map(
+      (block) =>
+        `${block.type === 'image' ? `[img ${block.src?.split('/').pop()}]` : block.type}@${block.depth}:${richToPlainText(block.content)}`,
+    );
+
+  // A caption may come first. The figure's picture is the image outside its
+  // caption -- the one `isImageFigure` counted -- and the caption's own image
+  // is handed on after it, once.
+  test('a caption before the image does not lend the figure its image', () => {
+    expect(
+      show(
+        '<figure><figcaption>Flag of <img src="https://x.test/flag.png" alt="FR"> France</figcaption><img src="https://x.test/map.png" alt="Map"></figure>',
+      ),
+    ).toEqual(['[img map.png]@0:Flag of  France', '[img flag.png]@0:']);
+    expect(
+      blocksFromHtml(
+        document,
+        '<figure><figcaption>Cap <img src="https://x.test/flag.png" alt="FR"></figcaption><img src="https://x.test/map.png" alt="Map"></figure>',
+      )[0]?.alt,
+    ).toBe('Map');
+  });
+
+  test('a caption before the image, as a list item block', () => {
+    expect(
+      show(
+        '<ul><li>Item<figure><figcaption>Cap <img src="https://x.test/flag.png"></figcaption><img src="https://x.test/map.png"></figure></li></ul>',
+      ),
+    ).toEqual(['bulleted_list@0:Item', '[img map.png]@1:Cap ', '[img flag.png]@1:']);
+  });
+
+  // A caption's images are handed on at the depth of what they sat in.
+  test('caption images keep the depth of their figure or table', () => {
+    expect(
+      show(
+        '<ul><li>Item<figure><img src="https://x.test/m.png"><figcaption>Cap <img src="https://x.test/f.png"></figcaption></figure></li></ul>',
+      ),
+    ).toEqual(['bulleted_list@0:Item', '[img m.png]@1:Cap ', '[img f.png]@1:']);
+    expect(
+      show(
+        '<ul><li>Item<table><caption>Cap <img src="https://x.test/c.png"></caption><tr><td>x</td></tr></table></li></ul>',
+      ),
+    ).toEqual(['bulleted_list@0:Item', 'paragraph@1:Cap ', '[img c.png]@1:', 'table@1:']);
+  });
+
+  // Only the first caption is the figure's; a second one is content, so the
+  // figure is read block by block rather than losing it.
+  test('a second caption is not dropped', () => {
+    const out = show(
+      '<figure><img src="https://x.test/a.png"><figcaption>One</figcaption><figcaption>Two <img src="https://x.test/b.png"></figcaption></figure>',
+    );
+
+    expect(out.join('|')).toContain('One');
+    expect(out.join('|')).toContain('Two');
+    expect(out).toContain('[img a.png]@0:');
+    expect(out).toContain('[img b.png]@0:');
+  });
+});
