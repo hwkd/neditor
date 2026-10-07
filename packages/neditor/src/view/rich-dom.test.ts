@@ -3591,3 +3591,112 @@ describe('audit 49', () => {
     ]);
   });
 });
+
+describe('audit 50', () => {
+  const read = (html: string) =>
+    blocksFromHtml(document, html).map(
+      (block) => `${block.type}:${richToPlainText(block.content)}`,
+    );
+
+  // Stripe wraps a linked API parameter in a <div> Chromium copies as
+  // `display: inline`: drawn on one line, so not a line of its own.
+  test('an inline-displayed block in a code block stays on its line (Stripe)', () => {
+    expect(
+      read(
+        '<pre><code>s.<span style="display:inline-block"><div style="display:inline">create</div></span>({ a })</code></pre>',
+      ),
+    ).toEqual(['code:s.create({ a })']);
+    expect(read('<pre>s.<div style="display:inline-block">create</div>()</pre>')).toEqual([
+      'code:s.create()',
+    ]);
+    // A flex item is a line whatever its own display says.
+    expect(
+      read(
+        '<pre><code style="display:grid"><div style="display:inline">a</div><div style="display:inline">b</div></code></pre>',
+      ),
+    ).toEqual(['code:a\nb']);
+  });
+
+  // Tailwind's code blocks: a flex <pre>, and a `display: block` span per line.
+  test('a span displayed as a block is a line (tailwindcss.com, Chromium)', () => {
+    expect(
+      read(
+        '<pre tabindex="0" style="display: flex"><code><span style="display: block"><span>npm</span><span> create</span><span> vite@latest</span><span> my-project</span></span><span style="display: block"><span>cd</span><span> my-project</span></span></code></pre>',
+      ),
+    ).toEqual(['code:npm create vite@latest my-project\ncd my-project']);
+  });
+
+  // Mintlify writes each paragraph as a `display: block` span.
+  test('spans displayed as blocks do not run together (Mintlify)', () => {
+    expect(
+      read(
+        '<span style="display: block">Every page has a file in your <button type="button"><span>repository</span></button>.</span><span style="display: block">When you connect it, you can sync.</span>',
+      ),
+    ).toEqual([
+      'paragraph:Every page has a file in your repository.\nWhen you connect it, you can sync.',
+    ]);
+    expect(read('<p>a<span style="display: list-item">b</span>c</p>')).toEqual([
+      'paragraph:a\nb\nc',
+    ]);
+    expect(read('<p>a<span style="display: inline-block">b</span>c</p>')).toEqual([
+      'paragraph:abc',
+    ]);
+  });
+
+  // A link around a flex container hands its href to each item, not to one
+  // shell around all of them, which took the items out of their container.
+  test('a link around a flex container keeps its items apart (nextjs.org)', () => {
+    const blocks = blocksFromHtml(
+      document,
+      '<div style="display: flex"><a href="https://twitter.com/delba_oliveira" style="display: flex"><img alt="Delba" src="https://x.test/d.jpg"><div style="display: flex; flex-direction: column"><span>Delba de Oliveira</span><span>@delba_oliveira</span></div></a></div>',
+    );
+    const text = blocks.find((block) => block.type === 'paragraph');
+
+    expect(richToPlainText(text?.content ?? [])).toBe('Delba de Oliveira\n@delba_oliveira');
+    expect(
+      text?.content.every(
+        (run) => run.text === '\n' || run.link === 'https://twitter.com/delba_oliveira',
+      ),
+    ).toBe(true);
+    expect(
+      read(
+        '<a href="https://x.test/"><div style="display:flex"><span>Alpha</span> <span>Beta</span></div></a>',
+      ),
+    ).toEqual(['paragraph:Alpha\nBeta']);
+    expect(
+      read(
+        '<a href="https://x.test/"><div style="display:flex; white-space:pre"><span>Alpha</span> <span>Beta</span></div></a>',
+      ),
+    ).toEqual(['paragraph:Alpha\nBeta']);
+  });
+
+  // A <br> in a flex container ends a line; it is not an item of its own.
+  test('a <br> directly in a flex container is one line break', () => {
+    expect(read('<div style="display:flex">123 Main St<br>Springfield</div>')).toEqual([
+      'paragraph:123 Main St\nSpringfield',
+    ]);
+  });
+
+  // The newline that ends a <pre>'s last line draws no line of its own.
+  test("a code block's final newline is no blank line", () => {
+    expect(read('<pre><code>img {\n  width: 320px;\n}\n</code></pre>')).toEqual([
+      'code:img {\n  width: 320px;\n}',
+    ]);
+    expect(read('<pre><div>a</div>\n</pre>')).toEqual(['code:a\n']);
+    expect(read('<pre>a<br>\n</pre>')).toEqual(['code:a\n']);
+    expect(read('<pre>a\n\n</pre>')).toEqual(['code:a\n']);
+  });
+
+  test('inline-grid, inheriting and invalid display values', () => {
+    expect(read('<p>a<span style="display:inline-grid"><i>b</i></span>c</p>')).toEqual([
+      'paragraph:a\nb\nc',
+    ]);
+    expect(read('<p>a<span style="display:inline-grid">b</span>c</p>')).toEqual(['paragraph:abc']);
+    expect(read('<div style="display:flex; display: inherit">c<span>d</span></div>')).toEqual([
+      'paragraph:cd',
+    ]);
+    expect(read('<div style="display: flex bogus">c<span>d</span></div>')).toEqual([
+      'paragraph:cd',
+    ]);
+  });
+});

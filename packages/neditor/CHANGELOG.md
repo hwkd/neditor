@@ -244,15 +244,21 @@ that changes what you store or what other applications receive is listed first.
   paste (on `main` too). A relative `srcset` candidate is passed over: a
   browser resolves `src` when it copies but not `srcset`, and the reader
   has no base URL to resolve one against.
-- HTML clipboard (also on earlier versions): a flex or grid layout reads as
-  the browser draws it. Chromium writes a container's `display` inline and
-  drops the whitespace between its items, so a Shiki code block (nextjs.org,
-  shadcn) read as one line and a flex row's links ran together
-  (`HomeBrowse`); each element item is now a line of its own, a `flex` or
-  `grid` container is a block whatever its tag, and an `inline-flex` one
-  stays in its sentence. Inside a code block a `<div>` per line and a `<br>`
-  now start lines too (a trailing `<br>` is the line's filler), and a
-  newline beside a block is the blank line Chromium draws.
+- HTML clipboard (also on earlier versions): an inline `display` is read.
+  Chromium writes it when it copies and drops the whitespace it does not
+  draw, so a Shiki code block (nextjs.org, shadcn) read as one line, a flex
+  row's links ran together (`HomeBrowse`), and Tailwind's code lines and
+  Mintlify's paragraphs (`display: block` spans) joined. Each element item
+  of a flex or grid container is now a line of its own, as both browsers'
+  `innerText` read it -- including in an `inline-flex` container, whose
+  items break the sentence it stays in (a component that splits one word
+  across items, as GitLab's file-name truncation does, reads split) -- and
+  a span declared a block is one; a link or other formatting around a
+  container reaches each item. Inside a code block a `<div>` per line and a
+  `<br>` now start lines too (a trailing `<br>` is the line's filler), an
+  element declared inline stays in its line (Stripe's linked parameters), a
+  newline beside a block is the blank line Chromium draws, and the newline
+  that ends the last line draws none.
 - HTML clipboard (also on earlier versions): a table nested in a table cell
   is read as that cell's text instead of being dropped with it, so an HTML
   email laid out in nested tables keeps its content; a list inside a wrapper

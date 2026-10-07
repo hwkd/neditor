@@ -522,6 +522,10 @@ function subtreeText(node: Node): string {
  * end, is that line's filler, as `parseRichText` reads one.
  */
 function codeText(root: Element): string {
+  // Inside code, a block that declares itself inline is drawn in its line:
+  // Stripe wraps each linked API parameter in a `display: inline` <div>.
+  const isCodeLine = (element: Element): boolean =>
+    startsLine(element) && (isItem(element) || displayOf(element).outer !== 'inline');
   const lineOf = new Map<Node, Node | null>();
   const findLine = (node: Node): Node | null => {
     const chain: Node[] = [];
@@ -534,7 +538,7 @@ function codeText(root: Element): string {
         found = null;
       } else if (lineOf.has(at)) {
         found = lineOf.get(at);
-      } else if (at.nodeType === ELEMENT_NODE && startsLine(at as Element)) {
+      } else if (at.nodeType === ELEMENT_NODE && isCodeLine(at as Element)) {
         found = at;
       } else {
         chain.push(at);
@@ -604,8 +608,13 @@ function codeText(root: Element): string {
     open = !text.endsWith('\n');
   }
 
-  // The last `<br>` of all is the filler of the line it ends.
-  return text + '\n'.repeat(Math.max(0, breaks - 1));
+  // The last `<br>` of all is the filler of the line it ends; with none, the
+  // last newline ends the last line and draws none of its own.
+  if (breaks > 0) {
+    return text + '\n'.repeat(breaks - 1);
+  }
+
+  return text.endsWith('\n') ? text.slice(0, -1) : text;
 }
 
 function walk(
@@ -1946,6 +1955,15 @@ function distributeFormatting(
       continue;
     }
 
+    // A flex or grid item takes a copy of its own: one copy around them all
+    // took them out of their container, and they ran together.
+    if (element && isItem(element)) {
+      wrapRun(false);
+      run.push(child);
+      wrapRun(false);
+      continue;
+    }
+
     run.push(child);
   }
 
@@ -2921,60 +2939,82 @@ const DISPLAY_KEYWORDS = new Set([
   ...INHERITING_KEYWORDS,
 ]);
 
-const LAYOUTS = new WeakMap<Node, 'block' | 'inline' | null>();
+interface Display {
+  /** Whether the element is a block in its parent's line, or sits in it. */
+  outer: 'block' | 'inline' | null;
+  /** Whether it lays its children out as flex or grid items. */
+  items: boolean;
+}
+
+const DISPLAYS = new WeakMap<Node, Display>();
+const NO_DISPLAY: Display = { outer: null, items: false };
+const BLOCK_DISPLAYS = new Set(['block', 'list-item', 'flow-root', 'table', 'flex', 'grid']);
+const INLINE_DISPLAYS = new Set([
+  'inline',
+  'inline-block',
+  'inline-table',
+  'inline-flex',
+  'inline-grid',
+  'inline-list-item',
+]);
 
 /**
- * Whether a node's own inline `style` lays its children out as flex or grid
- * items, and whether the container itself is then a block (`flex`, `grid`)
- * or sits in its line (`inline-flex`, `inline-grid`). Chromium writes a
- * container's `display` inline when it copies, and leaves out the
- * whitespace between its items, which is not drawn: read by tag alone, a
- * Shiki code block (a grid of line spans) came out as one line, and a flex
- * row's links ran together. Remembered per element: a container with many
- * items is asked once per item.
+ * What an element's own inline `style` says of its `display`. Chromium writes
+ * it inline when it copies, and with it drops whitespace it does not draw --
+ * between flex or grid items, and around blocks -- so read by tag alone a
+ * Shiki code block (a grid of line spans) came out as one line, a flex row's
+ * links ran together, and Mintlify's paragraphs (`display: block` spans)
+ * joined. Remembered per element: a container with many items is asked once
+ * per item.
  */
-function itemLayout(node: Node | null): 'block' | 'inline' | null {
+function displayOf(node: Node | null): Display {
   if (node === null || node.nodeType !== ELEMENT_NODE) {
-    return null;
+    return NO_DISPLAY;
   }
 
-  let known = LAYOUTS.get(node);
+  let known = DISPLAYS.get(node);
 
   if (known === undefined) {
     const value = declaredValue(node as Element, 'display', (candidate) =>
       candidate.split(/[ \t\n\r\f]+/).every((keyword) => DISPLAY_KEYWORDS.has(keyword)),
     );
     const keywords = value?.split(/[ \t\n\r\f]+/) ?? [];
+    const inline = keywords.some((keyword) => INLINE_DISPLAYS.has(keyword));
 
-    known = keywords.some((keyword) => keyword === 'inline-flex' || keyword === 'inline-grid')
-      ? 'inline'
-      : keywords.some((keyword) => keyword === 'flex' || keyword === 'grid')
-        ? keywords.includes('inline')
-          ? 'inline'
-          : 'block'
-        : null;
-    LAYOUTS.set(node, known);
+    known = {
+      outer: inline
+        ? 'inline'
+        : keywords.some((keyword) => BLOCK_DISPLAYS.has(keyword))
+          ? 'block'
+          : null,
+      items: keywords.some((keyword) => /^(?:inline-)?(?:flex|grid)$/.test(keyword)),
+    };
+    DISPLAYS.set(node, known);
   }
 
   return known;
 }
 
 function laysOutItems(node: Node | null): boolean {
-  return itemLayout(node) !== null;
+  return displayOf(node).items;
+}
+
+/** An element its container lays out as a flex or grid item: a block. */
+function isItem(element: Element): boolean {
+  return tagNameOf(element) !== 'BR' && laysOutItems(element.parentNode);
 }
 
 /**
  * Whether an element starts and ends a line: a block by its tag
- * (`breaksLine`), a flex or grid container that is not inline, or an item of
- * one -- each element item is a block, as `innerText` reads it in both
+ * (`breaksLine`) or by its declared `display`, or an item of a flex or grid
+ * container -- each element item is a block, as `innerText` reads it in both
  * browsers. Loose text in a container is not: it stays on the line beside it.
+ * A declared inline display does not take a block tag back into its line
+ * here: copied pages write it on blocks whose separators were generated
+ * content (Wikipedia's `v t e`), and honouring it joined their words.
  */
 function startsLine(element: Element): boolean {
-  return (
-    breaksLine(tagNameOf(element)) ||
-    laysOutItems(element.parentNode) ||
-    itemLayout(element) === 'block'
-  );
+  return breaksLine(tagNameOf(element)) || isItem(element) || displayOf(element).outer === 'block';
 }
 
 const WHITE_SPACE_VALUES = new Map<string, WhiteSpace>([
@@ -3303,7 +3343,7 @@ function visitBlocksInner(
         copy = holder;
       }
 
-      if (item && inline.nodeType === ELEMENT_NODE) {
+      if (inline.nodeType === ELEMENT_NODE && isItem(inline as Element)) {
         const block = doc.createElement('div');
 
         block.append(copy);
