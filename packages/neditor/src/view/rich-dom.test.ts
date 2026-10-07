@@ -3895,6 +3895,44 @@ describe('audit 53', () => {
     ).toEqual(['code:call(arg, x)']);
   });
 
+  // A <pre> declared inline-block is still the root its lines are read
+  // from (Chromium's copy of a page styling `pre { display: inline-block }`).
+  test('a code block declared inline-block keeps its lines', () => {
+    expect(
+      read(
+        '<pre style="display: inline-block"><code><span style="display: block">a = 1</span><span style="display: block">b = 2</span></code></pre>',
+      ),
+    ).toEqual(['code:a = 1\nb = 2']);
+  });
+
+  // Taking a tentative gap back leaves the memo of the last solid run
+  // pointing where it did: a blank line no browser draws came of it.
+  test('a gap taken back moves nothing else', () => {
+    expect(
+      read(
+        '<span style="display:table-cell">a</span><span style="display:table-cell"><span style="display:flex"><span></span></span></span> <span style="display:flex"><span>y</span></span>',
+      ),
+    ).toEqual(['paragraph:a\ny']);
+    // Both the last solid run and how far the memo has looked move.
+    expect(
+      read(
+        '<span style="display:table-cell">a</span><span style="display:table-cell"><span style="display:flex"><span></span></span></span>y<span style="display:flex"><span>z</span></span>',
+      ),
+    ).toEqual(['paragraph:a\ny\nz']);
+    // A cell that pushes no gap -- after a space, or holding only a line
+    // break or a zero-width space -- keeps all it holds.
+    expect(
+      read(
+        '<p><span style="display:table-cell">a </span><span style="display:table-cell"><br></span>b</p>',
+      ),
+    ).toEqual(['paragraph:a \nb']);
+    expect(
+      read(
+        '<p><span style="display:table-cell">a </span><span style="display:table-cell">\u200b</span>b</p>',
+      ),
+    ).toEqual(['paragraph:a \u200bb']);
+  });
+
   // MediaWiki's table of contents: number and title are table cells, and
   // Chromium drops the space between them.
   test('adjacent table cells holding text are words apart (Wikipedia contents)', () => {

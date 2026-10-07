@@ -773,6 +773,18 @@ function walk(
       // Nothing drawn: the gap goes, and an armed neighbour stays armed.
       if (gapAt !== -1) {
         out.splice(gapAt, 1);
+
+        // `lastSolidRun` remembers indices into `out`: those past the gap
+        // moved down one. The gap itself was never solid.
+        const memo = SOLID_RUNS.get(out);
+
+        if (memo && memo.checked > gapAt) {
+          memo.checked -= 1;
+        }
+
+        if (memo && memo.solid > gapAt) {
+          memo.solid -= 1;
+        }
       }
 
       if (armed) {
@@ -3116,7 +3128,10 @@ function inInlineBox(element: Element, code: boolean): boolean {
     } else if (memo.has(at)) {
       found = memo.get(at);
     } else if (
-      (breaksLine(tagNameOf(at)) && !(code && displayOf(at).outer === 'inline')) ||
+      // The code block's own <pre> is a stop whatever it declares: it is
+      // the root the lines are read from, not a box inside them.
+      (breaksLine(tagNameOf(at)) &&
+        !(code && tagNameOf(at) !== 'PRE' && displayOf(at).outer === 'inline')) ||
       isItem(at as Element)
     ) {
       // Outside code a block tag is a block here whatever it declares: what
