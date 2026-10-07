@@ -85,6 +85,12 @@ describe('sanitizeImageUrl', () => {
     );
   });
 
+  test('line-wrapped base64 is accepted and unwrapped', () => {
+    expect(sanitizeImageUrl('data:image/png;base64,iVBORw0KGgo\n AAAA')).toBe(
+      'data:image/png;base64,iVBORw0KGgoAAAA',
+    );
+  });
+
   test('refuses SVG data, which can carry script', () => {
     // Inert inside an <img>, but the same string in an <object> or a new tab
     // is not — so it never enters the model.

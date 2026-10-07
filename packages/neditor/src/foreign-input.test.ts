@@ -510,3 +510,143 @@ describe('a drop that carries nothing', () => {
     ).toContain('X');
   });
 });
+
+describe('typing a line and pasting it give the same result', () => {
+  /**
+   * The README's promise: inline parsing replays the rules typing uses, so the
+   * two cannot diverge. It is measured here the way it is used -- a character
+   * at a time into a live editor, against parseInlineMarkdown -- because a
+   * parse-only assertion held while an opaque-span projection in the reader
+   * (since removed) made 1% of random lines come out differently.
+   */
+  function typeCharByChar(host: HTMLElement, text: string): void {
+    for (const char of text) {
+      // Appended at the end, as a browser does after a rule has fired (the
+      // editor arms an empty mark set there, so what follows is plain).
+      host.append(document.createTextNode(char));
+      host.focus();
+      getSelection()?.collapse(host.lastChild, 1);
+      host.dispatchEvent(
+        new InputEvent('input', { inputType: 'insertText', data: char, bubbles: true }),
+      );
+    }
+  }
+
+  test.each([
+    'a **b** c',
+    '`x` and *y*',
+    '**a**_b_',
+    '`x`_y_',
+    '`a *b` c*',
+    '**a _b**_',
+    '<u>a *b</u> c*',
+    '[x](https://a.test/_y_)',
+    'a `](` b',
+    'see [a](<b and *y*',
+    'a<strong>b </strong>c',
+    '<em> i</em> and <s>x </s>',
+    'a<code> c </code>b',
+    // Pre-existing: typing toggled a mark the text already had, so a doubled
+    // mark came out plain when typed and marked when pasted.
+    '**__a__**',
+    '<s><s>x</s></s>',
+    '~~<s>a</s>~~',
+    'one *two\nthree* four',
+    // No `_` inside a bare URL is a delimiter, typed or pasted.
+    'see https://a.test/_y_ and _z_',
+    '_a https://a.test/x_y',
+    'www.a.test/__init__ __b__',
+    // An autolink is read as the URL it holds, typed or pasted.
+    'see <https://a.test/x_y> and *z*',
+    '<https://a.test/*x*>',
+    '[a](<https://a.test/x>)',
+  ])('%s', async (line) => {
+    const { parseInlineMarkdown } = await import('./index.ts');
+    const editor = mount([block({})]);
+    const host = hosts(editor)[0]!;
+
+    typeCharByChar(host, line);
+
+    expect(editor.getDocument().blocks[0]!.content).toEqual(parseInlineMarkdown(line));
+  });
+
+  // Parity alone cannot pin this: typing and pasting share `matchInlineRule`, so
+  // they agree with the rule or without it. These say what both must produce.
+  test.each([
+    // Opened inside the URL: not a span. Typing a URL used to eat these.
+    ['https://a.test/_y_', [{ text: 'https://a.test/_y_' }]],
+    ['www.a.test/__init__', [{ text: 'www.a.test/__init__' }]],
+    ['(https://a.test/_y_)', [{ text: '(https://a.test/_y_)' }]],
+    // A protocol URL is linked after punctuation too, quoted or not.
+    ['"https://a.test/__init__.py"', [{ text: '"https://a.test/__init__.py"' }]],
+    ['see:https://a.test/_y_', [{ text: 'see:https://a.test/_y_' }]],
+    ['a=https://a.test/__init__', [{ text: 'a=https://a.test/__init__' }]],
+    ["'https://a.test/_y_'", [{ text: "'https://a.test/_y_'" }]],
+    // And whatever its case.
+    ['HTTPS://a.test/_y_', [{ text: 'HTTPS://a.test/_y_' }]],
+    ['WWW.a.test/_y_', [{ text: 'WWW.a.test/_y_' }]],
+    // Opened before it: a span, as in CommonMark and GFM, which leaves a
+    // trailing `_` out of the link.
+    ['_see https://example.com_', [{ text: 'see https://example.com', marks: ['italic'] }]],
+    ['__see www.example.com__', [{ text: 'see www.example.com', marks: ['bold'] }]],
+    ['_https://a.test/x_', [{ text: 'https://a.test/x', marks: ['italic'] }]],
+    [
+      '(_https://a.test/x_)',
+      [{ text: '(' }, { text: 'https://a.test/x', marks: ['italic'] }, { text: ')' }],
+    ],
+    // `www.` in the middle of a word opens no URL.
+    ['_awww.cute_', [{ text: 'awww.cute', marks: ['italic'] }]],
+    ['awww._x_', [{ text: 'awww.' }, { text: 'x', marks: ['italic'] }]],
+    // micromark links `www.` after `]` as well.
+    ['[1]www.a.test/_y_', [{ text: '[1]www.a.test/_y_' }]],
+    // A protocol counts whatever precedes it. After a letter no reader links
+    // it, but a finished span leaves one there: `**see**https://…` is
+    // `seehttps://…` by the time the `_` closes, and GFM links that URL.
+    ['xhttps://a.test/_y_', [{ text: 'xhttps://a.test/_y_' }]],
+    ['1http://a.test/_y_', [{ text: '1http://a.test/_y_' }]],
+    [
+      '**see**https://a.test/_y_',
+      [{ text: 'see', marks: ['bold'] }, { text: 'https://a.test/_y_' }],
+    ],
+    // The span opens in the URL and closes after whitespace: it is the token
+    // the opener is in that decides, not the one the caret is in.
+    [
+      'GET http://localhost:9200/_cat/indices and http://localhost:9200/my_index/_search',
+      [
+        {
+          text: 'GET http://localhost:9200/_cat/indices and http://localhost:9200/my_index/_search',
+        },
+      ],
+    ],
+    ['https://a.test/_x and y_', [{ text: 'https://a.test/_x and y_' }]],
+    ['https://a.test/__x and y__', [{ text: 'https://a.test/__x and y__' }]],
+    // Where the line is uncertain it falls on the side of the URL. A host may
+    // begin with `_` (`_dmarc.example.com`), and at the closing `_` nothing
+    // says whether more host follows; a link labelled with its own URL is the
+    // common label. Keeping underscores other readers would have taken for
+    // emphasis loses nothing; taking them out of a URL does.
+    ['https://_dmarc.example.com/a_b_c', [{ text: 'https://_dmarc.example.com/a_b_c' }]],
+    ['see http://_a_ now', [{ text: 'see http://_a_ now' }]],
+    ['www._a_.example.com', [{ text: 'www._a_.example.com' }]],
+    [
+      '[https://a.test/_private_dir](https://a.test/)',
+      [{ text: 'https://a.test/_private_dir', link: 'https://a.test/' }],
+    ],
+    [
+      '[https://a.test/__init__](https://a.test/)',
+      [{ text: 'https://a.test/__init__', link: 'https://a.test/' }],
+    ],
+    [
+      '[www.a.test/__init__](https://a.test/)',
+      [{ text: 'www.a.test/__init__', link: 'https://a.test/' }],
+    ],
+  ])('a `_` span and a bare URL: %s', async (line, content) => {
+    const { parseInlineMarkdown } = await import('./index.ts');
+    const editor = mount([block({})]);
+
+    typeCharByChar(hosts(editor)[0]!, line);
+
+    expect(editor.getDocument().blocks[0]!.content).toEqual(content);
+    expect(parseInlineMarkdown(line)).toEqual(content);
+  });
+});

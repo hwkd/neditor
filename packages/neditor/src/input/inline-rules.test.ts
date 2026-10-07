@@ -109,8 +109,13 @@ describe('inline markdown rules', () => {
     expect(match?.end).toBe(prefix.length + 6);
   });
 
-  test('a delimiter spanning a newline does not fire', () => {
-    expect(matchInlineRule('*a\nb*')).toBe(null);
+  // A span may cross a soft break, as in CommonMark: the writer keeps a marked
+  // run with a line break in it whole, so the break keeps its mark (B11). A
+  // delimiter against the break itself is still against whitespace.
+  test('a span may cross a soft break, but not open or close against one', () => {
+    expect(matchInlineRule('*a\nb*')?.mark).toBe('italic');
+    expect(matchInlineRule('*a\n*')).toBe(null);
+    expect(matchInlineRule('*\nb*')).toBe(null);
   });
 
   describe('links', () => {
@@ -260,4 +265,38 @@ describe('emphasis needs a delimiter that can actually open or close', () => {
 
     expect(runs.some((run) => (run.marks ?? []).includes('code'))).toBe(true);
   });
+});
+
+// The placeholder is the Markdown reader's. In typed text a NUL is a NUL: it is
+// not stood in for, so a link is never made to a host the text does not hold.
+test("a NUL in typed text is not read as the reader's placeholder", () => {
+  const nul = String.fromCharCode(0);
+  expect(matchInlineRule(`[x](https://bank${nul}.test/)`)).toBeNull();
+  expect(
+    matchInlineRule(`[x](https://bank${nul}.test/)`, { projection: true })?.link,
+  ).toBeDefined();
+});
+
+// Typing reads the block's literal text, which can hold backticks a paste
+// brought in escaped -- so the run pairing is pinned here, where it is
+// reachable, rather than through the parser, which pairs a doubled run one
+// backtick at a time before an autolink can see it.
+describe('an autolink inside a code span left open', () => {
+  test.each([
+    // A single backtick does not close a double run.
+    ['``a` <https://a.test/>', false],
+    ['``a`` <https://a.test/>', true],
+    ['`a` <https://a.test/>', true],
+    ['`a <https://a.test/>', false],
+    // Nor a longer run a shorter one.
+    ['`a`` b` <https://a.test/>', true],
+  ])('%j closes an autolink: %s', (text, closes) => {
+    expect(matchInlineRule(text) !== null).toBe(closes);
+  });
+});
+
+// The backtick-run refusal is about a backtick opener: `<code>` after a closed
+// span opens whatever the run before its own backtick was.
+test('a <code> tag after a closed code span', () => {
+  expect(matchInlineRule('`a `<code>x</code>')).not.toBeNull();
 });
