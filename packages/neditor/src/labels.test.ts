@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest';
 
 import { NEDITOR_STYLES } from './styles.ts';
 import { DEFAULT_LABELS, pluralLabel, resolveLabels } from './labels.ts';
+import { createEditor } from './index.ts';
 import { SLASH_COMMANDS, SlashMenu, createSlashCommands, filterCommands } from './ui/slash-menu.ts';
 
 /**
@@ -239,5 +240,32 @@ describe('a one-form carrying a count is not announced with the placeholder bare
     expect(resolveLabels({ blockSelected: 'Ein Block ausgewählt' }).blockSelectedNamed).toBe(
       'Ein Block ausgewählt',
     );
+  });
+});
+
+describe('the image editor names its own field', () => {
+  // It borrowed the link popover's `linkUrl`, so a screen reader announced the
+  // picture's source as "Link URL" -- a field for a link the user never made.
+  test('the source input is announced as an image URL', () => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const editor = createEditor({
+      element: host,
+      doc: {
+        blocks: [{ id: 'i', type: 'image', depth: 0, content: [], src: 'https://e.com/a.png' }],
+      },
+    });
+    host
+      .querySelector<HTMLElement>('.neditor-image__trigger')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const input = document.querySelector('.neditor-image-editor input');
+
+    expect(input?.getAttribute('aria-label')).toBe('Image URL');
+    editor.destroy();
+    host.remove();
+  });
+
+  test('and a translation can replace it', () => {
+    expect(resolveLabels({ imageUrl: "URL de l'image" }).imageUrl).toBe("URL de l'image");
   });
 });

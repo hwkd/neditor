@@ -1648,3 +1648,45 @@ describe('a summary is the toggle title once, wherever it sits', () => {
     ]);
   });
 });
+
+describe('a space between two inline elements outside any paragraph', () => {
+  // A browser copying part of a paragraph puts only the inline markup on the
+  // clipboard -- `<b>Hello</b> <a href>world</a>` with no <p> around it -- and
+  // the block walk read the space between two inline siblings as layout, so
+  // the paste arrived as "Helloworld". The same walk runs inside a <div> and
+  // in a paragraph that also holds an image, which is how those lost it too.
+  const text = (html: string): string[] =>
+    blocksFromHtml(document, html).map((b) => (b.content ?? []).map((r) => r.text).join(''));
+
+  test.each([
+    ['a bare inline fragment', '<b>a</b> <i>b</i>', ['a b']],
+    [
+      'a fragment behind the meta tag Chrome writes',
+      '<meta charset="utf-8"><b>a</b> <i>b</i>',
+      ['a b'],
+    ],
+    ['inline siblings in a div', '<div><b>a</b> <i>b</i></div>', ['a b']],
+    [
+      'two links in a div',
+      '<div><a href="https://a.b/">x</a> <a href="https://c.d/">y</a></div>',
+      ['x y'],
+    ],
+  ])('%s keeps the space', (_name, html, expected) => {
+    expect(text(html)).toEqual(expected);
+  });
+
+  test('a paragraph that also holds an image keeps its spaces', () => {
+    const blocks = blocksFromHtml(
+      document,
+      '<p>Hello <b>world</b> <a href="https://ok.com/">ok</a><img src="https://e.com/x.png"></p>',
+    );
+
+    expect(blockText(blocks[0]!)).toBe('Hello world ok');
+    expect(blocks[1]?.type).toBe('image');
+  });
+
+  test('indentation before a block still is not content', () => {
+    expect(text('<div>\n  <b>a</b>\n  <p>c</p>\n</div>')).toEqual(['a', 'c']);
+    expect(text('<b>a</b> <i>b</i>\n')).toEqual(['a b']);
+  });
+});

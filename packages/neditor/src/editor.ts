@@ -22,6 +22,7 @@ import {
   isBlockType,
   isContinuingType,
   isRichEmpty,
+  isTableType,
   isVoidType,
   moveBlocks,
   moveVisibleBlocks,
@@ -78,6 +79,7 @@ import { IconPicker } from './ui/icon-picker.ts';
 import { ImageEditor } from './ui/image-editor.ts';
 import { LinkEditor } from './ui/link-editor.ts';
 import type { PortalTheme } from './ui/portal.ts';
+import { pinAnchor } from './ui/portal.ts';
 import type { SlashCommand } from './ui/slash-menu.ts';
 import { SlashMenu } from './ui/slash-menu.ts';
 import type { TableCommand } from './ui/table-toolbar.ts';
@@ -1231,6 +1233,7 @@ export class NEditor {
     }
 
     const { range, content } = target;
+    const anchor = this.#selectionRect() ?? content.getBoundingClientRect();
     this.#linkContext = {
       blockId: target.block.id,
       start: range.start,
@@ -1240,8 +1243,9 @@ export class NEditor {
     this.#toolbar.hide();
 
     this.#linkEditor.open(
-      this.#selectionRect() ?? content.getBoundingClientRect(),
+      anchor,
       richActiveLink(this.#contentOf(target), range.start, range.end),
+      pinAnchor(content, anchor),
     );
   }
 
@@ -2261,10 +2265,11 @@ export class NEditor {
     this.#imageContext = id;
     this.#toolbar.hide();
     this.#tableToolbar.hide();
-    this.#imageEditor.open(anchor.getBoundingClientRect(), {
-      src: block.src ?? '',
-      alt: block.alt ?? '',
-    });
+    this.#imageEditor.open(
+      anchor.getBoundingClientRect(),
+      { src: block.src ?? '', alt: block.alt ?? '' },
+      pinAnchor(anchor),
+    );
   }
 
   #applyImage(src: string, alt: string): void {
@@ -2525,7 +2530,11 @@ export class NEditor {
 
     this.#iconContext = id;
     this.#toolbar.hide();
-    this.#iconPicker.open(anchor.getBoundingClientRect(), block.icon ?? DEFAULT_CALLOUT_ICON);
+    this.#iconPicker.open(
+      anchor.getBoundingClientRect(),
+      block.icon ?? DEFAULT_CALLOUT_ICON,
+      pinAnchor(anchor),
+    );
   }
 
   #applyIcon(icon: string): void {
@@ -3456,17 +3465,41 @@ export class NEditor {
     // The portal element, not the container it was appended to: that container
     // defaults to the mount's root node, which for an ordinary mount is
     // `document.body` -- so testing it swallowed every scroll on the page.
-    const target = event.target;
+    // Duck-typed: in an iframe mount the target belongs to another realm's
+    // `Element`, and `instanceof` read every scroll there as the ground's.
+    const target = asElement(event.target);
 
-    if (target instanceof Element && target.closest('.neditor-portal')) {
+    if (target?.closest('.neditor-portal')) {
       return;
     }
 
     this.#closeSlashMenu();
-    this.#closeLinkEditor();
-    this.#closeImageEditor();
-    this.#closeIconPicker();
     this.#toolbar.hide();
+
+    // The dialogs take focus, and one that holds it is being typed into.
+    // Dismissing it handed focus back to the block it came from mid-word, so
+    // the rest of a URL went into the document -- and a resize is what an
+    // opening software keyboard looks like, so on a phone a dialog closed the
+    // moment its own input was focused. It moves with its anchor instead. One
+    // the user has left is dismissed as before, but focus stays wherever they
+    // took it: a scroll is not a choice of where to go.
+    for (const [dialog, close] of [
+      [this.#linkEditor, (restore: boolean) => this.#closeLinkEditor(restore)],
+      [this.#imageEditor, (restore: boolean) => this.#closeImageEditor(restore)],
+      [this.#iconPicker, (restore: boolean) => this.#closeIconPicker(restore)],
+    ] as const) {
+      if (!dialog.isOpen) {
+        continue;
+      }
+
+      if (!dialog.hasFocus) {
+        close(false);
+      } else if (!dialog.reposition()) {
+        // Its anchor is gone. Hiding a dialog that holds focus would drop
+        // focus on the body, so hand it back to the block if there is one.
+        close(true);
+      }
+    }
   };
 
   #handleCompositionStart = (event: CompositionEvent): void => {
@@ -4800,11 +4833,34 @@ export class NEditor {
     const target = slice.find((block) => !isVoidType(block.type));
 
     if (!target) {
+      this.#leaveTrailingBlock(visible[index], direction, event);
       return;
     }
 
     event.preventDefault();
     this.focus(target.id, direction === -1 ? CARET_END : 0);
+  }
+
+  /**
+   * Enter inside a code block or a table cell is a line break, so a document
+   * ending in one gave the keyboard no way below it: only a click under the
+   * last block opened a paragraph. Arrowing off the end opens that same one.
+   * Every other block is left by Enter already, and grows nothing here.
+   */
+  #leaveTrailingBlock(block: Block | undefined, direction: 1 | -1, event: KeyboardEvent): void {
+    if (
+      direction !== 1 ||
+      !block ||
+      (block.type !== 'code' && !isTableType(block.type)) ||
+      !this.#canEdit()
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    const created = createBlock('paragraph');
+    this.#commit([...this.#blocks, created]);
+    this.focus(created.id, 0);
   }
 
   #handleFocusIn = (event: FocusEvent): void => {

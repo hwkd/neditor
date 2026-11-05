@@ -60,6 +60,8 @@ export interface NEditorLabels {
    */
   invalidUrl: string;
   linkUrl: string;
+  /** The image popover's source field; not `linkUrl`, which names a link. */
+  imageUrl: string;
   imageUrlPlaceholder: string;
   imageAltPlaceholder: string;
   imageAlt: string;
@@ -256,6 +258,7 @@ export const DEFAULT_LABELS: NEditorLabels = {
   linkPlaceholder: 'Paste a link or type a URL',
   invalidUrl: 'That is not a URL this editor can use',
   linkUrl: 'Link URL',
+  imageUrl: 'Image URL',
   imageUrlPlaceholder: 'Paste an image URL',
   imageAltPlaceholder: 'Alt text, for screen readers',
   imageAlt: 'Alt text',

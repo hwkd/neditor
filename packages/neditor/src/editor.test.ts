@@ -1301,3 +1301,74 @@ describe('a composition that outlives a render is re-anchored to what replaced i
     expect(blockText(editor.getDocument().blocks[0]!)).not.toBe('before');
   });
 });
+
+describe('the end of a block Enter cannot leave is not a dead end', () => {
+  /**
+   * Enter inside a code block or a table cell is a line break, so a document
+   * that ended in one gave the keyboard no way below it: ArrowDown at the very
+   * end did nothing, and only a pointer click under the last block opened a
+   * paragraph. Arrowing off the end opens that same paragraph.
+   */
+  test('ArrowDown at the end of a trailing code block opens a paragraph below it', () => {
+    const editor = mount([block({ id: 'c', type: 'code', content: [{ text: 'x = 1' }] })]);
+    const host = hosts(editor)[0]!;
+    caretTo(host, 'end');
+
+    expect(press(host, 'ArrowDown')).toBe(true);
+
+    const blocks = editor.getDocument().blocks;
+
+    expect(blocks.map((b) => b.type)).toEqual(['code', 'paragraph']);
+    expect(document.activeElement).toBe(hosts(editor)[1]);
+    // One step, like any other edit, so a single undo takes it back.
+    editor.undo();
+    expect(editor.getDocument().blocks.map((b) => b.type)).toEqual(['code']);
+  });
+
+  test('so does ArrowDown in the last row of a trailing table', () => {
+    const editor = mount([
+      block({
+        id: 't',
+        type: 'table',
+        rows: [[[{ text: 'a' }]], [[{ text: 'b' }]]],
+      } as Partial<Block>),
+    ]);
+    const last = editor.element.querySelector<HTMLElement>('[data-cell="1:0"]')!;
+    caretTo(last, 'end');
+
+    expect(press(last, 'ArrowDown')).toBe(true);
+    expect(editor.getDocument().blocks.map((b) => b.type)).toEqual(['table', 'paragraph']);
+  });
+
+  test('a trailing paragraph does not grow another one', () => {
+    // Enter already leaves a paragraph; ArrowDown at the end stays a no-op.
+    const editor = mount([block({ content: [{ text: 'end' }] })]);
+    const host = hosts(editor)[0]!;
+    caretTo(host, 'end');
+
+    expect(press(host, 'ArrowDown')).toBe(false);
+    expect(editor.getDocument().blocks).toHaveLength(1);
+  });
+
+  test('nor does a read-only code block', () => {
+    const editor = mount([block({ type: 'code', content: [{ text: 'x' }] })], { editable: false });
+    const host = hosts(editor)[0]!;
+    caretTo(host, 'end');
+    press(host, 'ArrowDown');
+
+    expect(editor.getDocument().blocks).toHaveLength(1);
+  });
+
+  test('a code block with a block after it just moves there', () => {
+    const editor = mount([
+      block({ type: 'code', content: [{ text: 'x' }] }),
+      block({ content: [{ text: 'next' }] }),
+    ]);
+    const host = hosts(editor)[0]!;
+    caretTo(host, 'end');
+    press(host, 'ArrowDown');
+
+    expect(editor.getDocument().blocks).toHaveLength(2);
+    expect(document.activeElement).toBe(hosts(editor)[1]);
+  });
+});

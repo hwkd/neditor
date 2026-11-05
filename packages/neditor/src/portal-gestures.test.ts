@@ -632,8 +632,11 @@ describe('floating UI answers to the ground it was placed against', () => {
     return portal('neditor-icon-picker');
   };
 
-  test('a scroll anywhere in the page dismisses an open popover', () => {
+  test('a scroll dismisses a dialog the user has left', () => {
     const popover = openIconPicker();
+    const elsewhere = document.createElement('button');
+    document.body.append(elsewhere);
+    elsewhere.focus();
 
     expect(popover.hidden).toBe(false);
 
@@ -642,14 +645,101 @@ describe('floating UI answers to the ground it was placed against', () => {
     document.body.dispatchEvent(new Event('scroll', { bubbles: false }));
 
     expect(popover.hidden).toBe(true);
+    // A scroll is not the user choosing where to go, so focus stays put rather
+    // than being pulled back into the block the dialog was opened from.
+    expect(document.activeElement).toBe(elsewhere);
   });
 
-  test('so does a resize, which is what an opening keyboard looks like', () => {
+  test('so does a resize', () => {
     const popover = openIconPicker();
-
-    expect(popover.hidden).toBe(false);
+    const elsewhere = document.createElement('button');
+    document.body.append(elsewhere);
+    elsewhere.focus();
 
     window.dispatchEvent(new Event('resize'));
+
+    expect(popover.hidden).toBe(true);
+  });
+});
+
+describe('a dialog being typed into moves with the page instead of closing', () => {
+  /**
+   * The dialogs take focus. Dismissing one on a scroll handed focus back to the
+   * block it came from in the middle of a word, so the rest of a URL being
+   * typed into the image editor landed in the caption -- and a following Tab
+   * indented the document. A resize is what an opening software keyboard looks
+   * like on Android, so there a dialog closed the moment its own input was
+   * focused, and none of the three could be used at all. A portal is
+   * `position: fixed` and was placed once, which is why it was dismissed; it
+   * is re-pinned against its anchor instead.
+   */
+  const scroll = (): void => {
+    document.body.dispatchEvent(new Event('scroll', { bubbles: false }));
+  };
+
+  test('the image editor keeps its input and the typing stays in it', () => {
+    const editor = mount([
+      block({
+        id: 'img',
+        type: 'image',
+        src: 'https://e.com/a.png',
+        alt: 'a',
+        content: [{ text: 'cap' }],
+      }),
+    ]);
+    editor.element
+      .querySelector<HTMLElement>('.neditor-image__trigger')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const popover = portal('neditor-image-editor');
+    const input = popover.querySelector<HTMLInputElement>('input')!;
+
+    expect(document.activeElement).toBe(input);
+
+    scroll();
+
+    expect(popover.hidden).toBe(false);
+    expect(document.activeElement, 'focus must not be handed back to the caption').toBe(input);
+    expect(editor.getDocument().blocks[0]!.content).toEqual([{ text: 'cap' }]);
+  });
+
+  test('the link editor survives a resize, which is what a keyboard opening looks like', () => {
+    const editor = mount([block({ content: [{ text: 'abc' }] })]);
+    selectIn(hosts(editor)[0]!, 0, 3);
+    editor.openLinkEditor();
+    const popover = portal('neditor-link-editor');
+    const input = popover.querySelector<HTMLInputElement>('input')!;
+
+    window.dispatchEvent(new Event('resize'));
+
+    expect(popover.hidden).toBe(false);
+    expect(document.activeElement).toBe(input);
+  });
+
+  test('the icon picker follows its anchor to where it scrolled', () => {
+    const editor = mount([block({ type: 'callout', content: [{ text: 'note' }] })]);
+    const icon = editor.element.querySelector<HTMLElement>('.neditor-block__icon')!;
+    let top = 300;
+    // happy-dom computes no layout, so the anchor reports where it is by hand.
+    icon.getBoundingClientRect = () => new DOMRect(40, top, 24, 24);
+    icon.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const popover = portal('neditor-icon-picker');
+    const before = Number.parseInt(popover.style.top, 10);
+
+    top = 200;
+    scroll();
+
+    expect(popover.hidden).toBe(false);
+    expect(Number.parseInt(popover.style.top, 10)).toBe(before - 100);
+  });
+
+  test('a dialog whose anchor is gone is dismissed', () => {
+    const editor = mount([block({ type: 'callout', content: [{ text: 'note' }] })]);
+    const icon = editor.element.querySelector<HTMLElement>('.neditor-block__icon')!;
+    icon.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const popover = portal('neditor-icon-picker');
+
+    icon.remove();
+    scroll();
 
     expect(popover.hidden).toBe(true);
   });
@@ -828,5 +918,37 @@ describe('a popover scrolling its own contents is not the ground moving', () => 
     editor.element.dispatchEvent(new Event('scroll', { bubbles: false }));
 
     expect(menu.hidden).toBe(true);
+  });
+
+  test('nor is one from another realm', () => {
+    // Mounted in an iframe, the scrolled element is that realm's, and an
+    // `instanceof Element` check here read every scroll inside the slash menu
+    // as the page moving -- so arrowing past the fold closed it again.
+    const editor = mount([block({ id: 'a', content: [] })]);
+    const host = hosts(editor)[0]!;
+    host.focus();
+    host.textContent = '/';
+    const range = document.createRange();
+    range.setStart(host.firstChild!, 1);
+    range.collapse(true);
+    const selection = getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    host.dispatchEvent(
+      new InputEvent('input', { inputType: 'insertText', data: '/', bubbles: true }),
+    );
+
+    const menu = portal('neditor-slash-menu');
+    const list = menu.querySelector('.neditor-slash-menu__list') ?? menu;
+    const event = new Event('scroll', { bubbles: false });
+    // A real element, presented the way a foreign one arrives: the node
+    // interface, but none of this realm's constructors.
+    Object.defineProperty(event, 'target', {
+      value: { nodeType: 1, nodeName: 'DIV', closest: (s: string) => list.closest(s) },
+      configurable: true,
+    });
+    list.dispatchEvent(event);
+
+    expect(menu.hidden).toBe(false);
   });
 });

@@ -66,6 +66,54 @@ export function createPortal(
   return element;
 }
 
+/** The part of a rect a portal is placed against. */
+export type AnchorRect = Pick<DOMRect, 'top' | 'bottom' | 'left'>;
+
+/** Finds an anchor again after the page has moved it, or null once it is gone. */
+export type AnchorPin = () => AnchorRect | null;
+
+/**
+ * Pins `rect` to `element`, so it can be found again after a scroll or resize.
+ *
+ * The rect is kept as an offset from the element rather than as viewport
+ * coordinates, which go stale the moment the page moves. That covers a range
+ * inside a block (the link editor's selection) as well as a control that is
+ * the anchor itself.
+ */
+export function pinAnchor(
+  element: Element,
+  rect: AnchorRect = element.getBoundingClientRect(),
+): AnchorPin {
+  const base = element.getBoundingClientRect();
+  const dx = rect.left - base.left;
+  const dy = rect.top - base.top;
+  const height = rect.bottom - rect.top;
+
+  return () => {
+    if (!element.isConnected) {
+      return null;
+    }
+
+    const now = element.getBoundingClientRect();
+    const top = now.top + dy;
+
+    return { left: now.left + dx, top, bottom: top + height };
+  };
+}
+
+/**
+ * Whether focus is inside `element`, asked of the tree it lives in.
+ *
+ * A portal may sit in a shadow root, whose `activeElement` the document's
+ * retargets to the host.
+ */
+export function holdsFocus(element: Element): boolean {
+  const root = element.getRootNode();
+  const active = 'activeElement' in root ? (root as Document | ShadowRoot).activeElement : null;
+
+  return active !== null && element.contains(active);
+}
+
 export interface PositionOptions {
   readonly prefer: 'above' | 'below';
   readonly gap?: number;
@@ -81,7 +129,7 @@ export interface PositionOptions {
  */
 export function positionPortal(
   element: HTMLElement,
-  anchor: DOMRect,
+  anchor: AnchorRect,
   options: PositionOptions,
 ): void {
   const view = element.ownerDocument.defaultView;

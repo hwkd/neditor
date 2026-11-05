@@ -1,6 +1,7 @@
 import type { NEditorLabels } from '../labels.ts';
 import type { PortalTheme } from './portal.ts';
-import { createPortal, positionPortal } from './portal.ts';
+import type { AnchorPin } from './portal.ts';
+import { createPortal, holdsFocus, positionPortal } from './portal.ts';
 
 /**
  * The image source popover.
@@ -33,6 +34,7 @@ export class ImageEditor {
   readonly #hooks: ImageEditorHooks;
 
   #open = false;
+  #pin: AnchorPin | null = null;
 
   constructor(doc: Document, hooks: ImageEditorHooks, labels: NEditorLabels) {
     this.#hooks = hooks;
@@ -45,7 +47,7 @@ export class ImageEditor {
     this.#element.setAttribute('role', 'dialog');
     this.#element.setAttribute('aria-label', labels.imageEdit);
 
-    this.#src = this.#createInput(doc, labels.imageUrlPlaceholder, labels.linkUrl);
+    this.#src = this.#createInput(doc, labels.imageUrlPlaceholder, labels.imageUrl);
     this.#alt = this.#createInput(doc, labels.imageAltPlaceholder, labels.imageAlt);
 
     const actions = doc.createElement('div');
@@ -92,7 +94,8 @@ export class ImageEditor {
     this.#element.dataset.neditorTheme = theme;
   }
 
-  open(anchor: DOMRect, value: ImageEditorValue): void {
+  open(anchor: DOMRect, value: ImageEditorValue, pin: AnchorPin | null = null): void {
+    this.#pin = pin;
     this.#element.hidden = false;
     this.#open = true;
     this.#src.value = value.src;
@@ -111,6 +114,7 @@ export class ImageEditor {
     }
 
     this.#open = false;
+    this.#pin = null;
     this.#element.hidden = true;
   }
 
@@ -128,6 +132,27 @@ export class ImageEditor {
     delete this.#src.dataset.invalid;
     this.#src.removeAttribute('aria-invalid');
     this.#error.hidden = true;
+  }
+
+  /** True while the user is in the dialog: its input, a swatch, a button. */
+  get hasFocus(): boolean {
+    return this.#open && holdsFocus(this.#element);
+  }
+
+  /**
+   * Places the dialog against wherever its anchor has moved to. False when it
+   * was opened without a pin or the anchor has left the page, so there is
+   * nothing left to place it against.
+   */
+  reposition(): boolean {
+    const anchor = this.#open ? this.#pin?.() : null;
+
+    if (!anchor) {
+      return false;
+    }
+
+    positionPortal(this.#element, anchor, { prefer: 'below' });
+    return true;
   }
 
   contains(node: Node | null): boolean {

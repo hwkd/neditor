@@ -1798,8 +1798,35 @@ function visitBlocksInner(
   exclude?: Node,
 ): void {
   let buffer: Node[] = [];
+  // What followed the last inline content without adding any: whitespace, or
+  // an inline element with nothing in it. `<b>a</b> <i>b</i>` is what a
+  // browser puts on the clipboard for part of a paragraph, and that space is
+  // the separator between two words -- dropping every whitespace-only node
+  // pasted "ab". It is held here and kept only once more content follows; a
+  // block starting or the parent ending makes it layout, and it is discarded.
+  // Empty elements (no text whatsoever) wait with it because HTML parsing
+  // leaves them behind: a
+  // `<b>` written straight into a `<table>` is foster-parented out of it as an
+  // empty `<b></b>`, which would otherwise carry the indentation before it
+  // into the paragraph.
+  let pending: Node[] = [];
+
+  const pushInline = (inline: Node, hasContent: boolean): void => {
+    if (!hasContent) {
+      if (buffer.length > 0) {
+        pending.push(inline);
+      }
+
+      return;
+    }
+
+    buffer.push(...pending, inline);
+    pending = [];
+  };
 
   const flushInline = (): void => {
+    pending = [];
+
     if (buffer.length === 0) {
       return;
     }
@@ -1824,10 +1851,7 @@ function visitBlocksInner(
     }
 
     if (child.nodeType === TEXT_NODE) {
-      if ((child.nodeValue ?? '').trim().length > 0) {
-        buffer.push(child);
-      }
-
+      pushInline(child, !isSourceWhitespace(child));
       continue;
     }
 
@@ -1843,7 +1867,7 @@ function visitBlocksInner(
     }
 
     if (tag === 'BR') {
-      buffer.push(element);
+      pushInline(element, true);
       continue;
     }
 
@@ -1945,7 +1969,12 @@ function visitBlocksInner(
     }
 
     // Anything else is inline: <strong>, <a>, <span>, unknown elements.
-    buffer.push(element);
+    pushInline(
+      element,
+      // Any text at all: `<b> </b>` is a space someone wrote, only `<b></b>`
+      // is the parser's leftover.
+      (element.textContent ?? '').length > 0 || element.querySelector('br') !== null,
+    );
   }
 
   flushInline();
