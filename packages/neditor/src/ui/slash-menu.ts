@@ -230,8 +230,35 @@ export class SlashMenu {
       return;
     }
 
-    this.#activeIndex = (this.#activeIndex + delta + count) % count;
-    this.#renderList();
+    this.#highlight((this.#activeIndex + delta + count) % count);
+  }
+
+  /**
+   * Moves the highlight by updating the options in place.
+   *
+   * Rebuilding the list here is what broke the mouse: hovering an option
+   * replaced it, the pointer was then over a new element, and Chromium and
+   * WebKit answer that with another `mouseenter` -- so a resting pointer
+   * rebuilt the menu several times a second and the option under a press was
+   * gone before the release, which is a click that never happens.
+   */
+  #highlight(index: number): void {
+    this.#activeIndex = index;
+
+    for (const [position, item] of [...this.#list.children].entries()) {
+      const element = item as HTMLElement;
+      const active = position === index;
+      element.setAttribute('aria-selected', String(active));
+
+      if (active) {
+        element.dataset.active = 'true';
+      } else {
+        delete element.dataset.active;
+      }
+    }
+
+    this.#scrollActiveIntoView();
+    this.#hooks.onActiveChange();
   }
 
   #renderList(): void {
@@ -272,8 +299,9 @@ export class SlashMenu {
       });
 
       item.addEventListener('mouseenter', () => {
-        this.#activeIndex = index;
-        this.#renderList();
+        if (index !== this.#activeIndex) {
+          this.#highlight(index);
+        }
       });
 
       this.#list.append(item);

@@ -1690,3 +1690,30 @@ describe('a space between two inline elements outside any paragraph', () => {
     expect(text('<b>a</b> <i>b</i>\n')).toEqual(['a b']);
   });
 });
+
+describe('the spaces Safari converts on copy are spaces again', () => {
+  // Safari writes a space at an element boundary as
+  // `<span class="Apple-converted-space">&nbsp;</span>`, so a paste from it put
+  // non-breaking spaces into the document: the words no longer wrapped there,
+  // a search for "bold and" missed, and the Markdown carried U+00A0. The class
+  // is Safari saying "this was an ordinary space"; any other &nbsp; is kept.
+  const SAFARI =
+    '<b>this bold</b><span><span class="Apple-converted-space"> </span>and' +
+    '<span class="Apple-converted-space"> </span></span><a href="https://ok.example/">a link</a>';
+
+  test('a pasted paragraph has ordinary spaces', () => {
+    const text = blocksFromHtml(document, SAFARI)
+      .map((b) => (b.content ?? []).map((r) => r.text).join(''))
+      .join('');
+
+    expect(text).toBe('this bold and a link');
+  });
+
+  test('the inline reader agrees', () => {
+    expect(richToPlainText(fromHtml(SAFARI))).toBe('this bold and a link');
+  });
+
+  test('a non-breaking space written on purpose survives', () => {
+    expect(richToPlainText(fromHtml('<p>10 km and <b>5</b>&nbsp;kg</p>'))).toBe('10 km and 5 kg');
+  });
+});

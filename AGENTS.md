@@ -161,6 +161,26 @@ Run `vp run ready` (check, test, build). `vp -C apps/web run check` additionally
   keep being parsed with that block's own element as the root, or a following
   paragraph would turn the filler into a second newline.
 
+- **Safari's selection does not see into a shadow root, in either direction.**
+  There is no `ShadowRoot.getSelection`, the document's selection is retargeted
+  to the host's parent, and `addRange` with a range inside the shadow tree is
+  dropped without a word — the next keystroke with it. So every caret read
+  goes through `selectionFor` (which falls back to `getComposedRanges`), and
+  every caret write goes through `setBaseAndExtent`. Never read
+  `document.getSelection()` or call `addRange` directly.
+
+- **Hover must not rebuild what it hovers.** Chromium and WebKit answer a node
+  replaced under a resting pointer with another `mouseenter`, so a hover
+  handler that re-renders its own list loops several times a second, and a
+  click never lands because the element under the press is gone before the
+  release. The slash menu's options are highlighted in place.
+
+- **A clipboard event may not be aimed at the element holding focus.** Block
+  selection deliberately leaves nothing selected on the page, and Firefox then
+  dispatches copy and cut to `<body>`. `#handleDocumentClipboard` answers for
+  the root, but only while the root holds focus and its own listener has not
+  already taken the event.
+
 ## Invariants the remediation established
 
 These came out of fixing 64 audited defects. Most of them were violated in several

@@ -87,9 +87,11 @@ import { TableToolbar } from './ui/table-toolbar.ts';
 import { Renderer } from './view/renderer.ts';
 import { blocksFromHtml, blocksToHtml, parseRichText } from './view/rich-dom.ts';
 import type { OffsetRange } from './view/selection.ts';
+import type { TreeSelection } from './view/selection.ts';
 import {
   getCaretOffset,
   getSelectionRange,
+  selectionFor,
   isCaretAtEnd,
   isCaretAtStart,
   offsetsOfNode,
@@ -974,6 +976,8 @@ export class NEditor {
     this.#root.addEventListener('paste', this.#handlePaste);
     this.#root.addEventListener('copy', this.#handleCopy);
     this.#root.addEventListener('cut', this.#handleCopy);
+    this.#document.addEventListener('copy', this.#handleDocumentClipboard);
+    this.#document.addEventListener('cut', this.#handleDocumentClipboard);
     this.#root.addEventListener('drop', this.#handleDrop);
     this.#root.addEventListener('pointerdown', this.#handleRootPointerDown);
     this.#root.addEventListener('pointerover', this.#handlePointerOver);
@@ -1468,6 +1472,8 @@ export class NEditor {
     this.#root.removeEventListener('paste', this.#handlePaste);
     this.#root.removeEventListener('copy', this.#handleCopy);
     this.#root.removeEventListener('cut', this.#handleCopy);
+    this.#document.removeEventListener('copy', this.#handleDocumentClipboard);
+    this.#document.removeEventListener('cut', this.#handleDocumentClipboard);
     this.#root.removeEventListener('drop', this.#handleDrop);
     this.#root.removeEventListener('pointerdown', this.#handleRootPointerDown);
     this.#root.removeEventListener('pointerover', this.#handlePointerOver);
@@ -2586,6 +2592,28 @@ export class NEditor {
     }
   };
 
+  /**
+   * Entering block selection leaves nothing selected on the page, and Firefox
+   * aims copy and cut at the body in that case instead of the focused element,
+   * so the root's own listener never heard Cmd+C or Cmd+X on selected blocks
+   * there. This answers for the root -- but only while it holds the focus, so a
+   * copy from a field elsewhere on the page stays that field's, and only when
+   * the root's listener has not already taken the event.
+   */
+  #handleDocumentClipboard = (event: ClipboardEvent): void => {
+    const target = isNode(event.target) ? event.target : null;
+
+    if (
+      event.defaultPrevented ||
+      (target && this.#root.contains(target)) ||
+      this.#activeElement() !== this.#root
+    ) {
+      return;
+    }
+
+    this.#handleCopy(event);
+  };
+
   /* ----------------------------------------------------- gutter and drag -- */
 
   #handlePointerOver = (event: PointerEvent): void => {
@@ -3255,13 +3283,11 @@ export class NEditor {
   /**
    * The selection for the tree this editor is mounted in.
    *
-   * A shadow root exposes its own `getSelection`; the document's would report
-   * the host element instead of the caret inside it.
+   * Read through `selectionFor`, which knows each engine's answer for a shadow
+   * root -- Safari's document selection reports the host, not the caret.
    */
-  #selection(): Selection | null {
-    const root = this.#root.getRootNode() as ShadowRoot & { getSelection?: () => Selection | null };
-
-    return root.getSelection?.() ?? this.#document.defaultView?.getSelection() ?? null;
+  #selection(): TreeSelection | null {
+    return selectionFor(this.#root);
   }
 
   #selectionRect(): DOMRect | null {
@@ -3785,6 +3811,10 @@ export class NEditor {
     const rest = richSlice(block.content, beforeCaret.length, richLength(block.content));
     let blocks = updateBlock(this.#blocks, block.id, { content: rest });
     blocks = setBlockType(blocks, block.id, match.type);
+
+    if (match.checked) {
+      blocks = updateBlock(blocks, block.id, { checked: true });
+    }
 
     if (match.type === 'divider') {
       // A divider holds no caret, so give the user a paragraph to keep typing in.

@@ -952,3 +952,79 @@ describe('a popover scrolling its own contents is not the ground moving', () => 
     expect(menu.hidden).toBe(false);
   });
 });
+
+describe('hovering the slash menu does not rebuild it', () => {
+  /**
+   * `mouseenter` on an option re-rendered the whole list. The pointer was then
+   * over a brand-new element, which Chromium and WebKit answer with another
+   * `mouseenter` -- so a pointer resting on the menu rebuilt it several times a
+   * second, forever, and a click never landed: the option under the press was
+   * replaced before the release. Clicking a command did nothing in Chrome or
+   * Safari. happy-dom fires no boundary events for a DOM change, so what is
+   * pinned is the cause: hovering must keep the option elements it hovered.
+   */
+  const openMenu = (): { editor: NEditor; menu: HTMLElement } => {
+    const editor = mount([block({ id: 'a', content: [] })]);
+    const host = hosts(editor)[0]!;
+    host.focus();
+    host.textContent = '/';
+    const range = document.createRange();
+    range.setStart(host.firstChild!, 1);
+    range.collapse(true);
+    const selection = getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    host.dispatchEvent(
+      new InputEvent('input', { inputType: 'insertText', data: '/', bubbles: true }),
+    );
+
+    return { editor, menu: portal('neditor-slash-menu') };
+  };
+  const options = (menu: HTMLElement): HTMLElement[] => [
+    ...menu.querySelectorAll<HTMLElement>('[role="option"]'),
+  ];
+
+  test('entering an option highlights it in place', () => {
+    const { menu } = openMenu();
+    const before = options(menu);
+
+    before[2]!.dispatchEvent(new MouseEvent('mouseenter'));
+    const after = options(menu);
+
+    expect(after[2], 'the hovered option must be the same element').toBe(before[2]);
+    expect(after.map((o) => o.getAttribute('aria-selected'))).toEqual(
+      after.map((_, i) => String(i === 2)),
+    );
+    expect(after.filter((o) => o.dataset.active === 'true')).toEqual([after[2]]);
+  });
+
+  test('the block announces the hovered option', () => {
+    const { editor, menu } = openMenu();
+    const host = hosts(editor)[0]!;
+
+    options(menu)[3]!.dispatchEvent(new MouseEvent('mouseenter'));
+
+    expect(host.getAttribute('aria-activedescendant')).toBe(options(menu)[3]!.id);
+  });
+
+  test('a click after hovering applies the hovered command', () => {
+    const { editor, menu } = openMenu();
+    const target = options(menu)[1]!;
+
+    target.dispatchEvent(new MouseEvent('mouseenter'));
+    // The element the press began on, as a real click requires.
+    target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(editor.getDocument().blocks[0]!.type).toBe('heading1');
+  });
+
+  test('the arrow keys still move the highlight and keep it in view', () => {
+    const { editor, menu } = openMenu();
+    const host = hosts(editor)[0]!;
+
+    host.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+
+    expect(options(menu)[1]!.getAttribute('aria-selected')).toBe('true');
+    expect(host.getAttribute('aria-activedescendant')).toBe(options(menu)[1]!.id);
+  });
+});

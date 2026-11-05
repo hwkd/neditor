@@ -187,6 +187,18 @@ describe('input rules', () => {
   test('a bare hash without the space does not fire', () => {
     expect(matchInputRule('#', '#')).toBeNull();
   });
+
+  test.each([
+    ['[] ', false],
+    ['[ ] ', false],
+    ['[x] ', true],
+    ['[X] ', true],
+  ])('%s says whether the to-do starts done', (prefix: string, checked: boolean) => {
+    // The pattern accepted the x and the editor threw it away, so `[x] ` made
+    // an open to-do -- the opposite of what was typed, and of what the same
+    // `[x]` means when it is read back from Markdown.
+    expect(matchInputRule(prefix, prefix)?.checked ?? false).toBe(checked);
+  });
 });
 
 describe('normalizeDocument', () => {

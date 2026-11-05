@@ -439,9 +439,17 @@ function walk(
   out: TextRun[],
   skip?: SkipPredicate,
 ): void {
+  // Safari writes a space at an element boundary as `&nbsp;` inside this span
+  // when it copies. The class is its own record that the character was an
+  // ordinary space, so it is read back as one; every other `&nbsp;` is kept.
+  const convertedSpace =
+    node.nodeType === ELEMENT_NODE &&
+    ((node as Element).getAttribute('class') ?? '').split(/\s+/).includes('Apple-converted-space');
+
   for (const child of [...node.childNodes]) {
     if (child.nodeType === TEXT_NODE) {
-      const text = child.nodeValue ?? '';
+      const raw = child.nodeValue ?? '';
+      const text = convertedSpace ? raw.replace(/ /g, ' ') : raw;
 
       // Indentation between block elements is source formatting, not content.
       // Without this, pretty-printed HTML pastes with blank leading lines.

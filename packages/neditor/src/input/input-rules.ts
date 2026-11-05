@@ -12,6 +12,8 @@ export interface InputRule {
   /** Must match from the start of the block text. */
   readonly pattern: RegExp;
   readonly type: BlockType;
+  /** For a to-do: whether the prefix wrote it as already done (`[x] `). */
+  readonly checked?: boolean;
 }
 
 export const INPUT_RULES: readonly InputRule[] = [
@@ -21,7 +23,10 @@ export const INPUT_RULES: readonly InputRule[] = [
   { pattern: /^[-*+] $/, type: 'bulleted_list' },
   { pattern: /^\d+[.)] $/, type: 'numbered_list' },
   { pattern: /^> $/, type: 'quote' },
-  { pattern: /^\[[ xX]?\] $/, type: 'todo' },
+  { pattern: /^\[ ?\] $/, type: 'todo' },
+  // `[x]` is "done" here exactly as it is in the Markdown this editor reads
+  // back; one rule for both spellings accepted the x and then dropped it.
+  { pattern: /^\[[xX]\] $/, type: 'todo', checked: true },
   { pattern: /^```$/, type: 'code' },
   { pattern: /^(?:---|\*\*\*)$/, type: 'divider' },
 ];
@@ -30,6 +35,8 @@ export interface InputRuleMatch {
   readonly type: BlockType;
   /** Text remaining after the prefix is consumed. */
   readonly rest: string;
+  /** Set when the rule created a to-do that starts done. */
+  readonly checked?: boolean;
 }
 
 /**
@@ -41,7 +48,9 @@ export interface InputRuleMatch {
 export function matchInputRule(textBeforeCaret: string, fullText: string): InputRuleMatch | null {
   for (const rule of INPUT_RULES) {
     if (rule.pattern.test(textBeforeCaret)) {
-      return { type: rule.type, rest: fullText.slice(textBeforeCaret.length) };
+      const rest = fullText.slice(textBeforeCaret.length);
+
+      return rule.checked ? { type: rule.type, rest, checked: true } : { type: rule.type, rest };
     }
   }
 

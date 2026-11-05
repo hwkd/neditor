@@ -1372,3 +1372,100 @@ describe('the end of a block Enter cannot leave is not a dead end', () => {
     expect(document.activeElement).toBe(hosts(editor)[1]);
   });
 });
+
+describe('typing a to-do prefix keeps what the prefix said', () => {
+  const typeRule = (prefix: string): NEditor => {
+    const editor = mount([block({ id: 'p', content: [] })]);
+    const host = hosts(editor)[0]!;
+    host.focus();
+    host.textContent = prefix;
+    const range = document.createRange();
+    range.setStart(host.firstChild!, prefix.length);
+    range.collapse(true);
+    getSelection()!.removeAllRanges();
+    getSelection()!.addRange(range);
+    host.dispatchEvent(
+      new InputEvent('input', { inputType: 'insertText', data: ' ', bubbles: true }),
+    );
+
+    return editor;
+  };
+
+  test('[x] makes a done to-do', () => {
+    const block = typeRule('[x] ').getDocument().blocks[0]!;
+
+    expect(block.type).toBe('todo');
+    expect(block.checked).toBe(true);
+  });
+
+  test('[] makes an open one', () => {
+    const block = typeRule('[] ').getDocument().blocks[0]!;
+
+    expect(block.type).toBe('todo');
+    expect(block.checked).toBe(false);
+  });
+});
+
+describe('copying a block selection when the browser aims the event at the body', () => {
+  /**
+   * Entering block selection leaves nothing selected on the page, and Firefox
+   * dispatches copy and cut to the body in that case rather than to the
+   * focused element. The listeners were on the root alone, so Cmd+C and Cmd+X
+   * on selected blocks did nothing at all in Firefox.
+   */
+  const setup = (): { editor: NEditor; ids: string[] } => {
+    const editor = mount([
+      block({ content: [{ text: 'one' }] }),
+      block({ content: [{ text: 'two' }] }),
+      block({ content: [{ text: 'three' }] }),
+    ]);
+    const ids = editor.getDocument().blocks.map((b) => b.id);
+    editor.selectBlocks(ids.slice(0, 2));
+
+    return { editor, ids };
+  };
+  const fire = (type: 'copy' | 'cut', target: EventTarget = document.body): DataTransfer => {
+    const data = new DataTransfer();
+    target.dispatchEvent(
+      new ClipboardEvent(type, { clipboardData: data, bubbles: true, cancelable: true }),
+    );
+
+    return data;
+  };
+
+  test('copy fills the clipboard', () => {
+    const { editor } = setup();
+
+    expect(document.activeElement).toBe(editor.element);
+    expect(fire('copy').getData('text/plain')).toBe('one\n\ntwo');
+  });
+
+  test('cut removes the selected blocks as well', () => {
+    const { editor, ids } = setup();
+    const data = fire('cut');
+
+    expect(data.getData('text/plain')).toBe('one\n\ntwo');
+    expect(editor.getDocument().blocks.map((b) => b.id)).toEqual([ids[2]]);
+  });
+
+  test('a copy from elsewhere on the page is not taken over', () => {
+    // The editor must answer only for its own selection: with focus on a
+    // field outside it, the body-aimed copy belongs to that field.
+    const { editor } = setup();
+    const field = document.createElement('input');
+    document.body.append(field);
+    field.focus();
+
+    expect(fire('copy', field).getData('text/plain')).toBe('');
+    expect(editor.getDocument().blocks).toHaveLength(3);
+  });
+
+  test('a copy aimed at the root is handled once, not twice', () => {
+    const { editor, ids } = setup();
+    fire('cut', editor.element);
+
+    expect(editor.getDocument().blocks.map((b) => b.id)).toEqual([ids[2]]);
+    editor.undo();
+    expect(editor.getDocument().blocks).toHaveLength(3);
+  });
+});
