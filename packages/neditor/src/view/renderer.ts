@@ -1,4 +1,5 @@
 import type { Block, BlockType } from '../model/document.ts';
+import { nextId } from '../util/ids.ts';
 import { DEFAULT_CALLOUT_ICON, computeListNumbers, isVoidType } from '../model/document.ts';
 import type { NEditorLabels } from '../labels.ts';
 import { asElement } from '../util/dom.ts';
@@ -112,9 +113,6 @@ function contentTagFor(type: BlockType): string {
   }
 }
 
-/** Distinguishes the DOM ids of editors that share a page. */
-let instances = 0;
-
 export class Renderer {
   readonly #root: HTMLElement;
   readonly #hooks: RendererHooks;
@@ -128,15 +126,14 @@ export class Renderer {
 
   readonly #labels: NEditorLabels;
 
-  /** This renderer's slot in `instances`, fixed for its lifetime. */
+  /** Distinguishes this editor's DOM ids from every other editor's on the page. */
   readonly #instance: number;
 
   constructor(root: HTMLElement, hooks: RendererHooks, labels: NEditorLabels) {
     this.#root = root;
     this.#hooks = hooks;
     this.#labels = labels;
-    instances += 1;
-    this.#instance = instances;
+    this.#instance = nextId('renderer');
   }
 
   /**
@@ -183,16 +180,66 @@ export class Renderer {
       // thing the attribute was trying to say.
     }
 
-    // A control that cannot act is not an offer. Both image buttons open a
-    // popover the editor refuses to open while read-only, so left enabled they
-    // are tab stops that answer with nothing.
-    if (view.root.dataset.blockType === 'image') {
+    // A control that cannot act is not an offer. The image trigger and the
+    // callout icon open a popover the editor refuses to open while read-only,
+    // so left enabled they are tab stops that answer with nothing. They keep
+    // drawing the picture and the emoji, which are content; only the control
+    // goes.
+    const type = view.root.dataset.blockType;
+
+    if (type === 'image' || type === 'callout') {
       for (const control of view.root.querySelectorAll<HTMLButtonElement>(
-        '.neditor-image__trigger, .neditor-image__placeholder',
+        '.neditor-image__trigger, .neditor-block__icon',
       )) {
         control.disabled = !this.#editable;
       }
     }
+
+    if (type === 'image') {
+      this.#applyImagePlaceholder(view);
+    }
+  }
+
+  /**
+   * Draws the empty image's "Add an image" button while the editor takes
+   * input, and removes it while it does not.
+   *
+   * Disabling it was not enough: it was still drawn, and still exposed as a
+   * button by that name, which is an authoring prompt in a view that takes no
+   * authoring -- the same reason placeholders are drawn only on hosts that
+   * take typing. A picture is content and stays; this button is nothing but
+   * the offer, so read-only leaves the figure empty instead.
+   */
+  #applyImagePlaceholder(view: BlockView): void {
+    const figure = view.root.querySelector('.neditor-image');
+    const current = figure?.querySelector('.neditor-image__placeholder');
+
+    // Only a figure with no picture offers one; a set image has its trigger.
+    if (!figure || figure.querySelector('.neditor-image__frame')) {
+      return;
+    }
+
+    if (!this.#editable) {
+      current?.remove();
+      return;
+    }
+
+    if (current) {
+      return;
+    }
+
+    const id = view.root.dataset.blockId ?? '';
+    const placeholder = figure.ownerDocument.createElement('button');
+    placeholder.type = 'button';
+    placeholder.className = 'neditor-image__placeholder';
+    placeholder.textContent = this.#labels.imageAdd;
+    placeholder.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+    });
+    placeholder.addEventListener('click', () => {
+      this.#hooks.onEditImage(id, placeholder);
+    });
+    figure.prepend(placeholder);
   }
 
   /** Every editable host a view owns: its content, or all of a table's cells. */
@@ -417,21 +464,11 @@ export class Renderer {
       frame.append(trigger);
 
       figure.append(frame);
-    } else {
-      // Without a source there is nothing to show, so offer the way to add one.
-      const placeholder = doc.createElement('button');
-      placeholder.type = 'button';
-      placeholder.className = 'neditor-image__placeholder';
-      placeholder.textContent = this.#labels.imageAdd;
-      placeholder.addEventListener('mousedown', (event) => {
-        event.preventDefault();
-      });
-      placeholder.addEventListener('click', () => {
-        this.#hooks.onEditImage(block.id, placeholder);
-      });
-      figure.append(placeholder);
     }
 
+    // Without a source there is nothing to show, so the figure offers the way
+    // to add one -- but only to someone who can: `#applyEditable` draws and
+    // withdraws that button as the editor's mode changes.
     const caption = this.#createEditable(doc, 'figcaption', this.#labels.placeholders.image ?? '');
     figure.append(caption);
     root.append(figure);

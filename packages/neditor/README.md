@@ -26,6 +26,14 @@ than a recommendation. Two things set it:
 is feature-detected — Firefox below 125 keeps the whole string instead of
 cutting an emoji in half.
 
+**A shadow-root mount needs Safari 17.** Safari has no
+`ShadowRoot.getSelection()`, and its document selection is retargeted to the
+shadow host, so the editor reads the caret inside a shadow tree through
+`Selection.getComposedRanges()`, which Safari ships from 17. On Safari 16.4–16.x
+an editor mounted in a shadow root cannot see its own caret: input rules never
+fire and `Enter` splits at the start of the block. Mounts in the light DOM or in
+an iframe are unaffected, and Chrome and Firefox need nothing extra.
+
 **TypeScript 4.7+** if you consume the types. The package ships `.d.mts` and
 `.d.cts` and points at them through `exports`; a compiler older than that
 understands neither the extensions nor the map, so it reports the package as
@@ -148,7 +156,9 @@ inlines the chunk for that path.
 
 ```ts
 editor.getDocument(): NEditorDocument   // deep copy of the current document
-editor.setDocument(doc): void           // replace the content
+editor.setDocument(doc, { silent }?): void // replace the content; silent: no `change`
+editor.element: HTMLElement             // the mount point
+editor.editable: boolean                // current read-only state
 editor.getMarkdown(): string            // serialize to Markdown
 
 editor.toggleMark(mark): void           // 'bold' | 'italic' | 'underline' | …
@@ -156,8 +166,8 @@ editor.setLink(href | null): boolean    // false if the URL is unsafe
 editor.openLinkEditor(): void
 editor.getSelectionState(): SelectionState | null
 
-editor.undo(): boolean                  // false when there is nothing to undo
-editor.redo(): boolean
+editor.undo(): boolean                  // false when there is nothing to undo; takes focus
+editor.redo(): boolean                  // likewise
 editor.canUndo: boolean                 // getters, for driving your own buttons
 editor.canRedo: boolean
 editor.clearHistory(): void
@@ -174,18 +184,29 @@ editor.setEditable(editable): void
 editor.destroy(): void
 
 editor.on('change', (doc) => {})        // returns an unsubscribe function
+editor.off('change', listener)          // the same, by reference
 editor.on('focus', ({ blockId }) => {})
 editor.on('selection', (state) => {})   // null when the caret leaves the editor
 editor.on('history', ({ canUndo, canRedo }) => {})
-editor.on('blockselection', ({ ids }) => {})
+editor.on('blockselection', ({ ids }) => {}) // ids in document order
 ```
+
+`setDocument(doc, { silent: true })` replaces the content without emitting
+`change`. That is the call for loading a document your own `change` handler
+produced -- a collaboration update, a reload -- which would otherwise echo back
+into the same handler without end.
+
+`undo()` and `redo()` put the caret (or the block selection) back where the edit
+was made, so they move focus into the editor. A toolbar button that should keep
+focus for repeated presses has to take it back itself.
 
 `editable: false` is a hard contract: the document does not change. The controls
 the renderer draws stay reachable — a keyboard reader has to be able to move
 through them — but a read-only to-do checkbox, toggle chevron or image button
 does nothing rather than firing a `change` your persistence layer would write
-back as the author's revision. The image controls say so, too: they are
-`disabled`, not silently inert.
+back as the author's revision. The image trigger and the callout icon say so,
+too: they are `disabled`, not silently inert — and an empty image draws no "Add
+an image" button at all, since a disabled prompt is still an authoring prompt.
 
 `destroy()` is final and idempotent. It unhooks every listener and takes the
 views out of the page, and afterwards `setDocument`, `setEditable` and the edit
@@ -240,13 +261,23 @@ block.
 
 These convert the moment you type the closing delimiter:
 
-`**bold**` `__bold__` `*italic*` `_italic_` `` `code` `` `~~strike~~` `[text](url)`
+`**bold**` `__bold__` `*italic*` `_italic_` `` `code` `` `~~strike~~` `<u>underline</u>`
+`[text](url)` `[text](<url with spaces>)`
+
+A link's destination is literal: `*`, `_` and `~` inside a URL are never read as
+formatting, so `__init__` in a link stays `__init__`.
 
 ### Block Markdown
 
 Typing these at the start of a paragraph converts the block:
 
-`# ` `## ` `### ` `- ` `* ` `1. ` `> ` `[] ` ` ``` ` `---`
+`# ` `## ` `### ` `- ` `* ` `+ ` `1. ` `1) ` `> ` `[] ` `[ ] ` `[x] ` ` ``` ` `---` `*** `
+
+`[x] ` makes a to-do that starts checked. `---` becomes a divider the moment the
+third dash is typed; `***` waits for the space after it, because `***` is also
+how `***bold italic***` begins. None of these fire in a code block, and the
+slash menu does not open there or in an image caption, where `/` is ordinary
+text and a command would retype the block.
 
 Both sets fire on **typing only**. A rule reads the text before the caret and
 takes it as something you have just finished typing, which a deletion leaves
@@ -257,7 +288,8 @@ backspacing narrows the query and deleting the `/` closes the menu.
 
 ## Block selection and drag handles
 
-Hovering a block reveals a gutter to its left: **+** inserts a paragraph below,
+Hovering a block reveals a gutter to its left: **+** inserts a paragraph below
+the block and everything nested under it (a collapsed toggle keeps its children),
 and the **⠿** handle selects on click and reorders on drag. Dragging shows a drop
 indicator, and `Escape` mid-drag abandons it. Dragging a handle that belongs to an
 existing selection moves the whole selection.
@@ -293,7 +325,7 @@ With blocks selected:
 | `↑` / `↓`                      | Move the selection.                       |
 | `Shift` + `↑`/`↓`              | Extend it.                                |
 | `⌘`/`Ctrl` + `Shift` + `↑`/`↓` | Move the blocks themselves.               |
-| `Tab` / `Shift` + `Tab`        | Indent / outdent together.                |
+| `Tab` / `Shift` + `Tab`        | Indent / outdent together.²               |
 | `Backspace` / `Delete`         | Delete them.                              |
 | `⌘`/`Ctrl` + `D`               | Duplicate them.                           |
 | `⌘`/`Ctrl` + `C` / `X`         | Copy or cut, as Markdown and HTML.        |
@@ -303,6 +335,14 @@ With blocks selected:
 
 ¹ The last one that has text: a divider has no caret to take, so `Enter` walks
 back through the selection and, if none of it can hold one, keeps the selection.
+
+² When nothing can move, `Tab` is not swallowed: the caret goes back into the
+last selected block (the first, for `Shift`+`Tab`) and focus moves on from
+there, exactly as it would from the text of that block.
+
+Undoing an edit made on a block selection brings the selection back with the
+blocks; deleting one lands the caret on the nearest block that can hold it, or
+selects that neighbour when none can.
 
 The two modes are mutually exclusive, in both directions: entering block selection
 takes the caret out of the document, so the format toolbar hides and keystrokes
@@ -332,14 +372,17 @@ Blocks keep their semantic element — a heading is an `<h1>`, a quote a
 overrides those with `role="textbox"`.
 
 **Keyboard.** Every control is reachable: the toggle chevron, the callout icon
-and the image are real tab stops, and `F10` inside a table moves focus into the
+and the image are real tab stops (the last two only while the editor is
+editable — read-only, they are `disabled` rather than stops that do nothing), and `F10` inside a table moves focus into the
 row/column toolbar, where arrows move between commands and `Escape` returns to
 the cell.
 
 **Getting out.** `Tab` indents, but only when indenting is possible — a `Tab`
 that would change nothing moves focus onward instead, so the editor is never a
 keyboard trap. `Shift`+`Tab` at the outermost level always leaves. `Escape`
-twice — once to select the block, once more — also releases focus.
+twice — once to select the block, once more — also releases focus. With text
+selected and the format toolbar showing, the first `Escape` dismisses the
+toolbar, so it takes three.
 
 **Announcements.** A polite live region reports block selection, deletion,
 block-type changes, toggle state, table row and column edits, and undo/redo. The
@@ -354,9 +397,16 @@ that would carry it would displace the heading and list semantics the content
 element exists to provide. Selection is announced through the live region
 instead. The stylesheet has a `forced-colors` block for Windows High Contrast.
 
-**Contrast.** Every text token meets WCAG 1.4.3 in both themes: muted text
-5.6:1, placeholders 4.8:1, inline code 5.0:1, and the primary button 4.6:1 in
-light, 7.5:1 in dark.
+**Contrast.** Every text token meets WCAG 1.4.3 in both themes, on every ground
+it is drawn on — including inside a selected block, where the selection tint
+stacks under the code and callout tints. In light: muted text 6.2:1,
+placeholders 5.6:1 (5.1:1 on the code-block tint), inline code 5.6:1 (5.0:1
+inside a callout), the error text 5.2:1 on its popover, and the primary button
+5.3:1 (7.5:1 in dark); the accent as a pressed toolbar glyph holds 4.7:1 on its
+hover tint. The lowest pairing anywhere is 4.6:1, inside a selected block. Component edges
+and states clear 1.4.11: input borders, the pressed toolbar bar and the
+highlighted command each reach 3:1. Placeholders are drawn only on hosts that
+take typing, so a read-only view shows no authoring prompts.
 
 The accent is a foreground as well as a fill — it colours the active toolbar
 glyph — so dark mode re-tunes `--neditor-accent` and `--neditor-on-accent`
@@ -386,7 +436,7 @@ than words. The toolbar takes its accessible names from `labels`, so a screen
 reader announces the translation; only the glyph a sighted user reads stays
 English.
 
-The table toolbar's `⤫ row` and `⤫ col` **are** in `labels`, as
+The table toolbar's `⤫ row` and `⤫ column` **are** in `labels`, as
 `deleteRowGlyph` and `deleteColumnGlyph`, and so is the word printed in the
 corner of a code block, as `codeBlockLabel`.
 
@@ -439,6 +489,8 @@ one pointer per block and there is no inverse operation to get wrong.
 | Key                             | Action                                                   |
 | ------------------------------- | -------------------------------------------------------- |
 | `Enter`                         | Split the block. Lists and to-dos continue themselves.   |
+| `Enter` at the start of a block | Open an empty line above; the block keeps its text.      |
+| `Enter` in a code block         | A newline. Leave with `↓` at the end, or a click below.  |
 | `Enter` on an empty list item   | Leave the list.                                          |
 | `Shift` + `Enter`               | Soft line break inside the block.                        |
 | `Backspace` at the start        | Outdent, then revert to paragraph, then merge upward.    |
@@ -446,6 +498,7 @@ one pointer per block and there is no inverse operation to get wrong.
 | `Delete` at the end             | Merge the next block in.                                 |
 | `Tab` / `Shift` + `Tab`         | Indent / outdent.                                        |
 | `↑` / `↓` at a boundary         | Move to the previous / next block.                       |
+| `↓` at the end of the document  | After a code block or table, open a paragraph below it.  |
 | `⌘`/`Ctrl` + `Shift` + `↑`/`↓`  | Move the block itself.                                   |
 | `⌘`/`Ctrl` + `Enter`            | Toggle a to-do.                                          |
 | `⌘`/`Ctrl` + `Z`                | Undo.                                                    |
@@ -600,7 +653,13 @@ When the clipboard carries no HTML, the plain text is parsed as **Markdown** —
 `# `, `- `, `1. `, `> `, `- [x] `, `---` and fenced code, plus the inline rules.
 One line becomes one block, so soft-wrapped prose arrives as several paragraphs.
 Inline parsing replays the same rules used while typing, so pasting `**a**` and
-typing it cannot diverge.
+typing it give the same result. Three things differ, because a paste sees the
+whole line and typing only what is before the caret: a link destination that
+never closes on the line (`**see [docs](x**`) is not a link, so the bold
+applies, where typing waits for the `)` that may be the next key; a code span
+holds no markup when pasted, where `*a*` typed inside backticks is italic
+before the closing backtick arrives; and a backslash escape is honoured when
+pasted (`\*a*` is literal `*a*`), where a typed backslash stays a backslash.
 
 Where the paste lands depends on its shape:
 
@@ -637,9 +696,10 @@ level under it. The callout's icon is bracketed rather than merely leading so
 that the two directions agree: an emoji-led quote you wrote by hand stays a
 quote, and an icon that is not an emoji still names a callout.
 
-Tables and images are faithful in both formats — a GFM table pasted as plain text
-becomes a real table, cell formatting included, and a ragged one is squared off
-rather than rejected. The delimiter row is read as GFM defines it, so `| - | - |`
+Tables are faithful in both formats, apart from the cell edges noted below — a GFM table pasted as plain text becomes a
+real table, cell formatting included, and a ragged one is squared off rather
+than rejected. An image keeps its source and alt text in both, and its caption
+in HTML only. The delimiter row is read as GFM defines it, so `| - | - |`
 works as well as `| --- | --- |`, with or without alignment colons.
 
 One GFM allowance is not implemented: a row must keep its outer pipes. Deciding
@@ -654,12 +714,40 @@ writes is what `blocksFromMarkdown` reads back:
   a snippet that itself contains ` ``` ` comes back as one code block rather
   than three.
 - A link or image destination holding a paren, a space or an angle bracket is
-  written in the `<…>` form rather than backslash-escaped. The reader matches
-  its rules against a projection in which an escaped character is opaque, so it
-  could never have found such a URL again.
+  written in the `<…>` form rather than backslash-escaped, with any whitespace,
+  `<` or `>` in it percent-encoded: a space has no escape at all, and the
+  bracketed form is the one spelling of such a URL that every reader agrees on.
+  In a link destination a backslash and a backtick are escaped as well — the
+  reader resolves escapes there, as CommonMark does. A bare backtick in a
+  destination is read as part of the URL too, as CommonMark reads it, but the
+  escape also keeps it from a reader that pairs code spans first. In a table
+  cell a pipe is escaped, which would otherwise end the cell. An image source is
+  read literally, so it gets no backslash escapes; the line wrapping of a base64
+  image is dropped as the image enters the document, as a browser ignores it,
+  so the source needs no encoding either.
 - An alt text or callout icon containing `[` or `]` is escaped, and unescaped on
   the way back, so a `]` cannot close the label early and leak the rest of the
   line into the document as markup.
+- Whitespace and line breaks that _begin_ a block are written as numeric
+  character references (`&#32;`, `&#9;`, `&#10;`, …), which would otherwise be
+  read as indentation or dropped. When Markdown is read, a run of such
+  references at the very start of a block is decoded — whitespace, and `&#38;`
+  — exactly as any CommonMark reader shows them; anywhere else a reference
+  stays literal text. Text typed in the editor always round-trips, because a
+  block that itself begins with `&#` is written with the `&` escaped. Markdown
+  from elsewhere (a plain-text paste, a document saved by 0.1.3 or earlier)
+  whose block begins with such a reference comes back as the character.
+- A line break inside an alt text or callout icon is written as a space: a label
+  cannot span lines.
+
+Three things Markdown cannot carry, and the writer does not pretend to: an
+empty paragraph (a blank line is a separator); whitespace or a line break at
+the _end_ of a block (CommonMark strips trailing spaces and ignores a hard break
+that ends a block); and whitespace or a line break at either end of a table
+cell (GFM trims cells). A line break _inside_ a cell is written as a
+backslash at the end of a line, which this reader rejoins into one row; a GFM
+reader ends the row there instead. The JSON document and the HTML clipboard keep
+all of these.
 
 ## Headless use
 
@@ -710,6 +798,9 @@ tree as well as the editor's.
 
 The layout uses logical properties throughout, so `dir="rtl"` on the editor
 mirrors indentation, list markers, the quote bar and the drag handle correctly.
+The floating UI takes the editor's direction too, and the table toolbar's
+"insert column left/right" mean the reader's left and right. Code blocks stay
+left to right, since code is.
 The drag handle's mirroring keys off the editor's own direction, so an LTR
 editor inside an RTL page is left alone rather than mirrored twice.
 

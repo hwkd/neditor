@@ -134,7 +134,14 @@ export class TableToolbar {
       case 'ArrowRight':
       case 'ArrowLeft': {
         event.preventDefault();
-        const delta = event.key === 'ArrowRight' ? 1 : -1;
+        // Visual, like the row it moves along. Under RTL the flex row is
+        // mirrored, so the next button sits to the left and ArrowLeft has to
+        // reach it. Asked of the toolbar's own computed direction, which is
+        // whatever set it -- a `dir` on the portal or a CSS `direction`.
+        const rtl =
+          this.#element.ownerDocument.defaultView?.getComputedStyle(this.#element).direction ===
+          'rtl';
+        const delta = (event.key === 'ArrowRight') !== rtl ? 1 : -1;
         this.#activeIndex =
           (this.#activeIndex + delta + this.#buttons.length) % this.#buttons.length;
         break;

@@ -17,21 +17,35 @@ export const NEDITOR_STYLES: string = `
     sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
   --neditor-font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
   --neditor-text: rgb(55 53 47);
-  /* Alphas chosen for contrast, not taste: 0.75 -> 5.6:1 and 0.70 -> 4.8:1
-     on white. Muted colours real content (captions, completed to-dos), so it
-     is the darker of the two. */
-  --neditor-text-muted: rgb(55 53 47 / 0.75);
-  --neditor-placeholder: rgb(55 53 47 / 0.7);
+  /* Alphas chosen for contrast, not taste. Muted colours real content
+     (captions, completed to-dos), so it stays the darker of the two. The
+     placeholder is tuned on the worst ground it is drawn on, not on white: it
+     was 0.70, which held on white but fell to 4.46:1 on the code block's tint,
+     then 0.72, which held there but fell to 4.28:1 once a block selection's
+     tint stacked under the code tint. 0.75 is 4.62:1 there and 5.6:1 on white;
+     muted moved to 0.78 with it, so an empty caption still reads lighter than
+     a written one. */
+  --neditor-text-muted: rgb(55 53 47 / 0.78);
+  --neditor-placeholder: rgb(55 53 47 / 0.75);
   --neditor-surface: transparent;
   --neditor-surface-raised: rgb(255 255 255);
   --neditor-border: rgb(55 53 47 / 0.09);
   --neditor-hover: rgb(55 53 47 / 0.06);
-  /* Darkened from rgb(35 131 226): white on that was 3.9:1, below 4.5. */
-  --neditor-accent: rgb(25 118 210);
+  /* Darkened from rgb(35 131 226): white on that was 3.9:1, below 4.5. Then
+     again from rgb(25 118 210), which held 4.6:1 as the pressed toolbar glyph
+     on white but 4.14:1 on the hover tint under the pointer that pressed it.
+     This is 5.3:1 on white and 4.7:1 on the tint; every other use is a fill or
+     an edge on a light ground, which only gains from it. */
+  --neditor-accent: rgb(22 108 198);
   --neditor-on-accent: #ffffff;
   --neditor-code-bg: rgb(135 131 120 / 0.15);
-  --neditor-code-text: rgb(185 50 45);
-  --neditor-danger: rgb(212 76 71);
+  /* Measured where they are drawn, not on white: inline code sits on the code
+     tint, and inside a callout on the tint stacked over the callout's own
+     (rgb(185 50 45) was 4.49:1 there). In a selected block the selection tint
+     is under both, where rgb(178 46 41) held only 4.52:1. The error text sits
+     on a popover. */
+  --neditor-code-text: rgb(174 44 39);
+  --neditor-danger: rgb(196 58 53);
   --neditor-shadow: 0 0 0 1px rgb(15 15 15 / 0.05), 0 3px 6px rgb(15 15 15 / 0.1),
     0 9px 24px rgb(15 15 15 / 0.2);
   --neditor-indent: 1.5em;
@@ -63,7 +77,7 @@ export const NEDITOR_STYLES: string = `
   .neditor-portal:not([data-neditor-theme='light']) {
     --neditor-text: rgb(255 255 255 / 0.9);
     --neditor-text-muted: rgb(255 255 255 / 0.68);
-    --neditor-placeholder: rgb(255 255 255 / 0.55);
+    --neditor-placeholder: rgb(255 255 255 / 0.64);
     /* Opaque, unlike the light surface. The foregrounds above are all white,
        so a transparent surface means white text composited onto whatever the
        host happens to paint: on an ordinary light-only page the whole document
@@ -76,7 +90,12 @@ export const NEDITOR_STYLES: string = `
     --neditor-border: rgb(255 255 255 / 0.11);
     --neditor-hover: rgb(255 255 255 / 0.06);
     --neditor-code-bg: rgb(255 255 255 / 0.1);
-    --neditor-code-text: rgb(255 163 158);
+    /* The placeholder and inline code are tuned for a *selected* block, where
+       the selection's blue tint lies under the code and callout tints and
+       lightens the ground: at 0.55 and rgb(255 163 158) a selected empty code
+       block's placeholder was 3.94:1 and inline code in a selected callout
+       3.95:1. */
+    --neditor-code-text: rgb(255 185 181);
     /* Re-tuned as a pair, because the accent is a *foreground* here — the
        active toolbar glyph — as well as the primary button's background. The
        light-mode blue reads 3.3:1 on the raised dark surface, so it is
@@ -98,14 +117,14 @@ export const NEDITOR_STYLES: string = `
 .neditor-portal[data-neditor-theme='dark'] {
   --neditor-text: rgb(255 255 255 / 0.9);
   --neditor-text-muted: rgb(255 255 255 / 0.68);
-  --neditor-placeholder: rgb(255 255 255 / 0.55);
+  --neditor-placeholder: rgb(255 255 255 / 0.64);
   /* Opaque for the reason given in the prefers-color-scheme block. */
   --neditor-surface: rgb(25 25 25);
   --neditor-surface-raised: rgb(37 37 37);
   --neditor-border: rgb(255 255 255 / 0.11);
   --neditor-hover: rgb(255 255 255 / 0.06);
   --neditor-code-bg: rgb(255 255 255 / 0.1);
-  --neditor-code-text: rgb(255 163 158);
+  --neditor-code-text: rgb(255 185 181);
   /* Kept in step with the prefers-color-scheme block above. */
   --neditor-accent: rgb(110 170 250);
   --neditor-on-accent: rgb(23 23 23);
@@ -175,7 +194,12 @@ export const NEDITOR_STYLES: string = `
   word-break: break-word;
 }
 
-.neditor-block__content:empty::before {
+/* Only on hosts that take typing. Generated content is part of an element's
+   accessible name, so in a read-only document an empty caption named its
+   figure "Add a caption" and an empty heading announced itself as "Heading 1"
+   -- instructions to a reader who cannot act on them. The renderer writes
+   contenteditable as true or false on every host, in both modes. */
+.neditor-block__content[contenteditable='true']:empty::before {
   content: attr(data-placeholder);
   color: var(--neditor-placeholder);
   pointer-events: none;
@@ -316,6 +340,15 @@ export const NEDITOR_STYLES: string = `
 
 .neditor-block__content:is(code) {
   display: block;
+  /* Code is LTR whatever the prose around it is. Under dir="rtl" the block took
+     the RTL base direction, and the bidi algorithm moved a line's trailing
+     punctuation to the far end -- a string literal ending in "; read as ;" at
+     the start. Set on the code element only, so the pre and its label keep
+     the editor's direction and the label stays on the reading-start side.
+     start, not left: it is the start of this box, which is now LTR. */
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: start;
   padding: 0;
   font-family: var(--neditor-font-mono);
   font-size: 0.85em;
@@ -331,7 +364,9 @@ export const NEDITOR_STYLES: string = `
   gap: 0.5rem;
   flex: 1 1 auto;
   min-width: 0;
-  padding: 0.75rem 1rem 0.75rem 0.75rem;
+  /* Logical, so the wider side follows the reading direction in RTL too. */
+  padding-block: 0.75rem;
+  padding-inline: 0.75rem 1rem;
   border-radius: 4px;
   background: var(--neditor-callout-bg);
 }
@@ -350,8 +385,14 @@ export const NEDITOR_STYLES: string = `
   user-select: none;
 }
 
-.neditor-block__icon:hover {
+.neditor-block__icon:hover:not(:disabled) {
   background: var(--neditor-hover);
+}
+
+/* Read-only: the picker will not open, so the icon is not offered as a control. */
+.neditor-block__icon:disabled {
+  color: inherit;
+  cursor: default;
 }
 
 /* --------------------------------------------------------------- toggle -- */
@@ -411,8 +452,9 @@ export const NEDITOR_STYLES: string = `
   cursor: pointer;
 }
 
-.neditor-image__trigger:disabled,
-.neditor-image__placeholder:disabled {
+/* The empty image's "Add an image" button has no disabled state to style: a
+   read-only view does not draw it at all. */
+.neditor-image__trigger:disabled {
   cursor: default;
 }
 
@@ -534,6 +576,10 @@ export const NEDITOR_STYLES: string = `
 
 .neditor-slash-menu__item[data-active='true'] {
   background: var(--neditor-hover);
+  /* The tint alone is 1.11:1 against the menu, and 1.4.11 asks 3:1 of a state
+     indicator. An inset outline is symmetric, so it needs no mirroring. */
+  outline: 2px solid var(--neditor-accent);
+  outline-offset: -2px;
 }
 
 .neditor-slash-menu__icon {
@@ -644,22 +690,19 @@ export const NEDITOR_STYLES: string = `
   /* The gap sits between the handle and the text, which is the inline-end side
      in both directions; a physical right puts it behind the handle in RTL. */
   padding-inline-end: 0.25rem;
-  /* Anchored by its inline-end edge to where the block's text starts. */
-  transform: translateX(-100%);
+  /* Anchored by its inline-end edge to where the block's text starts: the
+     inset places its start edge there, and a negative start margin of its own
+     width pulls it back. Logical, so the browser resolves the side from the
+     gutter's real direction, however that was set. It used to be a physical
+     translateX mirrored by selectors guessing the direction from [dir]
+     attributes, which put the handle over the text of an LTR editor inside an
+     LTR wrapper inside an RTL page, and never mirrored a CSS-only direction.
+     A unitless 0 gutter width makes this calc invalid, which falls back to a
+     0 margin -- the right answer for a gutter with no width. */
+  margin-inline-start: calc(-1 * var(--neditor-gutter-width));
   opacity: 0;
   transition: opacity 100ms ease;
   pointer-events: none;
-}
-
-/* translateX is physical, so the direction has to be mirrored explicitly --
-   and against the editor's own direction, not an ancestor's. Keyed off a bare
-   [dir='rtl'] this matched an LTR editor sitting anywhere inside an RTL page,
-   where inset-inline-start had already resolved to the left: the mirroring was
-   applied to something unmirrored and dropped the drag handle on top of the
-   first characters of every line. */
-.neditor[dir='rtl'] .neditor-gutter,
-[dir='rtl'] .neditor:not([dir]) .neditor-gutter {
-  transform: translateX(100%);
 }
 
 .neditor-gutter[data-visible='true'] {
@@ -719,6 +762,11 @@ export const NEDITOR_STYLES: string = `
 
 /* Descendant selector only: a code *block* is itself .neditor-block__content. */
 .neditor-block__content code {
+  /* LTR and isolated, like the code block, and for the same reason: measured
+     in an RTL paragraph, foo(bar); rendered as ;foo(bar), its trailing
+     semicolon taken by the surrounding RTL text. */
+  direction: ltr;
+  unicode-bidi: isolate;
   padding: 0.15em 0.35em;
   border-radius: 3px;
   background: var(--neditor-code-bg);
@@ -778,6 +826,9 @@ export const NEDITOR_STYLES: string = `
 
 .neditor-toolbar__button[data-active='true'] {
   color: var(--neditor-accent);
+  /* Not a hue alone: the accent is 2.33:1 against the unpressed ink (1.97:1
+     dark), under 1.4.11's 3:1. A bar under the glyph is a change of shape. */
+  box-shadow: inset 0 -2px 0 var(--neditor-accent);
 }
 
 .neditor-toolbar__button[data-mark='bold'] {
@@ -845,7 +896,9 @@ export const NEDITOR_STYLES: string = `
   width: 100%;
   height: 1.75rem;
   padding: 0 0.5rem;
-  border: 1px solid var(--neditor-border);
+  /* The muted ink, as for the to-do box: the divider border is 1.17:1, and
+     1.4.11 asks 3:1 of the edge that shows where a field is. */
+  border: 1px solid var(--neditor-text-muted);
   border-radius: 4px;
   background: transparent;
   color: var(--neditor-text);
@@ -905,7 +958,9 @@ export const NEDITOR_STYLES: string = `
   width: 100%;
   height: 1.875rem;
   padding: 0 0.5rem;
-  border: 1px solid var(--neditor-border);
+  /* The muted ink, as for the to-do box: the divider border is 1.17:1, and
+     1.4.11 asks 3:1 of the edge that shows where a field is. */
+  border: 1px solid var(--neditor-text-muted);
   border-radius: 4px;
   background: transparent;
   color: var(--neditor-text);
@@ -933,6 +988,9 @@ export const NEDITOR_STYLES: string = `
 
 .neditor-link-editor {
   display: flex;
+  /* Wraps so the error, at flex-basis 100%, takes a line of its own. Without
+     it the error was squeezed between the input and Apply and clipped. */
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.375rem;
   width: 22rem;
@@ -941,11 +999,17 @@ export const NEDITOR_STYLES: string = `
 }
 
 .neditor-link-editor__input {
-  flex: 1 1 auto;
+  /* A zero basis, so the input takes what Apply and Remove leave rather than
+     asking for its intrinsic width first. At auto that width was the basis,
+     and in a wrapping row the input dropped to a line of its own at 320px.
+     The error, at 100%, is the only thing meant to wrap. */
+  flex: 1 1 0;
   min-width: 0;
   height: 1.875rem;
   padding: 0 0.5rem;
-  border: 1px solid var(--neditor-border);
+  /* The muted ink, as for the to-do box: the divider border is 1.17:1, and
+     1.4.11 asks 3:1 of the edge that shows where a field is. */
+  border: 1px solid var(--neditor-text-muted);
   border-radius: 4px;
   background: transparent;
   color: var(--neditor-text);
@@ -966,6 +1030,9 @@ export const NEDITOR_STYLES: string = `
 .neditor-image-editor__error {
   margin: 0.25rem 0 0;
   flex-basis: 100%;
+  /* Below the buttons rather than between the input and Apply. The reading
+     order does not matter here: the field names it through aria-describedby. */
+  order: 1;
   font-size: 0.75em;
   color: var(--neditor-danger);
 }
@@ -1051,13 +1118,46 @@ export const NEDITOR_STYLES: string = `
     background: HighlightText;
   }
 
-  /* forced-color-adjust inherits, so the opt-out above took the whole subtree
-     with it: bullets and completed to-dos kept their author colour and were
-     painted onto the system Highlight, at around 1.2:1. Only the block box
-     itself opts out; everything inside it goes back to the system palette,
-     where an unforced colour is dropped and HighlightText is inherited. */
-  .neditor-block[data-selected='true'] * {
-    forced-color-adjust: auto;
+  /* forced-color-adjust inherits, so the opt-out above takes the whole subtree
+     with it, and neither way out of that is safe on its own. Left inherited,
+     bullets and completed to-dos kept their author colour and were painted
+     onto the system Highlight at around 1.2:1. Handed back with auto, Chromium
+     drew its readability backplate -- Canvas, white -- behind every run of
+     text, while the text still inherited HighlightText, also white: the
+     selected block went blank. So the subtree stays opted out and every colour
+     in it is stated in system terms, which reads the same with a backplate or
+     without one (Firefox has none). The content element is named as well,
+     because the completed to-do rule outranks a bare star; the pseudo-elements
+     because they carry the placeholder and the code block's label. */
+  .neditor-block[data-selected='true'] *,
+  .neditor-block[data-selected='true'] *::before,
+  .neditor-block[data-selected='true'] *::after,
+  .neditor-block[data-selected='true'] .neditor-block__content,
+  .neditor-block[data-selected='true'] .neditor-block__content::before {
+    forced-color-adjust: none;
+    color: HighlightText;
+    background-color: transparent;
+    border-color: HighlightText;
+    text-decoration-color: HighlightText;
+  }
+
+  /* The star above cleared the box's fill, so a checked box is restated
+     inverted: a HighlightText square with a Highlight tick. */
+  .neditor-block[data-selected='true'] .neditor-block__checkbox[aria-checked='true'] {
+    background-color: HighlightText;
+  }
+
+  .neditor-block[data-selected='true'] .neditor-block__checkbox[aria-checked='true']::after {
+    background-color: Highlight;
+  }
+
+  /* Each of these was bounded by nothing but a tint, and forced colours
+     replace every tint with Canvas. The "Add an image" button is one too. */
+  .neditor-callout,
+  .neditor-block__pre,
+  .neditor-block__content code,
+  .neditor-image__placeholder {
+    border: 1px solid CanvasText;
   }
 
   .neditor-slash-menu__item[data-active='true'],

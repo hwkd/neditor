@@ -657,15 +657,31 @@ describe('table rows that look like alignment', () => {
 describe('a span that reaches back is bounded work, not unbounded', () => {
   const nested = (n: number): string => '['.repeat(n) + '*a* '.repeat(n) + '](u)'.repeat(n);
 
-  test('nested spans over one stretch stay under a second', () => {
+  test('nested spans over one stretch grow linearly', () => {
     // Each closing delimiter used to drag the whole reach back and rebuild it,
     // so this shape was quadratic: 176KB took 47s inside the paste handler.
-    const source = Array.from({ length: 50 }, () => nested(400)).join('\n');
-    const started = performance.now();
+    // Measured as growth, best of three, as the other growth tests are: the
+    // four-second stopwatch it replaced failed on a loaded machine with
+    // nothing wrong. Eight times the nesting costs about 7-10 times as much
+    // now; the parser before `0dcfc8f` measures 33 on the same pair.
+    const elapsed = (source: string): number => {
+      let best = Infinity;
 
-    blocksFromMarkdown(source);
+      for (let run = 0; run < 3; run += 1) {
+        const started = performance.now();
 
-    expect(performance.now() - started).toBeLessThan(4000);
+        blocksFromMarkdown(source);
+        best = Math.min(best, performance.now() - started);
+      }
+
+      return Math.max(best, 0.1);
+    };
+    const short = elapsed(nested(100));
+    const long = elapsed(nested(800));
+
+    expect(long / short, `long ${Math.round(long)}ms vs short ${Math.round(short)}ms`).toBeLessThan(
+      20,
+    );
   });
 
   test('a genuinely long span still closes', () => {
@@ -779,6 +795,23 @@ describe('a destination that holds its own "]("', () => {
       expect(href(`[see](<${url}>)`)).toBe(url);
     },
   );
+
+  // The cases above pass whatever the reader does with the inner pair, because
+  // `sanitizeUrl` refuses `bar` and `1`. With a URL it accepts, the inner pair
+  // was read as a link of its own once the plain rule stopped matching at the
+  // outer `[` -- and the outer link came back pointing somewhere else.
+  test.each([
+    'https://x.test/?q=[foo](https://y.test/)',
+    'https://www.google.com/search?q=[docs](example.com)',
+    'https://x.test/?q=[**a**](https://y.test/)z',
+  ])('even when the inner pair would be a link of its own: %s', (url) => {
+    expect(href(`[see](<${url}>)`)).toBe(url);
+    expect(
+      blocksFromMarkdown(`[see](<${url}>)`)[0]!
+        .content.map((r) => r.text)
+        .join(''),
+    ).toBe('see');
+  });
 });
 
 describe('a destination carrying many "](" pairs', () => {
@@ -829,5 +862,414 @@ describe('a GFM delimiter row as GFM actually defines it', () => {
     const blocks = blocksFromMarkdown('| a | b |\n| c | d |');
 
     expect(blocks.every((one) => one.type !== 'table')).toBe(true);
+  });
+});
+
+describe('the open-destination test stays linear', () => {
+  test('a line of hinges whose labels never open', () => {
+    // Every `](` here fails the label test, so each mark that closes walks back
+    // over the whole destination it might be in. That walk is bounded by the
+    // rule window, never by the line.
+    const started = performance.now();
+    const runs = parseInlineMarkdown(`[${'](*a*'.repeat(20000)}`);
+
+    // `[]` is an empty label, so none of these is a link and every `*a*` is
+    // emphasis.
+    expect(runs.filter((run) => run.marks?.includes('italic'))).toHaveLength(20000);
+    expect(performance.now() - started).toBeLessThan(4000);
+  });
+});
+
+describe('an escaped character in a link destination is that character', () => {
+  /**
+   * Rules are matched against a projection in which an escaped character is a
+   * placeholder, so that it can never be read as a delimiter -- and the link
+   * rule took its href from that projection, placeholder and all. CommonMark
+   * reads `\(` in a destination as `(`; the href came out with `%00` in its
+   * place, which is a link to a page that does not exist.
+   */
+  const href = (source: string): string | undefined =>
+    blocksFromMarkdown(source)[0]?.content.find((run) => run.link)?.link;
+
+  test.each([
+    [
+      '[Mercury](https://en.wikipedia.org/wiki/Mercury_\\(planet\\))',
+      'https://en.wikipedia.org/wiki/Mercury_(planet)',
+    ],
+    ['[x](https://a.test/snake\\_case)', 'https://a.test/snake_case'],
+    ['[x](<https://a.test/a\\>b>)', 'https://a.test/a%3Eb'],
+    ['[x](https://a.test/?q=a\\\\b)', 'https://a.test/?q=a\\b'],
+    // Every ASCII punctuation character escapes in CommonMark, not only the
+    // ones this editor's writer protects in prose.
+    ['[x](https://a.test/?q=a\\$b)', 'https://a.test/?q=a$b'],
+  ])('%s', (source, expected) => {
+    expect(href(source)).toBe(expected);
+  });
+
+  test('the label keeps its text, and the escape is still not a delimiter', () => {
+    expect(blocksFromMarkdown('[a](https://a.test/\\*x\\*)')[0]?.content).toEqual([
+      { text: 'a', link: 'https://a.test/*x*' },
+    ]);
+  });
+
+  test('a backslash that escapes nothing stays', () => {
+    expect(href('[x](https://a.test/?q=a\\b)')).toBe('https://a.test/?q=a\\b');
+  });
+});
+
+describe('a long line on which no rule fires stays linear', () => {
+  /**
+   * The text the rules match against is cut only behind runs that a firing
+   * rule has folded and parked, so on a line where nothing ever fires it grew
+   * to the whole line, and every closer's test sliced it afresh:
+   * `'*b '.repeat(80000)` took 4.4 seconds. Each `*`, `>` or `)` there is a
+   * closer that closes nothing.
+   *
+   * Measured as growth rather than against a stopwatch: four times the line
+   * should cost about four times as much. Unfixed these ratios were near 50;
+   * fixed they sit near 4. The best of three runs, as the HTML growth tests do,
+   * so one stalled run cannot decide it.
+   *
+   * `>` and `)` rather than the finding's `*`, though `*b ` was fixed by the
+   * same change (1.8 s to 0.4 s at 80,000 repeats): every `*` also runs the
+   * emphasis patterns across the whole rule window, a linear cost large enough
+   * that its unfixed ratio, about 16, sat too close to the bound to pin it on
+   * a loaded machine. The cheaper closers leave only the growth to measure.
+   */
+  function elapsed(source: string): number {
+    let best = Infinity;
+
+    for (let run = 0; run < 3; run += 1) {
+      const started = performance.now();
+
+      parseInlineMarkdown(source);
+      best = Math.min(best, performance.now() - started);
+    }
+
+    return Math.max(best, 0.1);
+  }
+
+  test.each(['<b> ', '(b) '])('%j repeated', (unit) => {
+    const n = 20000;
+    const short = elapsed(unit.repeat(n));
+    const long = elapsed(unit.repeat(4 * n));
+
+    expect(long / short, `long ${Math.round(long)}ms vs short ${Math.round(short)}ms`).toBeLessThan(
+      10,
+    );
+  });
+
+  test('and still reads what it holds', () => {
+    // Folding is a layout: the text and every span that does close survive it.
+    const line = `${'<b> '.repeat(2000)}**x**${' *b'.repeat(2000)} [l](https://a.test/)`;
+    const runs = parseInlineMarkdown(line);
+
+    expect(richToPlainText(runs)).toBe(`${'<b> '.repeat(2000)}x${' *b'.repeat(2000)} l`);
+    expect(runs.filter((run) => run.marks?.includes('bold'))).toEqual([
+      { text: 'x', marks: ['bold'] },
+    ]);
+    expect(runs.at(-1)).toEqual({ text: 'l', link: 'https://a.test/' });
+  });
+
+  test('a span opened before the folded stretch still closes over it', () => {
+    // A full window is kept, so a `~~` a rule can still reach is never folded
+    // away from its closer.
+    const inner = '<b> '.repeat(400).trim();
+    const runs = parseInlineMarkdown(`${'<b> '.repeat(3000)}~~${inner}~~`);
+
+    expect(runs.at(-1)).toEqual({ text: inner, marks: ['strikethrough'] });
+  });
+});
+
+describe('a code span reads as CommonMark reads it', () => {
+  /**
+   * Backslash escapes do not apply inside a code span, a span is opened and
+   * closed by backtick runs of the same length, and nothing else is markup
+   * inside one. The writer relies on all three now that it writes code
+   * literally.
+   */
+  const runs = (source: string) => blocksFromMarkdown(source)[0]?.content;
+
+  test.each([
+    ['a backslash is literal', '`a\\*b`', [{ text: 'a\\*b', marks: ['code'] }]],
+    ['so is a trailing one', '`a\\`', [{ text: 'a\\', marks: ['code'] }]],
+    ['a longer fence holds a backtick', '``a`b``', [{ text: 'a`b', marks: ['code'] }]],
+    ['one padding space is stripped', '`` `x ``', [{ text: '`x', marks: ['code'] }]],
+    ['emphasis inside is literal', '`*a* **b**`', [{ text: '*a* **b**', marks: ['code'] }]],
+    [
+      'a code span wins over a link it overlaps',
+      '[foo`](/uri)`',
+      [{ text: '[foo' }, { text: '](/uri)', marks: ['code'] }],
+    ],
+    ['runs of different lengths do not pair', 'x ``a` b', [{ text: 'x ``a` b' }]],
+    ['an escaped backtick opens nothing', '\\`a`', [{ text: '`a`' }]],
+    [
+      'marks around it still apply',
+      '**x `*` y**',
+      [
+        { text: 'x ', marks: ['bold'] },
+        { text: '*', marks: ['bold', 'code'] },
+        { text: ' y', marks: ['bold'] },
+      ],
+    ],
+    [
+      'a span in a link destination is part of the URL',
+      '[t](https://a.test/?q=`x`)',
+      [{ text: 't', link: 'https://a.test/?q=`x`' }],
+    ],
+  ])('%s', (_name, source, expected) => {
+    expect(runs(source)).toEqual(expected);
+  });
+
+  // Straight through `parseInlineMarkdown`: a block reader would join the two
+  // lines or trim the spaces before the span rules were ever asked.
+  test.each([
+    ['a span does not cross a line break', 'a `b\nc`', [{ text: 'a `b\nc`' }]],
+    [
+      'content of nothing but spaces keeps its padding',
+      'a `  ` b',
+      [{ text: 'a ' }, { text: '  ', marks: ['code'] }, { text: ' b' }],
+    ],
+    ['so does a span that is the whole line', '`  `', [{ text: '  ', marks: ['code'] }]],
+    ['other content loses one space each side', '` a `', [{ text: 'a', marks: ['code'] }]],
+  ])('%s', (_name, source, expected) => {
+    expect(parseInlineMarkdown(source)).toEqual(expected);
+  });
+});
+
+describe('a pipe in a link destination in a table cell', () => {
+  test('an escaped pipe is part of the URL, not the end of the cell', () => {
+    const [table] = blocksFromMarkdown(
+      '| [a](https://x.test/a\\|b) | h |\n| --- | --- |\n| c | d |',
+    );
+
+    expect(table?.rows?.[0]).toEqual([
+      [{ text: 'a', link: 'https://x.test/a|b' }],
+      [{ text: 'h' }],
+    ]);
+  });
+
+  test('the writer escapes it there, and only there', () => {
+    const link = 'https://fonts.googleapis.com/css?family=Roboto|Open+Sans';
+    const table: Block = {
+      ...createBlock('table'),
+      rows: [
+        [[{ text: 'a', link }], [{ text: 'h' }]],
+        [[{ text: 'c' }], [{ text: 'd' }]],
+      ],
+    };
+    const paragraph: Block = { ...createBlock('paragraph'), content: [{ text: 'a', link }] };
+
+    expect(toMarkdown({ blocks: [table] }).split('\n')[0]).toBe(
+      '| [a](https://fonts.googleapis.com/css?family=Roboto\\|Open+Sans) | h |',
+    );
+    expect(toMarkdown({ blocks: [paragraph] })).toBe(`[a](${link})`);
+  });
+});
+
+describe('a backtick in a link destination', () => {
+  /**
+   * A span that opens in a link's TEXT wins over the link (`[foo`](/uri)``,
+   * above), but a backtick that begins inside a destination opens nothing:
+   * CommonMark parses the destination when its `]` is reached, so the
+   * backtick is part of the URL. Read bare, `[a](https://x.test/?q=`) and
+   * `code`` is a link and then the code `code` -- see "a backtick that begins
+   * inside a link destination" below. The writer escapes it anyway; that is
+   * correct and costs nothing, since the reader resolves the escape, and it is
+   * what these tests pin.
+   */
+  test('is escaped by the writer, and reads back as the same link', () => {
+    const block: Block = {
+      ...createBlock('paragraph'),
+      content: [
+        { text: 'a', link: 'https://x.test/?q=`' },
+        { text: ' and ' },
+        { text: 'code', marks: ['code'] },
+      ],
+    };
+    const markdown = toMarkdown({ blocks: [block] });
+
+    expect(markdown).toBe('[a](https://x.test/?q=\\`) and `code`');
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual(block.content);
+  });
+
+  test('reads back from the angle-bracketed form too', () => {
+    // In the query, where the URL parser leaves a backtick alone; in the path
+    // it is percent-encoded before the writer ever sees it.
+    expect(blocksFromMarkdown('[a](<https://x.test/?q=(\\`)>) `c`')[0]?.content).toEqual([
+      { text: 'a', link: 'https://x.test/?q=(`)' },
+      { text: ' ' },
+      { text: 'c', marks: ['code'] },
+    ]);
+  });
+});
+
+describe('a plain destination never begins with "<"', () => {
+  /**
+   * CommonMark's plain destination "does not start with `<`": a `<` there opens
+   * the bracketed form, and a bracketed form that fails is no link at all. The
+   * reader took the plain form at the first `)` instead, so the angled
+   * destination the writer emits for any URL holding a paren -- here what
+   * `sanitizeUrl` makes of `mailto:a@x.test?subject=Re: (draft)` -- closed
+   * early, became `https://%3Cmailto:…` and left `>)` in the text.
+   */
+  const runs = (source: string) => blocksFromMarkdown(source)[0]?.content;
+
+  test('a mailto destination holding a paren reads back whole', () => {
+    expect(runs('[call](<mailto:a@x.test?subject=Re:%20(draft)>)')).toEqual([
+      { text: 'call', link: 'mailto:a@x.test?subject=Re:%20(draft)' },
+    ]);
+  });
+
+  test('so does any bracketed destination with a ")" before its ">"', () => {
+    expect(runs('[a](<mailto:a@x.test?s=)>)')).toEqual([
+      { text: 'a', link: 'mailto:a@x.test?s=)' },
+    ]);
+  });
+
+  test('and the writer’s own output survives the trip', () => {
+    const block: Block = {
+      ...createBlock('paragraph'),
+      content: [{ text: 'call', link: 'mailto:a@x.test?subject=Re:%20(draft)' }],
+    };
+    const markdown = toMarkdown({ blocks: [block] });
+
+    expect(markdown).toBe('[call](<mailto:a@x.test?subject=Re:%20(draft)>)');
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual(block.content);
+  });
+
+  test('a bracketed form that never closes is not a plain link either', () => {
+    // `<u` reads as userinfo in front of the host `x.test`, so `sanitizeUrl`
+    // accepts it, and the plain rule made this a link to `https://%3Cu@x.test/`.
+    expect(parseInlineMarkdown('[a](<u@x.test)')).toEqual([{ text: '[a](<u@x.test)' }]);
+  });
+
+  test('the "](<" that opens nothing does not hide a link after it', () => {
+    // The first `](` in reach is not where a plain destination can open when a
+    // `<` follows it, so the later one is the link.
+    expect(parseInlineMarkdown('[a](<x[b](https://y.test/)')).toEqual([
+      { text: '[a](<x' },
+      { text: 'b', link: 'https://y.test/' },
+    ]);
+  });
+
+  test('nor holds emphasis off as though a destination were open', () => {
+    expect(parseInlineMarkdown('[a](<b**x**)')).toEqual([
+      { text: '[a](<b' },
+      { text: 'x', marks: ['bold'] },
+      { text: ')' },
+    ]);
+  });
+
+  test('an escaped "<" is a plain destination’s first character like any other', () => {
+    // Not the defect: the bound of the fix. An escaped `<` opens no bracketed
+    // form, so CommonMark reads it as the start of a plain destination.
+    expect(parseInlineMarkdown('[a](\\<u@x.test)')).toEqual([
+      { text: 'a', link: 'https://%3Cu@x.test/' },
+    ]);
+  });
+});
+
+describe('a backtick that begins inside a link destination', () => {
+  /**
+   * A destination is parsed from the input when its `]` is reached, so a
+   * backtick in it is part of the URL and opens no code span -- in cmark and
+   * commonmark.js `[a](https://x.test/?q=`) and `code`` is a link followed by
+   * the code `code`. The reader paired the destination's backtick with the next
+   * one in the line, swallowed the link's `)` into a span and left the
+   * remaining backtick literal. A span that opens in the link TEXT still wins
+   * (`[foo`](/uri)``, CommonMark's own example), and a destination that does
+   * not close is no destination.
+   */
+  const runs = (source: string) => parseInlineMarkdown(source);
+
+  test('in a plain destination it is part of the URL', () => {
+    expect(runs('[a](https://x.test/?q=`) and `code`')).toEqual([
+      { text: 'a', link: 'https://x.test/?q=`' },
+      { text: ' and ' },
+      { text: 'code', marks: ['code'] },
+    ]);
+  });
+
+  test('in a bracketed destination too', () => {
+    expect(runs('[a](<https://x.test/?q=`>) and `code`')).toEqual([
+      { text: 'a', link: 'https://x.test/?q=`' },
+      { text: ' and ' },
+      { text: 'code', marks: ['code'] },
+    ]);
+  });
+
+  test('right after the "(" as anywhere else', () => {
+    expect(runs('[a](/x?q=`) `b`')).toEqual([
+      { text: 'a', link: '/x?q=`' },
+      { text: ' ' },
+      { text: 'b', marks: ['code'] },
+    ]);
+  });
+
+  test('a span opened in the link text still wins', () => {
+    expect(runs('[foo`](/uri)`')).toEqual([{ text: '[foo' }, { text: '](/uri)', marks: ['code'] }]);
+  });
+
+  test('a destination that a space has already ended is not one', () => {
+    expect(runs('[a](x `b`)')).toEqual([
+      { text: '[a](x ' },
+      { text: 'b', marks: ['code'] },
+      { text: ')' },
+    ]);
+  });
+
+  test('a destination that never closes holds nothing literal', () => {
+    expect(runs('[a](https://x.test/?q=`b` c')).toEqual([
+      { text: '[a](https://x.test/?q=' },
+      { text: 'b', marks: ['code'] },
+      { text: ' c' },
+    ]);
+  });
+
+  test('the writer’s escaped spelling still reads the same', () => {
+    expect(runs('[a](https://x.test/?q=\\`) and `code`')).toEqual(
+      runs('[a](https://x.test/?q=`) and `code`'),
+    );
+  });
+
+  /**
+   * Measured as growth, best of three, as the other growth tests here are:
+   * eight times the line should cost about eight times as much.
+   *
+   * A backtick that is part of a URL is an escaped character to the rules, and
+   * reading one back out of a destination used to fold the unparsed tail of
+   * the line into the runs -- for every link candidate, including the ones
+   * `sanitizeUrl` refuses. Nothing then folded it away again, so on a line of
+   * `[a](x\`)`, the writer's own spelling, every `)` joined the whole line:
+   * 5,000 repeats took 27 ms and 20,000 took 318. Making the bare backtick
+   * literal sent `[a](x`)` down the same path. Unfixed the 8x ratio is about
+   * 30; fixed it sits near 8.
+   */
+  const elapsed = (source: string): number => {
+    let best = Infinity;
+
+    for (let run = 0; run < 3; run += 1) {
+      const started = performance.now();
+
+      parseInlineMarkdown(source);
+      best = Math.min(best, performance.now() - started);
+    }
+
+    return Math.max(best, 0.1);
+  };
+
+  test.each([
+    ['a refused link holding a bare backtick', (n: number) => '[a](x`)'.repeat(n)],
+    ['a refused link holding an escaped one', (n: number) => '[a](x\\`)'.repeat(n)],
+    ['one destination of many backticks', (n: number) => `[a](${'x`'.repeat(n)})`],
+  ])('%s, repeated, stays linear', (_name, line) => {
+    const n = 5000;
+    const short = elapsed(line(n));
+    const long = elapsed(line(8 * n));
+
+    expect(long / short, `long ${Math.round(long)}ms vs short ${Math.round(short)}ms`).toBeLessThan(
+      20,
+    );
   });
 });

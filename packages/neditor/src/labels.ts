@@ -96,7 +96,12 @@ export interface NEditorLabels {
   insertColumnLeft: string;
   insertColumnRight: string;
   deleteColumn: string;
-  /** Visible text on the delete-column button, beside its accessible name. */
+  /**
+   * Visible text on the delete-column button, beside its accessible name.
+   *
+   * Every word in it should also be a word of `deleteColumn` (and likewise
+   * for the row pair), or the button fails WCAG 2.5.3 label-in-name.
+   */
   deleteColumnGlyph: string;
   /**
    * The word printed in the corner of a code block.
@@ -282,7 +287,10 @@ export const DEFAULT_LABELS: NEditorLabels = {
   insertColumnLeft: 'Insert column left',
   insertColumnRight: 'Insert column right',
   deleteColumn: 'Delete this column',
-  deleteColumnGlyph: '⤫ col',
+  // The whole word: the name is "Delete this column", and a visible word that
+  // is not a word of the name fails WCAG 2.5.3 -- a speech user saying
+  // "col" matches nothing.
+  deleteColumnGlyph: '⤫ column',
   codeBlockLabel: 'code',
 
   blocksSelected: '{count} blocks selected',

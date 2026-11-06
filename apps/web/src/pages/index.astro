@@ -32,14 +32,44 @@ import Layout from '../layouts/Layout.astro';
       </div>
 
       <aside class="inspector">
-        <div class="inspector__tabs" role="tablist">
-          <button type="button" role="tab" data-panel="markdown" aria-selected="true">
+        <div class="inspector__tabs" role="tablist" aria-label="Document output">
+          <button
+            type="button"
+            role="tab"
+            id="tab-markdown"
+            data-panel="markdown"
+            aria-selected="true"
+            aria-controls="panel-markdown"
+          >
             Markdown
           </button>
-          <button type="button" role="tab" data-panel="json" aria-selected="false">JSON</button>
+          <button
+            type="button"
+            role="tab"
+            id="tab-json"
+            data-panel="json"
+            aria-selected="false"
+            aria-controls="panel-json"
+            tabindex="-1"
+          >
+            JSON
+          </button>
         </div>
-        <pre class="inspector__output" data-output="markdown"></pre>
-        <pre class="inspector__output" data-output="json" hidden></pre>
+        <pre
+          class="inspector__output"
+          id="panel-markdown"
+          role="tabpanel"
+          aria-labelledby="tab-markdown"
+          tabindex="0"
+          data-output="markdown"></pre>
+        <pre
+          class="inspector__output"
+          id="panel-json"
+          role="tabpanel"
+          aria-labelledby="tab-json"
+          tabindex="0"
+          data-output="json"
+          hidden></pre>
       </aside>
     </div>
   </main>
@@ -47,6 +77,16 @@ import Layout from '../layouts/Layout.astro';
 
 <script>
   import { createEditor, type NEditorDocument } from '@neditor/core';
+
+  // The editor uses Ctrl off Apple platforms; the copy says so too.
+  const mac = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+  const SHORTCUT_K = mac ? 'Cmd+K' : 'Ctrl+K';
+
+  if (!mac) {
+    for (const node of document.querySelectorAll<HTMLElement>('kbd, .editor-actions__hint')) {
+      node.textContent = (node.textContent ?? '').replace(/⌘/g, 'Ctrl+').replace(/⇧/g, 'Shift+');
+    }
+  }
 
   const seed: NEditorDocument = {
     blocks: [
@@ -63,7 +103,7 @@ import Layout from '../layouts/Layout.astro';
           { text: 'This page runs ' },
           { text: '@neditor/core', marks: ['code'] },
           { text: ', the reusable package in this monorepo. Select any text to format it, or press ' },
-          { text: 'Cmd+K', marks: ['bold'] },
+          { text: SHORTCUT_K, marks: ['bold'] },
           { text: ' to add a ' },
           { text: 'link', link: 'https://developer.mozilla.org/en-US/docs/Web/API/Selection' },
           { text: '.' },
@@ -241,8 +281,15 @@ import Layout from '../layouts/Layout.astro';
       button?.addEventListener('mousedown', (event) => {
         event.preventDefault();
       });
-      button?.addEventListener('click', () => {
+      button?.addEventListener('click', (event) => {
         run();
+
+        // undo() moves focus into the editor to restore the caret. Pressed
+        // from the keyboard (a click with no pointer: detail 0), the user
+        // expects to press again, so focus comes back to the button.
+        if (event.detail === 0) {
+          button.focus();
+        }
       });
     }
 
@@ -256,16 +303,42 @@ import Layout from '../layouts/Layout.astro';
       }
     });
 
-    for (const tab of document.querySelectorAll<HTMLButtonElement>('[role="tab"]')) {
+    // The tabs pattern: one tab stop for the group, arrows and Home/End move
+    // between tabs, and the selected tab's panel is shown.
+    const tabs = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+    const select = (tab: HTMLButtonElement): void => {
+      for (const other of tabs) {
+        const selected = other === tab;
+        other.setAttribute('aria-selected', String(selected));
+        other.tabIndex = selected ? 0 : -1;
+      }
+
+      for (const panel of document.querySelectorAll<HTMLElement>('[data-output]')) {
+        panel.hidden = panel.dataset.output !== tab.dataset.panel;
+      }
+    };
+
+    for (const tab of tabs) {
       tab.addEventListener('click', () => {
-        const target = tab.dataset.panel;
+        select(tab);
+      });
+      tab.addEventListener('keydown', (event) => {
+        const index = tabs.indexOf(tab);
+        const next =
+          event.key === 'ArrowRight'
+            ? tabs[(index + 1) % tabs.length]
+            : event.key === 'ArrowLeft'
+              ? tabs[(index - 1 + tabs.length) % tabs.length]
+              : event.key === 'Home'
+                ? tabs[0]
+                : event.key === 'End'
+                  ? tabs[tabs.length - 1]
+                  : undefined;
 
-        for (const other of document.querySelectorAll<HTMLButtonElement>('[role="tab"]')) {
-          other.setAttribute('aria-selected', String(other === tab));
-        }
-
-        for (const panel of document.querySelectorAll<HTMLElement>('[data-output]')) {
-          panel.hidden = panel.dataset.output !== target;
+        if (next) {
+          event.preventDefault();
+          select(next);
+          next.focus();
         }
       });
     }
@@ -406,6 +479,12 @@ import Layout from '../layouts/Layout.astro';
     background: var(--page-bg);
     color: var(--page-fg);
     box-shadow: 0 1px 2px rgb(0 0 0 / 0.06);
+  }
+
+  /* Inside the inspector's overflow: hidden, an outside ring is clipped away. */
+  .inspector__output:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: -2px;
   }
 
   .inspector__output {

@@ -66,8 +66,13 @@ export function createPortal(
   return element;
 }
 
-/** The part of a rect a portal is placed against. */
-export type AnchorRect = Pick<DOMRect, 'top' | 'bottom' | 'left'>;
+/**
+ * The part of a rect a portal is placed against.
+ *
+ * `right` is optional so a caller holding only a point can still place one;
+ * without it an RTL portal lines up with `left`, as an LTR one does.
+ */
+export type AnchorRect = Pick<DOMRect, 'top' | 'bottom' | 'left'> & Partial<Pick<DOMRect, 'right'>>;
 
 /** Finds an anchor again after the page has moved it, or null once it is gone. */
 export type AnchorPin = () => AnchorRect | null;
@@ -88,6 +93,7 @@ export function pinAnchor(
   const dx = rect.left - base.left;
   const dy = rect.top - base.top;
   const height = rect.bottom - rect.top;
+  const width = (rect.right ?? rect.left) - rect.left;
 
   return () => {
     if (!element.isConnected) {
@@ -96,8 +102,9 @@ export function pinAnchor(
 
     const now = element.getBoundingClientRect();
     const top = now.top + dy;
+    const left = now.left + dx;
 
-    return { left: now.left + dx, top, bottom: top + height };
+    return { left, right: left + width, top, bottom: top + height };
   };
 }
 
@@ -156,10 +163,13 @@ export function positionPortal(
     options.prefer === 'above' ? roomAbove >= height : roomBelow < height && roomAbove >= height;
 
   const top = above ? anchor.top - gap - height : anchor.bottom + gap;
-  const left = Math.min(
-    Math.max(margin, anchor.left),
-    Math.max(margin, viewportWidth - width - margin),
-  );
+  // Aligned on the reading-start edge: the portal's left to the anchor's left
+  // in LTR, its right to the anchor's right in RTL -- where a left-aligned menu
+  // would hang off the end of the text it belongs to. The portal's own
+  // computed direction, so a `dir` on it and a CSS `direction` both count.
+  const rtl = view?.getComputedStyle(element).direction === 'rtl';
+  const start = rtl ? (anchor.right ?? anchor.left) - width : anchor.left;
+  const left = Math.min(Math.max(margin, start), Math.max(margin, viewportWidth - width - margin));
 
   element.style.left = `${Math.round(left)}px`;
   element.style.top = `${Math.round(

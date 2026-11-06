@@ -28,7 +28,9 @@ export const INPUT_RULES: readonly InputRule[] = [
   // back; one rule for both spellings accepted the x and then dropped it.
   { pattern: /^\[[xX]\] $/, type: 'todo', checked: true },
   { pattern: /^```$/, type: 'code' },
-  { pattern: /^(?:---|\*\*\*)$/, type: 'divider' },
+  // `***` waits for a space: fired on the third star it took the opening of
+  // `***bold italic***` and made a divider of it. `---` has no such reading.
+  { pattern: /^(?:---|\*\*\* )$/, type: 'divider' },
 ];
 
 export interface InputRuleMatch {

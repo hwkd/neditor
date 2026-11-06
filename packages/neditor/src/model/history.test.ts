@@ -207,3 +207,29 @@ describe('coalescing', () => {
     expect(history.canRedo).toBe(false);
   });
 });
+
+describe('the limit is a number of entries, whatever it was given', () => {
+  // `Math.max(1, NaN)` is NaN, and `length > NaN` is never true: a limit read
+  // from a bad config string kept every entry the editor ever recorded.
+  test('NaN keeps the default bound', () => {
+    const history = new History({ limit: Number.NaN });
+    for (let i = 0; i < 300; i++) {
+      history.record({ blocks: [], selection: null });
+    }
+    let n = 0;
+    while (history.undo({ blocks: [], selection: null })) {
+      n += 1;
+    }
+
+    expect(n).toBe(200);
+  });
+
+  test('a limit below one still keeps exactly one entry', () => {
+    const history = new History({ limit: 0.5 });
+    history.record({ blocks: [], selection: null });
+    history.record({ blocks: [], selection: null });
+
+    expect(history.undo({ blocks: [], selection: null })).not.toBeNull();
+    expect(history.undo({ blocks: [], selection: null })).toBeNull();
+  });
+});

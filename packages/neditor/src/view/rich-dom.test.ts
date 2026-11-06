@@ -1347,8 +1347,8 @@ describe('a caption that holds a block is not sealed', () => {
     ['bold', '<b>', 'marks'],
     ['a link', '<a href="https://e.com/">', 'link'],
   ])('a toggle title stays continuous under %s', (_name, open, kind) => {
-    // A <summary> is never reached by visitBlocks: visitDetails strips it out
-    // of the body clone and reads it whole. Unsealing it let the pop lift the
+    // A <summary> is never reached by visitBlocks: visitDetails reads it whole
+    // and keeps it out of the body. Unsealing it let the pop lift the
     // title's own indentation out of the shell, splitting the title into
     // marked / plain / marked — with a link, the middle of the title stopped
     // being part of it. The test covers a block in the summary AND one in the
@@ -1461,6 +1461,50 @@ describe('reading a pasted subtree is linear in its size', () => {
     ).toBeLessThan(RATIO);
   });
 
+  test('nested toggles whose summaries are wrapped cost what direct summaries cost', () => {
+    // A `<summary>` that is not the details' own child used to send its
+    // toggle down a copy of the whole element, to delete the summary from
+    // that -- and a `<details>` holds every one nested below it, so each level
+    // copied, and re-asked every question about, everything under it. 500
+    // levels of this with 40 paragraphs each took 3.1 s in Chromium against
+    // 117 ms with the summaries in place. The same toggles with the summary as
+    // the direct child are the baseline: the same blocks out, the same text.
+    const n = 180;
+    const body = '<p>b</p>'.repeat(10);
+    const wrapped = elapsed(
+      `${`<details><span><summary>t</summary></span>${body}`.repeat(n)}${'</details>'.repeat(n)}`,
+      n * 11,
+    );
+    const direct = elapsed(
+      `${`<details><summary>t</summary>${body}`.repeat(n)}${'</details>'.repeat(n)}`,
+      n * 11,
+    );
+
+    expect(
+      wrapped / direct,
+      `wrapped ${Math.round(wrapped)}ms vs direct ${Math.round(direct)}ms`,
+    ).toBeLessThan(RATIO);
+  });
+
+  test('summaries hidden in a noscript below nested toggles cost what they cost beside them', () => {
+    // Each toggle asks for its summary. The query that answered found the
+    // first `<summary>` anywhere below -- inside the `<noscript>` at the
+    // bottom -- then rejected it, and every other match, by walking each one's
+    // ancestors: toggles x summaries x the wrapper chain around them. 167 KB of
+    // this held Chromium's paste handler for 10.6 seconds. The same markup
+    // with the noscript beside the toggles instead of below them is the
+    // baseline: the same nodes to parse, the same blocks out.
+    const n = 100;
+    const hidden = `<noscript>${'<div>'.repeat(n)}${'<summary>s</summary>'.repeat(4 * n)}${'</div>'.repeat(n)}</noscript>`;
+    const below = elapsed(`${'<details>'.repeat(n)}${hidden}${'</details>'.repeat(n)}`, n);
+    const beside = elapsed(`${'<details>'.repeat(n)}${'</details>'.repeat(n)}${hidden}`, n);
+
+    expect(
+      below / beside,
+      `below ${Math.round(below)}ms vs beside ${Math.round(beside)}ms`,
+    ).toBeLessThan(RATIO);
+  });
+
   test('the nesting is still read, not just skipped past', () => {
     const blocks = blocksFromHtml(
       document,
@@ -1570,9 +1614,9 @@ describe('a code block reads the text the sanitizer left, not everything under i
   /**
    * The `<pre>` branch took `element.textContent`, which includes the source of
    * a `<script>` or `<style>` sitting inside it -- markup every other branch
-   * drops. It is inert, since parsing happens in a detached template and this
-   * becomes text either way, but it is still somebody else's code arriving in
-   * the user's document as content.
+   * drops. It is inert, since parsing happens in a document with no browsing
+   * context and this becomes text either way, but it is still somebody else's
+   * code arriving in the user's document as content.
    */
   test.each([
     ['a script', '<pre>keep me<script>alert(1)</script></pre>', 'alert(1)'],
@@ -1604,8 +1648,8 @@ describe('a summary is the toggle title once, wherever it sits', () => {
    * descents into lists, quotes and blocks do not carry it. So a `<summary>`
    * wrapped in anything was read as the title *and* again as body content --
    * in the list and quote cases concatenated into that block's own text, which
-   * is wrong text with no visible cause. Those shapes take a copy instead,
-   * where removing it works at any depth.
+   * is wrong text with no visible cause. Those shapes take the summary out of
+   * the tree instead, which works at any depth.
    */
   const read = (html: string): [string, string][] =>
     blocksFromHtml(document, html).map((one) => [one.type, blockText(one)]);
@@ -1634,10 +1678,64 @@ describe('a summary is the toggle title once, wherever it sits', () => {
     ).toBe(false);
   });
 
-  test('the ordinary shape is unchanged and takes no copy', () => {
+  test("a wrapped summary's picture does not become a block of the body", () => {
+    // The summary is taken out of the tree, and what was remembered about the
+    // elements around it has to go with it. The `<b>` asks, before the toggle
+    // is reached, whether the figure shows an image -- it does, the one in the
+    // summary -- and answered from memory after the summary had gone, the
+    // empty figure became an image block below the title.
+    const html =
+      '<b><details open><figure><summary><img src="https://x.test/i.png" alt="a">T</summary></figure><p>b</p></details></b>';
+
+    expect(
+      blocksFromHtml(document, html).map((one) => [one.type, one.depth, blockText(one)]),
+    ).toEqual([
+      ['toggle', 0, 'T'],
+      ['paragraph', 1, 'b'],
+    ]);
+  });
+
+  test.each([
+    ['', ''],
+    ['<b>', '</b>'],
+  ])("a wrapped summary's block does not split the body: %j", (open, close) => {
+    // The other half of the same memo. The `<b>` asks, before the toggle is
+    // reached, whether the `<span>` holds a block -- it does, the `<p>` in the
+    // summary -- and answered from memory after the summary had gone, `tail`
+    // was read as a block of its own and parted from the `x` it runs into.
+    // Without the `<b>` nothing asks early, which is the control.
+    const html = `${open}<details open><span><summary><p>T</p></summary>tail</span>x</details>${close}`;
+
+    expect(
+      blocksFromHtml(document, html).map((one) => [one.type, one.depth, blockText(one)]),
+    ).toEqual([
+      ['toggle', 0, 'T'],
+      ['paragraph', 1, 'tailx'],
+    ]);
+  });
+
+  test('the ordinary shape is unchanged', () => {
     expect(read('<details open><summary>Title</summary><p>Body</p></details>')).toEqual([
       ['toggle', 'Title'],
       ['paragraph', 'Body'],
+    ]);
+  });
+
+  test("a toggle with no summary of its own does not take a nested toggle's", () => {
+    // The summary belongs to the `<details>` it sits in. Searching the whole
+    // subtree gave the outer toggle the inner one's title, and the inner
+    // toggle -- whose summary was then taken out of the copy as the outer
+    // title -- came back with none.
+    expect(
+      blocksFromHtml(
+        document,
+        '<details><p>outer body</p><details><summary>inner</summary>b</details></details>',
+      ).map((one) => [one.type, one.depth, blockText(one)]),
+    ).toEqual([
+      ['toggle', 0, ''],
+      ['paragraph', 1, 'outer body'],
+      ['toggle', 1, 'inner'],
+      ['paragraph', 2, 'b'],
     ]);
   });
 
@@ -1715,5 +1813,145 @@ describe('the spaces Safari converts on copy are spaces again', () => {
 
   test('a non-breaking space written on purpose survives', () => {
     expect(richToPlainText(fromHtml('<p>10 km and <b>5</b>&nbsp;kg</p>'))).toBe('10 km and 5 kg');
+  });
+});
+
+describe('an empty item in a list we wrote is a real item', () => {
+  /**
+   * An empty `<li>` holding only a nested list is how indentation alone is
+   * written elsewhere, so a foreign one is skipped. Ours never writes that
+   * shape -- a deeper list goes inside the item it hangs off, which always
+   * exists -- so in a `data-neditor-list` an empty item is an empty block, and
+   * skipping it promoted its child: [bullet "", bullet "child" at depth 1]
+   * came back as one bullet "child" at depth 0.
+   */
+  const through = (blocks: Block[]): Array<[string, number, boolean | undefined, string]> =>
+    blocksFromHtml(document, blocksToHtml(document, blocks)).map((block) => [
+      block.type,
+      block.depth,
+      block.checked,
+      blockText(block),
+    ]);
+  const item = (type: Block['type'], text: string, depth = 0, checked?: boolean): Block =>
+    ({
+      id: `${type}-${depth}-${text}`,
+      type,
+      depth,
+      content: text ? [{ text }] : [],
+      ...(checked === undefined ? {} : { checked }),
+    }) as Block;
+
+  test.each(['bulleted_list', 'numbered_list'] as const)('%s', (type) => {
+    expect(through([item(type, ''), item(type, 'child', 1)])).toEqual([
+      [type, 0, undefined, ''],
+      [type, 1, undefined, 'child'],
+    ]);
+  });
+
+  test('a to-do keeps its own state, not its child’s', () => {
+    expect(through([item('todo', '', 0, true), item('todo', 'child', 1, false)])).toEqual([
+      ['todo', 0, true, ''],
+      ['todo', 1, false, 'child'],
+    ]);
+  });
+
+  test.each([' ', '  x', '☐ x'])('a to-do whose text is %j keeps all of it', (text) => {
+    // The box we write is one glyph and one space; reading it back with the
+    // foreign rule, which takes any whitespace after a box, ate the text's own.
+    expect(through([item('todo', text, 0, true)])).toEqual([['todo', 0, true, text]]);
+  });
+
+  test('a foreign empty item that only holds a list is still indentation', () => {
+    expect(
+      blocksFromHtml(document, '<ul><li><ul><li>child</li></ul></li></ul>').map((block) => [
+        block.depth,
+        blockText(block),
+      ]),
+    ).toEqual([[1, 'child']]);
+  });
+});
+
+describe('content a skipped element holds is not read by any query either', () => {
+  /**
+   * `SKIP_TAGS` was honoured by the walker and nowhere else: the readers that
+   * look a part up by query -- a figure's image and caption, a toggle's
+   * summary, a quote's lists -- found it inside a `<noscript>` all the same.
+   * Chromium and WebKit parse a `<noscript>` in the inert paste document into
+   * elements, and so does happy-dom (checked here, so these inputs are the
+   * shape a real paste produces rather than one built by hand); Firefox
+   * parses it as text and never had the problem.
+   */
+  const shape = (html: string) =>
+    blocksFromHtml(document, html).map((block) => [
+      block.type,
+      block.src ?? null,
+      richToPlainText(block.content),
+    ]);
+
+  test('happy-dom parses noscript content as elements, as Chromium does', () => {
+    const template = document.createElement('template');
+    template.innerHTML = '<noscript><p>x</p></noscript>';
+
+    expect(template.content.firstChild?.firstChild?.nodeName).toBe('P');
+  });
+
+  test('a caption inside a noscript is not the image caption', () => {
+    expect(
+      shape(
+        '<figure><img src="https://a.test/x.png"><noscript><figcaption>hidden caption</figcaption></noscript></figure>',
+      ),
+    ).toEqual([['image', 'https://a.test/x.png', '']]);
+  });
+
+  test('a summary inside a noscript is not the toggle title', () => {
+    expect(
+      shape('<details><noscript><summary>hidden summary</summary></noscript><p>b</p></details>'),
+    ).toEqual([
+      ['toggle', null, ''],
+      ['paragraph', null, 'b'],
+    ]);
+  });
+
+  test('an image inside a noscript does not make the figure an image', () => {
+    expect(
+      shape('<figure><noscript><img src="https://a.test/x.png"></noscript>text</figure>'),
+    ).toEqual([['paragraph', null, 'text']]);
+  });
+
+  test('a wrapped summary is taken out of the body, not the hidden one before it', () => {
+    // A wrapped summary is taken out of the tree once it is read as the title.
+    // When that was done on a copy, removing the copy's first `<summary>` took
+    // the hidden one and left the title to be read a second time as body
+    // text; the summary taken out now is the one that was read.
+    expect(
+      shape(
+        '<details><noscript><summary>no</summary></noscript><span><summary>yes</summary></span><p>b</p></details>',
+      ),
+    ).toEqual([
+      ['toggle', null, 'yes'],
+      ['paragraph', null, 'b'],
+    ]);
+  });
+
+  test('a list inside a noscript is not a quoted list', () => {
+    expect(
+      shape('<blockquote>q<noscript><ul><li>hidden item</li></ul></noscript></blockquote>'),
+    ).toEqual([['quote', null, 'q']]);
+  });
+
+  test('the visible caption, summary and image are still read', () => {
+    expect(
+      shape(
+        '<figure><noscript><img src="https://a.test/n.png"></noscript><img src="https://a.test/x.png"><noscript><figcaption>no</figcaption></noscript><figcaption>yes</figcaption></figure>',
+      ),
+    ).toEqual([['image', 'https://a.test/x.png', 'yes']]);
+    expect(
+      shape(
+        '<details><noscript><summary>no</summary></noscript><summary>yes</summary><p>b</p></details>',
+      ),
+    ).toEqual([
+      ['toggle', null, 'yes'],
+      ['paragraph', null, 'b'],
+    ]);
   });
 });

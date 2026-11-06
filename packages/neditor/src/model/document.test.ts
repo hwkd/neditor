@@ -955,3 +955,164 @@ describe('a span is split only when it is really too long to read back', () => {
     expect(back.map((run) => run.text).join('')).toBe(text);
   });
 });
+
+describe('a label is written on one line', () => {
+  /**
+   * The reader matches an image or a callout marker within a single line, so
+   * an alt text or icon holding a line break was written across two lines and
+   * came back as two junk paragraphs -- `![line1` and `line2](…)` -- with the
+   * image gone. The break becomes a space; the block survives.
+   */
+  test.each(['line1\nline2', 'line1\r\nline2', 'line1\rline2'])('an alt text %j', (alt) => {
+    const image: Block = { ...createBlock('image'), src: 'https://a.test/x.png', alt };
+    const markdown = toMarkdown({ blocks: [image] });
+
+    expect(markdown).toBe('![line1 line2](https://a.test/x.png)');
+    expect(blocksFromMarkdown(markdown)).toMatchObject([
+      { type: 'image', src: 'https://a.test/x.png', alt: 'line1 line2' },
+    ]);
+  });
+
+  test('a callout icon', () => {
+    const callout: Block = { ...createBlock('callout', 'c'), icon: 'x\ny' };
+    const markdown = toMarkdown({ blocks: [callout] });
+
+    expect(markdown).toBe('> [!x y] c');
+    expect(blocksFromMarkdown(markdown)).toMatchObject([{ type: 'callout', icon: 'x y' }]);
+  });
+});
+
+describe('leading whitespace is text, not indentation', () => {
+  /**
+   * Bare, the whitespace that opens a block's text is indentation on the line's
+   * own start and the marker's separator after a marker, so it never came back:
+   * `    indented` after a paragraph read as `indented` one level deep. It is
+   * written as numeric references, which the reader decodes at that one place.
+   */
+  test('the literal scenario', () => {
+    const doc = {
+      blocks: [createBlock('paragraph', 'Intro'), createBlock('paragraph', '    indented')],
+    };
+    const markdown = toMarkdown(doc);
+
+    expect(markdown).toBe('Intro\n\n&#32;&#32;&#32;&#32;indented');
+    expect(blocksFromMarkdown(markdown).map((block) => [block.depth, blockText(block)])).toEqual([
+      [0, 'Intro'],
+      [0, '    indented'],
+    ]);
+  });
+
+  test.each([
+    ['a heading', createBlock('heading1', '  hi'), '# &#32;&#32;hi'],
+    ['a to-do', { ...createBlock('todo', '\tx'), checked: true }, '- [x] &#9;x'],
+    ['text that opens with a reference', createBlock('paragraph', '&#32;x'), '&#38;#32;x'],
+    ['text with nothing to protect', createBlock('paragraph', 'a  b'), 'a  b'],
+    // A leading break is a reference too: as the escaped newline it is
+    // elsewhere, the reader joined it onto the next line and trimmed it off.
+    ['text that opens with a line break', createBlock('paragraph', '\nfoo'), '&#10;foo'],
+    ['a break and the spaces after it', createBlock('paragraph', '\n  b'), '&#10;&#32;&#32;b'],
+    ['a block of only a break', createBlock('paragraph', '\n'), '&#10;'],
+    ['a heading led by a break', createBlock('heading1', '\nx'), '# &#10;x'],
+    ['a break inside the text is still escaped', createBlock('paragraph', 'a\nb'), 'a\\\nb'],
+  ])('%s', (_name, block, markdown) => {
+    expect(toMarkdown({ blocks: [block] })).toBe(markdown);
+    expect(blockText(blocksFromMarkdown(markdown)[0]!)).toBe(blockText(block));
+  });
+
+  test('a reference anywhere else is left as the characters it is', () => {
+    expect(blockText(blocksFromMarkdown('a &#32; b')[0]!)).toBe('a &#32; b');
+    expect(blockText(blocksFromMarkdown('&#65;x')[0]!)).toBe('&#65;x');
+  });
+});
+
+describe('what ends a block is not written as markup', () => {
+  /**
+   * A break that ends a block was written as the hard-break backslash, and the
+   * line after it is the blank one between blocks -- so every CommonMark
+   * reader showed a literal `\` at the end of the paragraph. This editor's own
+   * reader dropped it, which is why the round trip never noticed. Neither
+   * Markdown reader keeps a break or the spaces that end a block, so the
+   * writer drops them rather than emitting a character nobody asked for.
+   */
+  test.each([
+    ['a trailing break', 'x\n', 'x'],
+    ['two trailing breaks', 'x\n\n', 'x'],
+    ['spaces before a trailing break', 'x \n', 'x'],
+    ['trailing spaces', 'x  ', 'x'],
+    ['a trailing tab', 'x\t', 'x'],
+    ['a literal backslash before the break', 'x\\\n', 'x\\\\'],
+    ['a break inside the text, which stays', 'a\nb\n', 'a\\\nb'],
+  ])('%s', (_name, text, markdown) => {
+    expect(toMarkdown({ blocks: [createBlock('paragraph', text)] })).toBe(markdown);
+  });
+
+  test('a block of nothing but a break or spaces is still written', () => {
+    // Leading whitespace is protected as references first, so it is not
+    // trailing whitespace by the time the end is trimmed.
+    expect(toMarkdown({ blocks: [createBlock('paragraph', '\n')] })).toBe('&#10;');
+    expect(toMarkdown({ blocks: [createBlock('paragraph', '  ')] })).toBe('&#32;&#32;');
+  });
+
+  test('every block type that writes text drops it', () => {
+    expect(
+      toMarkdown({
+        blocks: [
+          createBlock('heading1', 'h\n'),
+          createBlock('quote', 'q  '),
+          createBlock('bulleted_list', 'b\n'),
+        ],
+      }),
+    ).toBe('# h\n\n> q\n\n- b');
+  });
+
+  test('a marked run ending the block loses only the whitespace after it', () => {
+    const content = richSetMark(richFromPlainText('a b '), 2, 4, 'bold', true);
+
+    expect(toMarkdown({ blocks: [{ ...createBlock('paragraph'), content }] })).toBe('a **b**');
+  });
+
+  test('a code block keeps its text exactly', () => {
+    expect(toMarkdown({ blocks: [createBlock('code', 'x  \n')] })).toBe('```\nx  \n\n```');
+  });
+});
+
+describe('a code span is written literally', () => {
+  /**
+   * CommonMark processes no backslash escapes inside a code span, so the
+   * escapes the writer puts into prose were shown verbatim by every other
+   * reader: `**bold**` as code came out `\*\*bold\*\*`. The content is written
+   * as it is, inside a backtick fence longer than any run in it.
+   */
+  const code = (text: string): Block => ({
+    ...createBlock('paragraph'),
+    content: [{ text, marks: ['code'] }],
+  });
+
+  test.each([
+    ['delimiters', '**bold**', '`**bold**`'],
+    ['a backslash', 'C:\\dir\\*', '`C:\\dir\\*`'],
+    ['a backtick', 'a`b', '``a`b``'],
+    ['a run of two backticks', 'a``b', '```a``b```'],
+    // A fence cannot sit against a backtick of the content, so a space pads
+    // both ends, and CommonMark strips one from each.
+    ['an opening backtick', '`x', '`` `x ``'],
+    ['a closing backtick', 'x`', '`` x` ``'],
+    ['brackets and a pipe', '[x](y) | z', '`[x](y) | z`'],
+  ])('with %s', (_name, text, markdown) => {
+    expect(toMarkdown({ blocks: [code(text)] })).toBe(markdown);
+  });
+
+  test('a pipe inside one in a table cell is still escaped', () => {
+    // GFM splits a row on every unescaped pipe, code span or not, and reads
+    // `\|` as a pipe there too.
+    const table: Block = {
+      ...createBlock('table'),
+      rows: [
+        [[{ text: 'a|b', marks: ['code'] }], [{ text: 'h' }]],
+        [[{ text: 'c' }], [{ text: 'd' }]],
+      ],
+    };
+
+    expect(toMarkdown({ blocks: [table] }).split('\n')[0]).toBe('| `a\\|b` | h |');
+  });
+});

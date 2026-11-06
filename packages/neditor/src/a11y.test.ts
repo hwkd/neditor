@@ -360,13 +360,16 @@ describe('selection is not signalled by colour alone', () => {
     expect(NEDITOR_STYLES).toContain(':focus-visible');
   });
 
-  test('the forced-colors opt-out stops at the selected block', () => {
+  test('the forced-colors opt-out reaches the descendants with system colours', () => {
     // forced-color-adjust is inherited, so opting the block out took its whole
     // subtree with it: the bullet of a selected list and the text of a selected
     // completed to-do kept their author colour on the system Highlight, at
-    // roughly 1.2:1. Descendants have to be handed back to the system palette.
+    // roughly 1.2:1. Handing them back with `auto` was worse in Chromium, whose
+    // backplate then painted Canvas behind HighlightText -- white on white. The
+    // descendants opt out as well and are given system colours explicitly;
+    // visual-a11y.test.ts holds the detail.
     expect(NEDITOR_STYLES).toMatch(
-      /\.neditor-block\[data-selected='true'\] \*\s*\{\s*forced-color-adjust: auto;/,
+      /\.neditor-block\[data-selected='true'\] \*,[^{]*\{\s*forced-color-adjust: none;\s*color: HighlightText;/,
     );
   });
 });
@@ -649,9 +652,9 @@ describe('a rejected URL is signalled by more than a colour', () => {
     editor.openLinkEditor();
 
     expect(input.getAttribute('aria-invalid')).toBeNull();
-    expect(document.getElementById(input.getAttribute('aria-describedby') ?? '')?.hidden).toBe(
-      true,
-    );
+    // No description at all, rather than one pointing at a hidden message:
+    // description computation follows a reference into a hidden node.
+    expect(input.hasAttribute('aria-describedby')).toBe(false);
   });
 
   test('forced colours restate the rejection, which they previously dropped', () => {

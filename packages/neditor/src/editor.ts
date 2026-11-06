@@ -1,10 +1,11 @@
-import { matchInlineRule } from './input/inline-rules.ts';
+import { matchInlineRule, matchInlineRuleAhead } from './input/inline-rules.ts';
 import { matchInputRule } from './input/input-rules.ts';
 import { blocksFromMarkdown } from './input/markdown.ts';
 import type { Block, BlockType, NEditorDocument } from './model/document.ts';
 import {
   DEFAULT_CALLOUT_ICON,
   acceptsChildren,
+  MAX_DEPTH,
   blockIdRange,
   canMergeText,
   blockText,
@@ -12,9 +13,9 @@ import {
   cloneDocument,
   createBlock,
   createEmptyDocument,
+  descendantsOf,
   findBlock,
   findBlockIndex,
-  indentBlock,
   duplicateBlocks,
   indentBlocks,
   insertBlockAfter,
@@ -55,6 +56,7 @@ import type { Mark, RichText } from './model/rich-text.ts';
 import {
   richActiveLink,
   richActiveMarks,
+  normalizeRuns,
   richConcat,
   richDelete,
   richEquals,
@@ -558,6 +560,132 @@ const MARK_SHORTCUTS: Readonly<Record<string, Mark>> = {
 };
 
 /**
+ * A block's text with every non-whitespace character of a code run replaced
+ * by a placeholder, for the inline rules: what the Markdown reader matches
+ * against, so typing and pasting agree on what code can hold open.
+ */
+function projectCode(content: RichText): string {
+  return content
+    .map((run) => (run.marks?.includes('code') ? run.text.replace(/\S/g, '\u0000') : run.text))
+    .join('');
+}
+
+/**
+ * The ids an indent moves: each visible anchor with whatever it hides, minus
+ * any anchor the indent cannot move.
+ *
+ * `indentBlocks` clamps each block on its own -- at depth 0, and at one level
+ * below its predecessor. An anchor that cannot move would still hand its
+ * hidden children over to move alone: Shift+Tab on a collapsed toggle at depth
+ * 0 pulled them out of it, and Tab on one with nothing to nest under turned
+ * its answers into a staircase, one press at a time, inside a fold nobody
+ * could see -- each press swallowed, so the key that leaves the editor did
+ * not. Whether an anchor can move is asked of the clamp itself, by indenting
+ * the anchors alone, and then of its hidden children: they shift with it, so
+ * at the depth ceiling an anchor that could go one deeper still stays when
+ * they could not. Children the reader selected still move on their own.
+ */
+function indentTargets(
+  blocks: readonly Block[],
+  anchors: Iterable<string>,
+  delta: number,
+): Set<string> {
+  const ids = new Set(anchors);
+  const probe = indentBlocks(blocks, ids, delta);
+  const movable = blocks
+    .filter((block, index) => ids.has(block.id) && probe[index]?.depth !== block.depth)
+    .filter((block) => {
+      // At the depth ceiling an anchor can move where its hidden children
+      // cannot: they would be clamped beside it, out of the fold.
+      const shift = (findBlock(probe, block.id)?.depth ?? block.depth) - block.depth;
+      const hidden = withHiddenDescendants(blocks, [block.id]);
+
+      return blocks.every(
+        (other) =>
+          other.id === block.id ||
+          !hidden.has(other.id) ||
+          (other.depth + shift >= 0 && other.depth + shift <= MAX_DEPTH),
+      );
+    })
+    .map((block) => block.id);
+
+  return withHiddenDescendants(blocks, movable);
+}
+
+/**
+ * `after`, with any collapsed toggle opened that would otherwise hide a block
+ * the reader could see in `before`.
+ *
+ * Removing a block hands its children to whatever now precedes them. When
+ * that is the end of a collapsed toggle's subtree they became its children,
+ * out of sight: delete a paragraph that followed a collapsed toggle and the
+ * paragraph's own sub-items vanished with no visible reason. Moves, indents
+ * and pastes reach the same place by other routes: Tab after a collapsed
+ * toggle makes the block its child, and a pasted collapsed toggle lands in
+ * front of the target's children. The toggle opens instead -- the same answer
+ * `#splitBlock` gives when Enter would give a collapsed toggle a hidden child.
+ *
+ * `alsoShow` names new blocks that must be visible too: what the reader was
+ * looking at can travel in a block with a fresh id. A paste moves the text
+ * after the caret into its last block, which is also where the caret goes, and
+ * when that is a pasted collapsed toggle's child both would vanish.
+ */
+function keepVisible(
+  before: readonly Block[],
+  after: Block[],
+  alsoShow: readonly string[] = [],
+): Block[] {
+  const seen = new Set(visibleBlocks(before).map((block) => block.id));
+
+  for (const id of alsoShow) {
+    seen.add(id);
+  }
+  let result = after;
+
+  // Each pass opens the innermost toggle hiding something; nested toggles can
+  // need more than one, and each pass opens at least one or stops.
+  for (;;) {
+    const shown = new Set(visibleBlocks(result).map((block) => block.id));
+    const lost = result.findIndex((block) => seen.has(block.id) && !shown.has(block.id));
+
+    if (lost === -1) {
+      return result;
+    }
+
+    let depth = result[lost]!.depth;
+    let opened = false;
+
+    for (let index = lost - 1; index >= 0 && depth > 0; index -= 1) {
+      const candidate = result[index]!;
+
+      if (candidate.depth < depth) {
+        depth = candidate.depth;
+
+        if (candidate.type === 'toggle' && candidate.collapsed) {
+          result = updateBlock(result, candidate.id, { collapsed: false });
+          opened = true;
+          break;
+        }
+      }
+    }
+
+    if (!opened) {
+      return result;
+    }
+  }
+}
+
+/**
+ * What `content` becomes in a block of `type`.
+ *
+ * A code block holds plain text only -- `normalizeDocument` drops marks there,
+ * so marks merged in survived until the next save and no further.
+ */
+function contentFor(type: BlockType, content: RichText): RichText {
+  return type === 'code' ? normalizeRuns(content.map((run) => ({ text: run.text }))) : content;
+}
+
+/**
  * A block-based rich-text editor.
  *
  * Plain DOM and plain classes: no framework, no virtual DOM, no runtime
@@ -589,6 +717,9 @@ export class NEditor {
 
   /** True when the editor supplied the root's accessible name and owes it back. */
   readonly #ownsAriaLabel: boolean;
+  readonly #originalClassAttribute: string | null;
+  readonly #originalTheme: string | null;
+  readonly #portals: readonly HTMLElement[];
 
   /** Whether the `role` that makes that name legal is ours to take away. */
   #ownsRole = false;
@@ -680,6 +811,8 @@ export class NEditor {
    * unreachable. A long press is the conventional stand-in for "select this".
    */
   #longPress: { timer: number; blockId: string; x: number; y: number } | null = null;
+  /** A long press selected a block and the finger is still down. */
+  #pressSelected = false;
 
   /**
    * True while an IME composition is in flight.
@@ -759,6 +892,11 @@ export class NEditor {
     }
 
     const theme = options.theme ?? 'auto';
+    // What the element carried before, so `destroy()` can hand back exactly
+    // that: a theme attribute left behind, or a `class=""` that was never
+    // there, is residue the next mount -- or the host's own CSS -- trips over.
+    this.#originalClassAttribute = this.#root.getAttribute('class');
+    this.#originalTheme = this.#root.getAttribute('data-neditor-theme');
     this.#root.classList.add('neditor');
     this.#root.dataset.neditorTheme = theme;
 
@@ -945,6 +1083,15 @@ export class NEditor {
       this.#labels,
     );
 
+    this.#portals = [
+      this.#slashMenu.element,
+      this.#toolbar.element,
+      this.#linkEditor.element,
+      this.#iconPicker.element,
+      this.#imageEditor.element,
+      this.#tableToolbar.element,
+    ];
+
     for (const portal of [
       this.#slashMenu,
       this.#toolbar,
@@ -956,6 +1103,8 @@ export class NEditor {
       portal.setTheme(theme);
       this.#portalRoot.append(portal.element);
     }
+
+    this.#syncPortalDirection();
 
     if (options.onError) {
       this.#emitter.setErrorHandler(options.onError);
@@ -1006,8 +1155,9 @@ export class NEditor {
     return this.#root;
   }
 
+  /** False once destroyed, too: a destroyed editor edits nothing. */
   get editable(): boolean {
-    return this.#editable;
+    return this.#editable && !this.#destroyed;
   }
 
   /** Returns a deep copy, so callers cannot mutate editor state by reference. */
@@ -1096,6 +1246,12 @@ export class NEditor {
   }
 
   setEditable(editable: boolean): void {
+    // Final, like the other mutators: a destroyed editor has nothing to
+    // switch. (The getter reports false after destroy whatever this held.)
+    if (this.#destroyed) {
+      return;
+    }
+
     const was = this.#editable;
     this.#editable = editable;
 
@@ -1120,6 +1276,17 @@ export class NEditor {
       this.#closeLinkEditor();
       this.#closeImageEditor();
       this.#closeIconPicker();
+      // The slash menu too: left open, a click on it retyped the block and
+      // fired `change` in an editor that had just been made read-only.
+      this.#closeSlashMenu();
+      // And any gesture in flight. A drag released after the switch still
+      // moved the blocks, and a long press still re-entered block selection.
+      if (this.#drag) {
+        this.#endDrag(null);
+      }
+      this.#cancelLongPress();
+      this.#textDrag = null;
+      delete this.#root.dataset.selecting;
       this.#gutter.hide();
       this.#clearBlockSelection();
     }
@@ -1246,6 +1413,7 @@ export class NEditor {
     };
     this.#toolbar.hide();
 
+    this.#syncPortalDirection();
     this.#linkEditor.open(
       anchor,
       richActiveLink(this.#contentOf(target), range.start, range.end),
@@ -1343,8 +1511,56 @@ export class NEditor {
       return;
     }
 
-    this.#commit(setBlockType(this.#blocks, id, type));
-    this.focus(id, CARET_END);
+    const source = findBlock(this.#blocks, id);
+
+    // Nothing to change is nothing to announce: an unknown id, or the type the
+    // block already has, still said "Changed to Heading 1" in the live region.
+    // The same type still places the caret, though -- the README promises
+    // `setBlockType` ends block selection, whatever the type.
+    if (!source) {
+      return;
+    }
+
+    if (source.type === type) {
+      this.focus(id, CARET_END);
+      return;
+    }
+
+    let blocks: Block[] = [...this.#blocks];
+
+    // A table's text lives in its rows, which the new type cannot hold. They
+    // are rehoused as the block's own text -- cells by spaces, rows by lines --
+    // where the conversion had simply deleted them.
+    if (isTableType(source.type) && !isTableType(type)) {
+      // Only cells with text, so an empty table flattens to nothing rather
+      // than to separators -- a stray paragraph of spaces for a divider.
+      const lines = (source.rows ?? [])
+        .map((row) => row.filter((cell) => !isRichEmpty(cell)))
+        .filter((row) => row.length > 0);
+      const flattened = richConcat(
+        ...lines.flatMap((row, r) => [
+          ...(r > 0 ? [[{ text: '\n' }]] : []),
+          ...row.flatMap((cell, c) => (c > 0 ? [[{ text: ' ' }], cell] : [cell])),
+        ]),
+      );
+      blocks = updateBlock(blocks, id, { content: flattened });
+    }
+
+    const carried = findBlock(blocks, id)?.content ?? [];
+    blocks = setBlockType(blocks, id, type);
+
+    // A divider holds no text; give it a paragraph of its own, as /divider
+    // does, rather than dropping what the block said.
+    if (type === 'divider' && !isRichEmpty(carried)) {
+      const paragraph = createBlock('paragraph', carried, source.depth);
+      blocks = insertBlockAfter(blocks, id, paragraph);
+      this.#commit(blocks);
+      this.focus(paragraph.id, 0);
+    } else {
+      this.#commit(blocks);
+      this.focus(id, CARET_END);
+    }
+
     this.#announce(formatLabel(this.#labels.changedTo, { type: this.#typeName(type) }));
   }
 
@@ -1501,6 +1717,16 @@ export class NEditor {
     this.#emitter.clear();
     this.#root.classList.remove('neditor');
 
+    if (this.#originalClassAttribute === null && this.#root.getAttribute('class') === '') {
+      this.#root.removeAttribute('class');
+    }
+
+    if (this.#originalTheme === null) {
+      this.#root.removeAttribute('data-neditor-theme');
+    } else {
+      this.#root.setAttribute('data-neditor-theme', this.#originalTheme);
+    }
+
     // Gesture state, not decoration. Both are set mid-drag and cleared on
     // `pointerup`/`pointercancel`, so an editor destroyed while a finger is
     // still down leaves them on the element — and they carry `user-select:
@@ -1626,7 +1852,7 @@ export class NEditor {
     }
 
     this.#renderer.setSelected(this.#selected);
-    this.#emitter.emit('blockselection', { ids: kept });
+    this.#emitter.emit('blockselection', { ids: this.#orderedSelection() });
   }
 
   /** Keeps the gutter pointing at its block after the layout moves. */
@@ -1691,7 +1917,11 @@ export class NEditor {
     options: { silent?: boolean } = {},
   ): void {
     this.#history.record(
-      { blocks: this.#blocks, selection: selection ?? this.#selectionSnapshot() },
+      {
+        blocks: this.#blocks,
+        selection: selection ?? this.#selectionSnapshot(),
+        ...this.#blockSelectionSnapshot(),
+      },
       runKey,
     );
 
@@ -1707,6 +1937,18 @@ export class NEditor {
     // from one or the other, and they must not disagree about whether pressing
     // the button would do anything.
     this.#emitter.emit('history', { canUndo: this.canUndo, canRedo: this.canRedo });
+  }
+
+  /** The block selection a history entry records, when there is one. */
+  #blockSelectionSnapshot(): Pick<HistoryEntry, 'selectedBlocks' | 'selectionAnchor'> {
+    if (this.#selected.size === 0) {
+      return {};
+    }
+
+    return {
+      selectedBlocks: this.#orderedSelection(),
+      ...(this.#selectionAnchor !== null ? { selectionAnchor: this.#selectionAnchor } : {}),
+    };
   }
 
   #selectionSnapshot(): SelectionSnapshot | null {
@@ -1738,6 +1980,7 @@ export class NEditor {
     const current: HistoryEntry = {
       blocks: this.#blocks,
       selection: this.#selectionSnapshot(),
+      ...this.#blockSelectionSnapshot(),
     };
 
     const entry = direction === 'undo' ? this.#history.undo(current) : this.#history.redo(current);
@@ -1760,14 +2003,23 @@ export class NEditor {
     // After the blocks are applied, for the reason given in `setDocument`.
     this.#endComposition();
 
-    // An edit made in block-selection mode has no caret to record, so there is
-    // nothing here to restore -- and the block selection was just cleared. That
-    // left the root focused with neither a caret nor a selection, which is
-    // neither mode: `#handleKeyDown` resolves nothing from the root and drops
-    // every later keystroke, the next Ctrl+Z included. `#setBlockSelection`
-    // already handles the same dead end when the last block is deselected; this
-    // is the other way into it.
-    if (!this.#restoreSelection(entry.selection)) {
+    // Neither mode is not a place to leave the editor: `#handleKeyDown`
+    // resolves nothing from a root with no caret and no selection, and drops
+    // every later keystroke, the next Ctrl+Z included. So an entry restores
+    // the block selection it recorded, else its caret, else the caret goes to
+    // the first block that can take one.
+    // An edit made on a block selection comes back as that selection, where
+    // the blocks now are; only ids the restored document still shows count.
+    const visible = new Set(this.#visible().map((block) => block.id));
+    const reselect = (entry.selectedBlocks ?? []).filter((id) => visible.has(id));
+
+    if (reselect.length > 0) {
+      const anchor =
+        entry.selectionAnchor !== undefined && reselect.includes(entry.selectionAnchor)
+          ? entry.selectionAnchor
+          : reselect[0];
+      this.#setBlockSelection(reselect, anchor);
+    } else if (!this.#restoreSelection(entry.selection)) {
       this.#focusFirst([entry.selection?.blockId, this.#blocks[0]?.id]);
     }
 
@@ -1883,7 +2135,9 @@ export class NEditor {
       }
     }
 
-    this.#emitter.emit('blockselection', { ids: [...this.#selected] });
+    // Document order, as `getSelectedBlocks()` promises: insertion order is
+    // whatever order a caller happened to pass to `selectBlocks`.
+    this.#emitter.emit('blockselection', { ids: this.#orderedSelection() });
     this.#announceSelectionCount(this.#selected.size);
   }
 
@@ -1961,6 +2215,54 @@ export class NEditor {
     );
   }
 
+  /**
+   * Places the caret where a Tab that changed nothing should continue from.
+   *
+   * Forward, that is the last caret the selection reaches: the end of its last
+   * block, a table's last cell, or -- when the selection ends on a divider or
+   * other block with no caret -- the nearest block before it that has one, so
+   * the browser's Tab moves on to whatever follows. Backward, mirrored: the
+   * first caret at or after the selection's start. Focusing the block itself
+   * sent a table's Tab to its own next cell and a divider's to the top of the
+   * document.
+   */
+  #focusForTabExit(forward: boolean): boolean {
+    const visible = this.#visible();
+    const indices = this.#selectedVisibleIndices(visible);
+    const edge = forward ? indices.at(-1) : indices[0];
+
+    if (edge === undefined) {
+      return false;
+    }
+
+    const candidates = forward ? visible.slice(0, edge + 1).reverse() : visible.slice(edge);
+
+    for (const candidate of candidates) {
+      const rows = candidate.rows;
+
+      if (isTableType(candidate.type) && rows && rows.length > 0) {
+        const row = forward ? rows.length - 1 : 0;
+        const column = forward ? (rows[row]?.length ?? 1) - 1 : 0;
+
+        if (this.focusRange(candidate.id, 0, 0, { row, column })) {
+          if (forward) {
+            this.#focusCell(candidate.id, row, column, CARET_END);
+          }
+
+          return true;
+        }
+
+        continue;
+      }
+
+      if (this.focus(candidate.id, forward ? CARET_END : 0)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   /** Puts the caret in the first of `ids` that can take one. */
   #focusFirst(ids: readonly (string | undefined)[], offset = 0): boolean {
     for (const id of ids) {
@@ -2016,9 +2318,14 @@ export class NEditor {
 
     const source = findBlock(this.#blocks, blockId);
     const created = createBlock('paragraph', [], source?.depth ?? 0);
+    // Below the block's whole subtree, as a sibling. Straight after the block
+    // put the new paragraph between a parent and its children, which then
+    // nested under it -- for a collapsed toggle that meant its hidden children
+    // came out from under it and showed beneath an empty line.
+    const last = descendantsOf(this.#blocks, blockId).at(-1) ?? blockId;
 
     this.#clearBlockSelection();
-    this.#commit(insertBlockAfter(this.#blocks, blockId, created));
+    this.#commit(insertBlockAfter(this.#blocks, last, created));
     this.focus(created.id, 0);
   }
 
@@ -2031,32 +2338,72 @@ export class NEditor {
     }
 
     const index = findBlockIndex(this.#blocks, firstId);
-    const next = removeBlocks(this.#blocks, this.#selectionForEdit());
+    const next = keepVisible(this.#blocks, removeBlocks(this.#blocks, this.#selectionForEdit()));
 
     this.#commit(next);
     this.#clearBlockSelection();
-    this.#announce(
+    // Announced last, once the caret or the fallback selection is settled:
+    // selecting a neighbour announces its own count, which replaced "Block
+    // deleted" in the live region before it was ever spoken.
+    const deleted =
       ordered.length === 1
         ? this.#labels.blockDeleted
-        : formatLabel(this.#labels.blocksDeleted, { count: ordered.length }),
-    );
+        : formatLabel(this.#labels.blocksDeleted, { count: ordered.length });
 
-    // The caret lands on whatever moved up into the gap.
-    const target = next[Math.min(index, next.length - 1)];
+    // The caret lands on whatever moved up into the gap -- or the nearest block
+    // on either side that can hold one. Blindly focusing the block in the gap
+    // failed on a divider or a hidden child and left the editor in neither
+    // mode, where even Cmd+Z fell on the floor straight after a delete.
+    // Neighbours are taken in visible space, which is where a caret can go.
+    const positions = new Map(next.map((candidate, position) => [candidate.id, position]));
+    const visible = this.#visible();
+    const after = visible.filter((candidate) => (positions.get(candidate.id) ?? 0) >= index);
+    const before = visible
+      .filter((candidate) => (positions.get(candidate.id) ?? 0) < index)
+      .reverse();
 
-    if (target) {
-      this.focus(target.id, index < next.length ? 0 : CARET_END);
+    const landed =
+      this.#focusFirst(
+        after.map((candidate) => candidate.id),
+        0,
+      ) ||
+      this.#focusFirst(
+        before.map((candidate) => candidate.id),
+        CARET_END,
+      );
+
+    // Nothing left can hold a caret: stay in block mode on the nearest block.
+    const neighbour = after[0] ?? before[0];
+
+    if (!landed && neighbour) {
+      this.#setBlockSelection([neighbour.id], neighbour.id);
+      // One sentence for both: the live region keeps only the last write, and
+      // either message alone left out something the next keystroke acts on.
+      const selected = this.#liveRegion.textContent ?? '';
+      this.#announce(selected.length > 0 ? `${deleted} ${selected}` : deleted);
+      return;
     }
+
+    this.#announce(deleted);
   }
 
   #duplicateSelectedBlocks(): void {
-    const result = duplicateBlocks(this.#blocks, this.#selectionForEdit());
+    const edit = this.#selectionForEdit();
+    const result = duplicateBlocks(this.#blocks, edit);
 
     if (result.ids.length === 0) {
       return;
     }
 
-    this.#commit(result.blocks);
+    // The copies go after the last selected block, in document order. With a
+    // gap in the selection, a copied collapsed toggle lands in front of the
+    // last block's later siblings, which fold into it -- and in front of the
+    // copies that follow it, which are what the user asked to see. The copy of
+    // every block the reader selected must be on screen.
+    const sources = this.#blocks.filter((block) => edit.has(block.id));
+    const shown = result.ids.filter((_, index) => this.#selected.has(sources[index]?.id ?? ''));
+
+    this.#commit(keepVisible(this.#blocks, result.blocks, shown));
     this.#setBlockSelection(result.ids);
   }
 
@@ -2073,7 +2420,9 @@ export class NEditor {
     const removing = this.#selectionForEdit();
     const kept = this.#blocks.filter((block) => !removing.has(block.id));
 
-    this.#commit(normalizeDepths(insertBlockAt(kept, index, created)));
+    // A delete like any other: what followed the removed blocks can now follow
+    // a collapsed toggle's subtree instead.
+    this.#commit(keepVisible(this.#blocks, normalizeDepths(insertBlockAt(kept, index, created))));
     this.#clearBlockSelection();
     this.focus(created.id, CARET_END);
   }
@@ -2093,7 +2442,9 @@ export class NEditor {
     // A move against the edge of the document comes back unchanged, and `#commit`
     // drops it — the same test that keeps a drag dropped into its own gap, or any
     // other op that hands back a fresh copy of what it was given, off the stack.
-    this.#commit(moveVisibleBlocks(this.#blocks, ids, direction));
+    // A move takes a block out of its slot just as a delete does, so its
+    // children can land after a collapsed toggle's subtree: `keepVisible`.
+    this.#commit(keepVisible(this.#blocks, moveVisibleBlocks(this.#blocks, ids, direction)));
   }
 
   #stepBlockSelection(direction: 1 | -1): void {
@@ -2155,7 +2506,11 @@ export class NEditor {
       // That pair is the documented way out for a keyboard user, alongside
       // Shift+Tab at depth 0.
       this.#clearBlockSelection();
-      this.#root.blur();
+      // Whatever inside the editor holds focus -- normally the root, but a
+      // control such as the drag handle can too, and blurring only the root
+      // left focus where it was with no mode at all.
+      const active = this.#activeElement();
+      (active && this.#root.contains(active) ? (active as HTMLElement) : this.#root).blur?.();
       this.#announce(this.#labels.leftEditor);
       return;
     }
@@ -2211,19 +2566,36 @@ export class NEditor {
         return;
 
       case 'Tab': {
+        // `#selectionForEdit()`'s expansion, applied per anchor: a selected
+        // block the indent cannot move keeps its hidden children with it.
+        const delta = event.shiftKey ? -1 : 1;
         const indented = indentBlocks(
           this.#blocks,
-          this.#selectionForEdit(),
-          event.shiftKey ? -1 : 1,
+          indentTargets(this.#blocks, this.#selected, delta),
+          delta,
         );
 
-        // Same escape as in text mode: a Tab that changes nothing moves focus.
+        // Same escape as in text mode: a Tab that changes nothing moves focus,
+        // and from the same place it would from text. The caret goes back into
+        // the last selected block (the first, for Shift+Tab) before the browser
+        // takes the key, so it moves on to the next or previous stop from
+        // there. Left on the root, the selection outlived the focus move -- the
+        // next character replaced the selected text -- and the browser's Tab
+        // went from the root: to the first block of the document, or out of
+        // the editor altogether.
         if (indented.every((next, index) => next.depth === this.#blocks[index]?.depth)) {
+          if (!this.#focusForTabExit(!event.shiftKey)) {
+            this.#clearBlockSelection();
+          }
+
           return;
         }
 
         event.preventDefault();
-        this.#commit(indented);
+        // Indenting a block after a collapsed toggle makes it the toggle's
+        // child; outdenting one hands its next sibling to whatever now
+        // precedes it. Either way a block the reader could see would vanish.
+        this.#commit(keepVisible(this.#blocks, indented));
         return;
       }
 
@@ -2271,6 +2643,7 @@ export class NEditor {
     this.#imageContext = id;
     this.#toolbar.hide();
     this.#tableToolbar.hide();
+    this.#syncPortalDirection();
     this.#imageEditor.open(
       anchor.getBoundingClientRect(),
       { src: block.src ?? '', alt: block.alt ?? '' },
@@ -2351,6 +2724,7 @@ export class NEditor {
     }
 
     this.#activeCell = { blockId: target.block.id, ...target.cell };
+    this.#syncPortalDirection();
     this.#tableToolbar.show(view.root.getBoundingClientRect());
   }
 
@@ -2368,7 +2742,17 @@ export class NEditor {
       return;
     }
 
-    const next = applyTableCommand(rows, command, active.row, active.column);
+    // The toolbar's left and right are what the reader sees. Columns run right
+    // to left in an RTL table, so the visual left of a cell is the logical
+    // index after it: inserting at the logical index put "left" on the right.
+    const logical =
+      this.#direction() === 'rtl' &&
+      (command === 'insertColumnLeft' || command === 'insertColumnRight')
+        ? command === 'insertColumnLeft'
+          ? 'insertColumnRight'
+          : 'insertColumnLeft'
+        : command;
+    const next = applyTableCommand(rows, logical, active.row, active.column);
 
     // An insert refused at its cap comes back with the grid untouched. Commit
     // that and the button banks an undo entry for a document that never
@@ -2385,14 +2769,14 @@ export class NEditor {
     // pre-edit indices put the caret in the new blank cell instead of the one
     // they were editing. The other four commands do not move it. The grid may
     // also have shrunk under the caret, so clamp after shifting.
-    const shift = command === 'insertRowAbove' || command === 'insertColumnLeft' ? 1 : 0;
+    const shift = logical === 'insertRowAbove' || logical === 'insertColumnLeft' ? 1 : 0;
     const size = tableSize(next);
     const row = Math.min(
-      command === 'insertRowAbove' ? active.row + shift : active.row,
+      logical === 'insertRowAbove' ? active.row + shift : active.row,
       size.rows - 1,
     );
     const column = Math.min(
-      command === 'insertColumnLeft' ? active.column + shift : active.column,
+      logical === 'insertColumnLeft' ? active.column + shift : active.column,
       size.columns - 1,
     );
     this.#focusCell(block.id, row, column, CARET_END);
@@ -2536,6 +2920,7 @@ export class NEditor {
 
     this.#iconContext = id;
     this.#toolbar.hide();
+    this.#syncPortalDirection();
     this.#iconPicker.open(
       anchor.getBoundingClientRect(),
       block.icon ?? DEFAULT_CALLOUT_ICON,
@@ -2667,8 +3052,16 @@ export class NEditor {
     // of both. Reading only the padding left the controls at the left edge for
     // every nested block. Logical properties in both cases, so this stays
     // correct in both writing directions without mirroring here.
-    const style = this.#document.defaultView?.getComputedStyle(view.root);
+    const win = this.#document.defaultView;
+    const style = win?.getComputedStyle(view.root);
+    // The inset is measured from the root's padding edge, so the root's own
+    // padding is part of where the text begins: a mount with padding (the
+    // demo's is 20px) put the handle that far short of the text.
+    const rootPadding = Number.parseFloat(
+      win?.getComputedStyle(this.#root).paddingInlineStart ?? '0',
+    );
     const indent =
+      (Number.isFinite(rootPadding) ? rootPadding : 0) +
       Number.parseFloat(style?.paddingInlineStart ?? '0') +
       Number.parseFloat(style?.marginInlineStart ?? '0');
 
@@ -2756,6 +3149,7 @@ export class NEditor {
    */
   #handlePointerCancel = (event: PointerEvent): void => {
     this.#cancelLongPress();
+    this.#pressSelected = false;
 
     if (this.#drag && event.pointerId === this.#drag.pointerId) {
       this.#endDrag(null);
@@ -2768,6 +3162,7 @@ export class NEditor {
 
   #handlePointerUp = (event: PointerEvent): void => {
     this.#pointerDown = false;
+    this.#pressSelected = false;
     this.#textDrag = null;
     this.#cancelLongPress();
     delete this.#root.dataset.selecting;
@@ -2925,6 +3320,7 @@ export class NEditor {
       y: event.clientY,
       timer: view.setTimeout(() => {
         this.#longPress = null;
+        this.#pressSelected = true;
         this.#setBlockSelection([blockId], blockId);
       }, LONG_PRESS_MS),
     };
@@ -3033,17 +3429,31 @@ export class NEditor {
     // handle that holds the pointer capture. That click is the tail of this
     // gesture, not a new one, so the handle's click hook has to skip it —
     // abandoned and cancelled drags included, since they end the same way.
-    this.#clickEndedDrag = this.#drag?.active ?? false;
+    const wasActive = this.#drag?.active ?? false;
+    this.#clickEndedDrag = wasActive;
     this.#drag = null;
+
+    // The press focused the handle button, and the click this flag swallows
+    // was what would have focused the root -- so after a drag focus sat on the
+    // handle with the blocks selected, where Escape could not leave and Cmd+Z
+    // could not undo the move. Block selection keeps focus on the root.
+    if (wasActive && !this.#destroyed && this.#selected.size > 0) {
+      this.#selection()?.removeAllRanges();
+      this.#root.focus({ preventScroll: true });
+    }
     this.#gutter.setDragging(false);
     delete this.#root.dataset.dragging;
     this.#dropIndicator.hidden = true;
 
-    if (commit) {
+    // A drag that began in an editable editor can end in a read-only one.
+    if (commit && this.#canEdit()) {
       // The drag carries visible anchors; a collapsed toggle's children join
       // here, or they stay behind and are re-parented under whatever follows.
       this.#commit(
-        moveBlocks(this.#blocks, withHiddenDescendants(this.#blocks, commit.ids), commit.gap),
+        keepVisible(
+          this.#blocks,
+          moveBlocks(this.#blocks, withHiddenDescendants(this.#blocks, commit.ids), commit.gap),
+        ),
       );
     }
   }
@@ -3144,6 +3554,12 @@ export class NEditor {
   }
 
   #emitChange(): void {
+    // The payload is a deep copy of the whole document, made on every
+    // keystroke; with nobody listening it was pure cost.
+    if (!this.#emitter.has('change')) {
+      return;
+    }
+
     this.#emitter.emit('change', this.getDocument());
   }
 
@@ -3228,6 +3644,14 @@ export class NEditor {
     runKey: string | null = null,
     selection?: SelectionSnapshot | null,
   ): void {
+    // Content equal to what the host already holds is not an edit. The pure
+    // rich-text ops hand back fresh run arrays even then -- re-applying the
+    // link already on a range is one -- and `sameBlocks` compares blocks, so
+    // without this an undo step and a `change` were banked for nothing.
+    if (richEquals(this.#contentOf(target), content)) {
+      return;
+    }
+
     if (!target.cell) {
       this.#commitContent(target.block.id, content, runKey, selection);
       return;
@@ -3340,6 +3764,7 @@ export class NEditor {
 
     const content = this.#contentOf(target);
 
+    this.#syncPortalDirection();
     this.#toolbar.show(rect, {
       marks: richActiveMarks(content, range.start, range.end),
       link: richActiveLink(content, range.start, range.end),
@@ -3451,19 +3876,6 @@ export class NEditor {
   }
 
   /**
-   * Dismisses the floating UI when the ground it was placed against moves.
-   *
-   * Portals are `position: fixed` and are given viewport coordinates once, at
-   * the moment they open. Nothing listened for scroll or resize, so after any
-   * scroll they sat over whatever content had moved under them -- still live,
-   * still acting on the block they were opened from, and pointing at something
-   * else entirely. Dismissing is the honest answer: the anchor they described
-   * is no longer where they are.
-   *
-   * The table toolbar is deliberately left alone. It tracks the caret's cell
-   * rather than a one-off anchor, and `#syncTableToolbar` repositions it.
-   */
-  /**
    * Brings a block into view, and only if it is not already there.
    *
    * `preventScroll: true` on every `focus()` is deliberate -- letting the
@@ -3479,6 +3891,19 @@ export class NEditor {
     element?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   }
 
+  /**
+   * Answers the ground moving under the floating UI.
+   *
+   * Portals are `position: fixed` and are given viewport coordinates when they
+   * open, so after a scroll or resize they sat over whatever had moved under
+   * them -- still live, still acting on the block they were opened from. The
+   * slash menu and the format toolbar are dismissed: they describe a caret
+   * position, and the next keystroke brings them back. A dialog the user is
+   * typing into follows its anchor instead (see below), and the table toolbar
+   * is re-placed against its table: it was moved only on `selectionchange`,
+   * which a scroll never fires. Browsers deliver `scroll` at most once a frame,
+   * so that is one layout read per frame.
+   */
   #handleViewportChange = (event: Event): void => {
     if (this.#destroyed) {
       return;
@@ -3501,6 +3926,10 @@ export class NEditor {
 
     this.#closeSlashMenu();
     this.#toolbar.hide();
+
+    if (this.#tableToolbar.isOpen) {
+      this.#syncTableToolbar();
+    }
 
     // The dialogs take focus, and one that holds it is being typed into.
     // Dismissing it handed focus back to the block it came from mid-word, so
@@ -3585,7 +4014,18 @@ export class NEditor {
 
     const parsed = this.#syncFromDom(resolved);
     this.#applyArmedMarks(resolved, composition, parsed);
-    this.#emitChange();
+
+    // A cancelled candidate ends where it began: no edit, so no `change`.
+    // Judged by the block as it stands now -- `resolved.block` was captured
+    // before the sync above, so it still held the last intermediate candidate.
+    const committed = {
+      ...resolved,
+      block: findBlock(this.#blocks, resolved.block.id) ?? resolved.block,
+    };
+
+    if (!composition || !richEquals(composition.content, this.#contentOf(committed))) {
+      this.#emitChange();
+    }
   };
 
   /**
@@ -3747,9 +4187,11 @@ export class NEditor {
 
     const target: ResolvedTarget = { ...resolved, block };
 
-    // Half-composed text is not something to run markdown rules against.
+    // Half-composed text is not something to run markdown rules against --
+    // nor something to report. Each candidate fired `change`, so an autosave or
+    // a collaboration layer persisted and broadcast IME candidates on every
+    // word; composition end reports the result once.
     if (this.#composing) {
-      this.#emitChange();
       return;
     }
 
@@ -3837,7 +4279,19 @@ export class NEditor {
       return false;
     }
 
-    const match = matchInlineRule(beforeCaret);
+    // A code run holds no markup, so the rules see its characters as
+    // placeholders, as the Markdown reader projects them -- offsets stay
+    // aligned. Read raw, a `](<` inside code held every later link and mark
+    // on the line open, where pasting the same Markdown formatted them. A
+    // destination is still read from the real text. Typed backticks are not
+    // code yet, so the code rule itself sees what it always saw.
+    const projected = projectCode(this.#contentOf(target)).slice(0, beforeCaret.length);
+    const match =
+      projected === beforeCaret
+        ? matchInlineRule(beforeCaret)
+        : matchInlineRuleAhead(projected, {
+            destination: (from, to) => beforeCaret.slice(from, to),
+          });
 
     if (!match) {
       return false;
@@ -3886,6 +4340,17 @@ export class NEditor {
       return false;
     }
 
+    // Not where a slash is ordinary text, or where retyping the block would
+    // destroy it. In a code block ` /` is everyday shell; the menu took the
+    // Enter meant for a newline and turned the code into a paragraph. In an
+    // image caption, applying any command retyped the image and deleted its
+    // picture -- the payload `canMergeText` exists to protect.
+    const owner = findBlock(this.#blocks, blockId);
+
+    if (!owner || owner.type === 'code' || !canMergeText(owner.type)) {
+      return false;
+    }
+
     // Only at a word boundary, so a URL never opens the menu.
     const preceding = beforeCaret.at(-2);
 
@@ -3894,6 +4359,7 @@ export class NEditor {
     }
 
     this.#slashContext = { blockId, start: caret - 1 };
+    this.#syncPortalDirection();
     this.#slashMenu.open(this.#selectionRect() ?? content.getBoundingClientRect());
     this.#describeSlashMenu(content);
     return true;
@@ -3935,6 +4401,9 @@ export class NEditor {
     }
 
     host.setAttribute('role', 'combobox');
+    // A combobox needs a name of its own (axe: aria-input-field-name). The block
+    // has none while it is a plain editing host, so it borrows the menu's.
+    host.setAttribute('aria-label', this.#labels.slashMenu);
     host.setAttribute('aria-expanded', 'true');
     host.setAttribute('aria-haspopup', 'listbox');
     host.setAttribute('aria-controls', this.#slashMenu.listId);
@@ -3957,6 +4426,7 @@ export class NEditor {
 
     for (const attribute of [
       'role',
+      'aria-label',
       'aria-expanded',
       'aria-haspopup',
       'aria-controls',
@@ -3971,7 +4441,7 @@ export class NEditor {
 
     this.#closeSlashMenu();
 
-    if (!context) {
+    if (!context || !this.#canEdit()) {
       return;
     }
 
@@ -4393,16 +4863,53 @@ export class NEditor {
     // blanks a pasted table's rows and an image's src. A table or an image is
     // never empty here whatever its cells or caption say: its payload is not
     // text, so there is nothing for a paste to take the place of.
-    const replaceable = isRichEmpty(trimmed) && canMergeText(target.type);
+    //
+    // A toggle or a callout is never replaced: it is its children's parent,
+    // and a replacement of another type handed them over -- a collapsed
+    // toggle's hidden answers showed under a pasted bullet. The paste merges
+    // into its own text and nests the rest, as anywhere else in it.
+    const replaceable =
+      isRichEmpty(trimmed) && canMergeText(target.type) && !acceptsChildren(target.type);
 
     // Only text merges into text. Merging a pasted table would keep its
     // (always empty) content and drop every row — for a lone table pasted into
     // a paragraph, a paste that changed nothing at all.
     const merges = replaceable || canMergeText(first.type);
 
+    // At the very start of a block with text, a block that cannot merge goes
+    // in front of it and the block stays exactly as it was -- id, type,
+    // payload, children -- which is Enter's own answer there. Moving the text
+    // into a fresh block and deleting the target as a husk turned a heading
+    // into a paragraph, unchecked a to-do, dropped a callout's icon, and
+    // deleted a collapsed toggle with its fold, exposing its answers.
+    if (!merges && isRichEmpty(before) && !isRichEmpty(after)) {
+      const inserted = pasted.map((block) => ({
+        ...cloneBlock(block),
+        depth: target.depth + block.depth,
+      }));
+      let blocks = updateBlock(this.#blocks, target.id, { content: trimmed });
+      let at = findBlockIndex(blocks, target.id);
+
+      for (const block of inserted) {
+        blocks = insertBlockAt(blocks, at, block);
+        at += 1;
+      }
+
+      this.#commit(keepVisible(this.#blocks, normalizeDepths(blocks), [target.id]));
+      this.focus(target.id, 0);
+      return;
+    }
+
+    // Into a toggle's or a callout's own text, the following lines are its
+    // children, as Enter makes them. As siblings they landed between the
+    // block and its children, which then belonged to the pasted text: a
+    // collapsed toggle's hidden answers showed under a stranger, and the
+    // toggle was left empty. Neither is ever replaced, so this always holds.
+    const base = !replaceable && acceptsChildren(target.type) ? target.depth + 1 : target.depth;
+
     let created = pasted.slice(merges ? 1 : 0).map((block) => ({
       ...cloneBlock(block),
-      depth: target.depth + block.depth,
+      depth: base + block.depth,
     }));
 
     // Where the text that followed the caret lands, and the type it lands in.
@@ -4416,7 +4923,7 @@ export class NEditor {
     const rehoused =
       canMergeText(tailType) || (isRichEmpty(after) && !isVoidType(tailType))
         ? null
-        : createBlock(typeAfterSplit(target.type), after, target.depth);
+        : createBlock(typeAfterSplit(target.type), after, base);
 
     let targetContent = merges ? richConcat(before, first.content) : before;
 
@@ -4431,14 +4938,19 @@ export class NEditor {
     let blocks: Block[];
 
     if (replaceable) {
-      // The id is the target's and stays put; only the payload is replaced.
+      // The id is the target's and stays put; the rest is the pasted block's
+      // and nothing else. Merged over the target, the old type's fields
+      // survived -- a heading pasted over an empty checked to-do kept
+      // `checked` -- where `setBlockType` drops them with the type.
       const { id: _pastedId, ...payload } = cloneBlock(first);
-
-      blocks = updateBlock(this.#blocks, target.id, {
+      const replacement: Block = {
         ...payload,
+        id: target.id,
         depth: target.depth,
         content: targetContent,
-      });
+      };
+
+      blocks = this.#blocks.map((block) => (block.id === target.id ? replacement : block));
     } else {
       blocks = updateBlock(this.#blocks, target.id, { content: targetContent });
     }
@@ -4453,13 +4965,24 @@ export class NEditor {
     // Pasting a block that could not merge leaves the target holding only the
     // text before the caret. At offset 0 there is none, and keeping the husk
     // would put an empty line above every table pasted at the start of one.
-    if (!merges && isRichEmpty(targetContent) && canMergeText(target.type)) {
+    // A toggle or a callout is not a husk: it still holds its children.
+    if (
+      !merges &&
+      isRichEmpty(targetContent) &&
+      canMergeText(target.type) &&
+      !acceptsChildren(target.type)
+    ) {
       blocks = removeBlock(blocks, target.id);
     }
 
-    this.#commit(normalizeDepths(blocks));
-
     const last = created.at(-1);
+
+    // A pasted collapsed toggle lands in front of the target's own children,
+    // which then nest under it out of sight. Its pasted children have new ids
+    // and stay folded -- except the last block, which holds the text that
+    // followed the caret and is where the caret goes: hidden, the user's own
+    // words vanished into the fold and the focus below could not land.
+    this.#commit(keepVisible(this.#blocks, normalizeDepths(blocks), last ? [last.id] : []));
 
     if (last) {
       this.focus(last.id, richLength(last.content) - richLength(after));
@@ -4490,7 +5013,9 @@ export class NEditor {
       at += 1;
     }
 
-    this.#commit(normalizeDepths(blocks));
+    // A removal like any other: the removed blocks' children go to whatever
+    // now precedes them, and a pasted collapsed toggle would swallow them.
+    this.#commit(keepVisible(this.#blocks, normalizeDepths(blocks)));
     this.#setBlockSelection(created.map((block) => block.id));
   }
 
@@ -4660,8 +5185,12 @@ export class NEditor {
         return;
 
       case 'Tab': {
-        const ids = withHiddenDescendants(this.#blocks, [block.id]);
-        const indented = indentBlocks(this.#blocks, ids, event.shiftKey ? -1 : 1);
+        const delta = event.shiftKey ? -1 : 1;
+        const indented = indentBlocks(
+          this.#blocks,
+          indentTargets(this.#blocks, [block.id], delta),
+          delta,
+        );
 
         // Only swallow Tab when it actually indents. Otherwise the editor would
         // be a keyboard trap (WCAG 2.1.2): Shift+Tab at depth 0 is always
@@ -4671,7 +5200,9 @@ export class NEditor {
         }
 
         event.preventDefault();
-        this.#commit(indented);
+        // Into a collapsed toggle, the block would vanish and the focus below
+        // could not land -- the editor left in neither mode. Open it instead.
+        this.#commit(keepVisible(this.#blocks, indented));
         this.focus(block.id, getCaretOffset(content));
         return;
       }
@@ -4679,8 +5210,11 @@ export class NEditor {
       case 'ArrowUp':
         if (modifier && event.shiftKey) {
           event.preventDefault();
+          // Read before the move, restored through the host it came from: by
+          // block id alone a table's caret went to its header cell.
+          const offset = getCaretOffset(content);
           this.#moveVisible(new Set([block.id]), -1);
-          this.focus(block.id, getCaretOffset(content));
+          this.#focusResolved(resolved, offset);
         } else if (event.shiftKey && isCaretAtStart(content)) {
           // Shift-extending past the top of a block selects whole blocks: the
           // browser cannot carry a text selection into another editing host.
@@ -4695,8 +5229,11 @@ export class NEditor {
       case 'ArrowDown':
         if (modifier && event.shiftKey) {
           event.preventDefault();
+          // Read before the move, restored through the host it came from: by
+          // block id alone a table's caret went to its header cell.
+          const offset = getCaretOffset(content);
           this.#moveVisible(new Set([block.id]), 1);
-          this.focus(block.id, getCaretOffset(content));
+          this.#focusResolved(resolved, offset);
         } else if (event.shiftKey && isCaretAtEnd(content)) {
           event.preventDefault();
           this.#extendFromTextToBlocks(block.id, 1);
@@ -4733,6 +5270,24 @@ export class NEditor {
 
     const range = getSelectionRange(content) ?? { start: 0, end: 0 };
     const trimmed = richDelete(block.content, range.start, range.end);
+
+    // At the very start of a block that has text, Enter pushes the block down
+    // and opens an empty line above it. Splitting there made the *empty* half
+    // the original: a heading's text came out as a paragraph, a checked
+    // to-do's text lost its check to the empty line above, an image caption
+    // moved out of its image. The block -- id, type, payload -- stays with its
+    // text, and the caret stays at its start.
+    if (range.start === 0 && !isRichEmpty(trimmed)) {
+      const index = findBlockIndex(this.#blocks, block.id);
+      const opened = createBlock(typeAfterSplit(block.type), [], block.depth);
+      let blocks = updateBlock(this.#blocks, block.id, { content: trimmed });
+      blocks = insertBlockAt(blocks, index, opened);
+
+      this.#commit(blocks);
+      this.focus(block.id, 0);
+      return;
+    }
+
     const [before, after] = richSplit(trimmed, range.start);
 
     // A callout or toggle owns what follows it, so Enter opens a child. It is
@@ -4758,9 +5313,16 @@ export class NEditor {
   }
 
   #backspaceAtStart(block: Block): void {
-    // Outdent before any destructive edit.
+    // Outdent before any destructive edit -- with whatever the block hides, as
+    // Shift+Tab does. Outdenting the one block left a collapsed toggle's
+    // children where they were, nested under each other out of sight.
     if (block.depth > 0) {
-      this.#commit(indentBlock(this.#blocks, block.id, -1));
+      this.#commit(
+        keepVisible(
+          this.#blocks,
+          indentBlocks(this.#blocks, withHiddenDescendants(this.#blocks, [block.id]), -1),
+        ),
+      );
       this.focus(block.id, 0);
       return;
     }
@@ -4794,7 +5356,7 @@ export class NEditor {
 
     // A divider has no text to merge into, so backspace just removes it.
     if (isVoidType(previous.type)) {
-      this.#commit(removeBlock(this.#blocks, previous.id));
+      this.#commit(keepVisible(this.#blocks, removeBlock(this.#blocks, previous.id)));
       this.focus(block.id, 0);
       return;
     }
@@ -4807,13 +5369,13 @@ export class NEditor {
 
     const joinAt = richLength(previous.content);
     let blocks = updateBlock(this.#blocks, previous.id, {
-      content: richConcat(previous.content, block.content),
+      content: contentFor(previous.type, richConcat(previous.content, block.content)),
     });
     // No re-clamp here, unlike `#deleteAtEnd`: this path is only ever reached
     // at depth 0 — anything deeper outdents above rather than merging — and
     // removing a depth-0 block leaves its successor at depth 1 at most, which
     // any predecessor can carry.
-    blocks = removeBlock(blocks, block.id);
+    blocks = keepVisible(this.#blocks, removeBlock(blocks, block.id));
 
     this.#commit(blocks);
     this.focus(previous.id, joinAt);
@@ -4829,7 +5391,7 @@ export class NEditor {
     }
 
     if (isVoidType(next.type)) {
-      this.#commit(normalizeDepths(removeBlock(this.#blocks, next.id)));
+      this.#commit(keepVisible(this.#blocks, normalizeDepths(removeBlock(this.#blocks, next.id))));
       this.focus(block.id, CARET_END);
       return;
     }
@@ -4843,12 +5405,12 @@ export class NEditor {
 
     const joinAt = richLength(block.content);
     let blocks = updateBlock(this.#blocks, block.id, {
-      content: richConcat(block.content, next.content),
+      content: contentFor(block.type, richConcat(block.content, next.content)),
     });
     // Deleting the neighbour takes its depth step with it: anything nested
     // under it is left more than one level below this block, which is exactly
     // the state `normalizeDepths` exists to make impossible.
-    blocks = normalizeDepths(removeBlock(blocks, next.id));
+    blocks = keepVisible(this.#blocks, normalizeDepths(removeBlock(blocks, next.id)));
 
     this.#commit(blocks);
     this.focus(block.id, joinAt);
@@ -4893,10 +5455,53 @@ export class NEditor {
     this.focus(created.id, 0);
   }
 
+  /**
+   * The editor's own resolved direction: computed, so a `dir` on any ancestor
+   * and a CSS `direction` both count.
+   */
+  #direction(): 'ltr' | 'rtl' {
+    return this.#document.defaultView?.getComputedStyle(this.#root).direction === 'rtl'
+      ? 'rtl'
+      : 'ltr';
+  }
+
+  /**
+   * Portals render outside the editor and inherit nothing from it, direction
+   * included: in a right-to-left editor every menu, toolbar and dialog laid
+   * itself out left to right. The direction is copied over on focus and again
+   * as each portal opens, so a host that flips `dir` while the editor already
+   * has focus is followed too. One computed-style read each time.
+   */
+  #syncPortalDirection(): void {
+    const dir = this.#direction();
+
+    for (const portal of this.#portals) {
+      portal.dir = dir;
+    }
+  }
+
   #handleFocusIn = (event: FocusEvent): void => {
+    this.#syncPortalDirection();
     const resolved = this.#resolve(event.target);
 
     if (resolved) {
+      // A caret arriving in a block ends block selection, however it arrived:
+      // Tab back in from outside, a host's `.focus()`, assistive technology.
+      // Left live, the next Backspace deleted the selected block from under
+      // a caret sitting somewhere else. Two gestures set a block selection
+      // while focus is still moving into the text, and keep it: a drag in
+      // flight, and a long press, after which the browser's own long-press
+      // handling focuses the host while the finger is still down.
+      if (this.#selected.size > 0 && !this.#drag && !this.#pressSelected) {
+        this.#clearBlockSelection();
+      } else if (this.#selected.size > 0 && this.#pressSelected) {
+        // The long press keeps its block selection, and takes the text side
+        // back: left with the browser's focus and word selection, a soft
+        // keyboard's insertText replaced the word -- both modes at once.
+        this.#selection()?.removeAllRanges();
+        this.#root.focus({ preventScroll: true });
+      }
+
       this.#emitter.emit('focus', { blockId: resolved.block.id });
     }
   };

@@ -378,3 +378,86 @@ describe('removing a block leaves the others where they are', () => {
     expect(rendered()).toEqual(['c', 'a', 'b']);
   });
 });
+
+describe('a read-only empty image offers nothing to author', () => {
+  /*
+   * An image block with no source draws an "Add an image" button. Disabling it
+   * in a read-only view stopped it acting, but it was still drawn and still
+   * exposed as a button named "Add an image" -- an authoring prompt in a view
+   * that takes no authoring, which is what the placeholders were already
+   * withheld for. Read-only, the empty figure is drawn with no control at all.
+   */
+  const empty = (): Block => block({ id: 'im', type: 'image', src: '', alt: '' });
+  const add = (): HTMLButtonElement | null =>
+    root.querySelector<HTMLButtonElement>('.neditor-image__placeholder');
+
+  test('rendered read-only, the empty figure has no button in it', () => {
+    renderer.setEditable(false);
+
+    renderer.render([empty()]);
+
+    const figure = renderer.getView('im')!.root.querySelector('figure');
+    expect(figure).not.toBeNull();
+    expect(figure!.querySelector('button')).toBeNull();
+  });
+
+  test('turning read-only takes the button away, and turning back restores it', () => {
+    renderer.render([empty()]);
+    expect(add()).not.toBeNull();
+
+    renderer.setEditable(false);
+    expect(add()).toBeNull();
+
+    renderer.setEditable(true);
+    expect(add()).not.toBeNull();
+    expect(add()!.disabled).toBe(false);
+    expect(add()!.textContent).toBe(DEFAULT_LABELS.imageAdd);
+  });
+
+  test('the restored button sits before the caption and still opens the editor', () => {
+    const opened: [string, HTMLElement][] = [];
+    renderer = new Renderer(
+      root,
+      { ...hooks, onEditImage: (id, anchor) => opened.push([id, anchor]) },
+      DEFAULT_LABELS,
+    );
+    renderer.setEditable(false);
+    renderer.render([empty()]);
+
+    renderer.setEditable(true);
+    add()!.click();
+
+    expect(add()!.nextElementSibling?.tagName).toBe('FIGCAPTION');
+    expect(opened).toEqual([['im', add()]]);
+  });
+
+  test('a re-render while read-only does not bring it back', () => {
+    renderer.render([empty()]);
+    renderer.setEditable(false);
+
+    renderer.render([{ ...empty(), content: [{ text: 'caption' }] }]);
+
+    expect(add()).toBeNull();
+  });
+
+  test('an image losing its source while read-only is rebuilt without one', () => {
+    renderer.setEditable(false);
+    renderer.render([block({ id: 'im', type: 'image', src: 'https://a.test/x.png' })]);
+
+    renderer.render([empty()]);
+
+    expect(renderer.getView('im')!.root.querySelector('img')).toBeNull();
+    expect(add()).toBeNull();
+  });
+
+  test('flipping twice does not draw two', () => {
+    renderer.render([empty()]);
+
+    renderer.setEditable(true);
+    renderer.setEditable(false);
+    renderer.setEditable(true);
+    renderer.setEditable(true);
+
+    expect(root.querySelectorAll('.neditor-image__placeholder')).toHaveLength(1);
+  });
+});

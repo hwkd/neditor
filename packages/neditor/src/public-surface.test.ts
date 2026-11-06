@@ -287,16 +287,18 @@ describe('an image announces its alt text', () => {
     expect(editor.element.querySelector('img')?.alt).toBe('A ginger cat');
   });
 
-  test('the empty-state placeholder is disabled the same way, and reversibly', () => {
+  test('the empty-state placeholder is not drawn while read-only, and returns with editing', () => {
+    // A disabled "Add an image" button is still an authoring prompt, read out
+    // to a reader who cannot act on it; read-only draws an empty figure.
     const editor = mount([block({ type: 'image' })], { editable: false });
     const add = () =>
-      editor.element.querySelector<HTMLButtonElement>('.neditor-image__placeholder')!;
+      editor.element.querySelector<HTMLButtonElement>('.neditor-image__placeholder');
 
-    expect(add().disabled).toBe(true);
+    expect(add()).toBeNull();
 
     editor.setEditable(true);
 
-    expect(add().disabled).toBe(false);
+    expect(add()!.disabled).toBe(false);
   });
 });
 

@@ -170,11 +170,13 @@ describe('every visible string is reachable through labels', () => {
     expect(labels.deleteColumnGlyph).toBe('⤫ Spalte');
   });
 
-  test('the defaults are unchanged for a consumer who passes nothing', () => {
+  test('the defaults hold for a consumer who passes nothing', () => {
     const labels = resolveLabels({});
 
     expect(labels.deleteRowGlyph).toBe('⤫ row');
-    expect(labels.deleteColumnGlyph).toBe('⤫ col');
+    // "column", not "col": the button is named "Delete this column", and a
+    // visible word that is not a word of the name fails WCAG 2.5.3.
+    expect(labels.deleteColumnGlyph).toBe('⤫ column');
   });
 });
 

@@ -30,6 +30,20 @@ export interface SelectionSnapshot {
 export interface HistoryEntry {
   blocks: Block[];
   selection: SelectionSnapshot | null;
+  /**
+   * The blocks selected as units when the entry was recorded, if any.
+   *
+   * An edit made on a block selection has no caret for `selection` to record,
+   * so undo had nothing to restore and fell back to the first block of the
+   * document -- deleting block 7 of a long page and undoing scrolled the user
+   * to the top.
+   */
+  selectedBlocks?: readonly string[];
+  /**
+   * The end the block selection grows from. Restored with the selection, so
+   * Shift+Arrow after undo shrinks or grows it the way it did before the edit.
+   */
+  selectionAnchor?: string;
 }
 
 export interface HistoryOptions {
@@ -67,7 +81,14 @@ export class History {
   #runAt = 0;
 
   constructor(options: HistoryOptions = {}) {
-    this.#limit = Math.max(1, options.limit ?? DEFAULT_LIMIT);
+    // `Math.max(1, NaN)` is NaN, and `length > NaN` is never true, so a limit
+    // read from a bad config string kept every entry ever recorded. NaN and
+    // non-numbers take the default; Infinity stays a deliberate "unlimited".
+    const limit =
+      typeof options.limit === 'number' && !Number.isNaN(options.limit)
+        ? options.limit
+        : DEFAULT_LIMIT;
+    this.#limit = Math.max(1, limit);
     this.#coalesceMs = Math.max(0, options.coalesceMs ?? DEFAULT_COALESCE_MS);
     this.#now = options.now ?? Date.now;
   }

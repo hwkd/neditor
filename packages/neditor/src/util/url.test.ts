@@ -85,6 +85,19 @@ describe('sanitizeImageUrl', () => {
     );
   });
 
+  test('drops the whitespace a wrapped base64 payload carries', () => {
+    // Base64 wrapped at 76 columns is common, and a browser decoding it skips
+    // ASCII whitespace. Kept in the model, the newline was percent-encoded by
+    // the Markdown writer and refused by the reader, so the image came back as
+    // a paragraph of base64.
+    expect(sanitizeImageUrl('data:image/png;base64,iVBORw0KGgo\nAAAANSUhEUg==')).toBe(
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==',
+    );
+    expect(sanitizeImageUrl('data:image/png;base64,iVBO Rw0K\r\n\tGgo=')).toBe(
+      'data:image/png;base64,iVBORw0KGgo=',
+    );
+  });
+
   test('refuses SVG data, which can carry script', () => {
     // Inert inside an <img>, but the same string in an <object> or a new tab
     // is not — so it never enters the model.

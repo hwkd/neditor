@@ -324,8 +324,11 @@ describe('undoing an edit made in block-selection mode leaves somewhere to type'
     moveDown(editor);
     editor.undo();
 
-    expect(document.activeElement, 'focus must not be left on the root').not.toBe(editor.element);
+    // The invariant is "never neither mode". Undo used to land a caret in the
+    // first block here; it now restores the block selection the edit was made
+    // on (history entries record it), which is a mode in its own right -- the
+    // test above shows the next Cmd+Z still lands from it.
     expect(editor.element.contains(document.activeElement)).toBe(true);
-    expect(editor.getSelectionState()).not.toBeNull();
+    expect(editor.getSelectedBlocks()).toEqual(['a']);
   });
 });

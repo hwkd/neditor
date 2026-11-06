@@ -261,3 +261,286 @@ describe('emphasis needs a delimiter that can actually open or close', () => {
     expect(runs.some((run) => (run.marks ?? []).includes('code'))).toBe(true);
   });
 });
+
+describe('the delimiters are measured, not searched for', () => {
+  /**
+   * The opening length was `whole.indexOf(inner)`: the first place the inner
+   * text occurs in the match. For `<u>u</u>` that is the `u` inside `<u>`, so
+   * the offsets named the delimiter's `u` as the content and the content's
+   * `u` as part of the closing delimiter. The plain text comes out the same
+   * either way -- the two `u`s are the same character -- which is why it went
+   * unnoticed; what differs is which one is deleted, and with it any
+   * formatting the content already had.
+   */
+  test.each([
+    ['<u>u</u>', 'u'],
+    ['<u>u>u</u>', 'u>u'],
+    ['<u>></u>', '>'],
+  ])('%s strips exactly its own delimiters', (input, inner) => {
+    expect(matchInlineRule(input)).toMatchObject({
+      start: 0,
+      end: input.length,
+      openLength: 3,
+      closeLength: 4,
+      mark: 'underline',
+    });
+    expect(input.slice(3, input.length - 4)).toBe(inner);
+  });
+
+  test('formatting inside an underline whose text starts like its tag survives', () => {
+    // Typed or pasted, `**u**` closes first, so the underline's content is an
+    // already-bold `u`. Taking the delimiter's `u` for the content deleted the
+    // bold one and underlined the plain one.
+    expect(blocksFromMarkdown('<u>**u**</u>')[0]?.content).toEqual([
+      { text: 'u', marks: ['bold', 'underline'] },
+    ]);
+  });
+
+  test('a link whose label repeats in its destination', () => {
+    // `[t](t)`: the label occurs first, but a destination holding the label's
+    // text before the label itself cannot, so pin the offsets outright.
+    expect(matchInlineRule('[ab](https://ab.test/)')).toMatchObject({
+      start: 0,
+      openLength: 1,
+      closeLength: '](https://ab.test/)'.length,
+    });
+  });
+});
+
+describe('a link destination is literal', () => {
+  /**
+   * Every rule fires the moment its closing delimiter is typed, and a link
+   * only closes on its final `)` -- so a destination still being typed was
+   * ordinary text to the emphasis rules, and `#object.__init__` became
+   * `#object.init` with `init` in bold before the link existed. CommonMark
+   * gives a destination no emphasis at all, and neither does this now: while
+   * the caret is inside an open `](`, no mark rule fires.
+   */
+  const destination = (url: string): string | undefined =>
+    blocksFromMarkdown(`[t](${url})`)[0]?.content.find((run) => run.link)?.link;
+
+  test.each([
+    'https://docs.python.org/3/reference/datamodel.html#object.__init__',
+    'https://a.test/**y**',
+    'https://a.test/*y*',
+    'https://a.test/_x_',
+    'https://a.test/__x__',
+    'https://a.test/~~x~~',
+  ])('%s', (url) => {
+    expect(destination(url)).toBe(url);
+  });
+
+  test('a code span in a destination is not one either', () => {
+    // The sanitizer percent-encodes the backticks; what matters is that they
+    // are still there to encode, rather than spent as a code span.
+    expect(destination('https://a.test/`x`')).toBe('https://a.test/%60x%60');
+  });
+
+  test.each(['https://a.test/(a)/__x__', 'https://a.test/a b/*y*'])(
+    'in angle brackets: %s',
+    (url) => {
+      const href = blocksFromMarkdown(`[t](<${url}>)`)[0]?.content.find((run) => run.link)?.link;
+
+      expect(href).toBe(url.replace(' ', '%20'));
+    },
+  );
+
+  test('typing a destination does not fire a rule partway', () => {
+    expect(matchInlineRule('[t](https://a.test/#object.__init__')).toBeNull();
+    expect(matchInlineRule('[t](<https://a.test/a b/**y**')).toBeNull();
+  });
+
+  test('emphasis after a closed link, or outside one, still fires', () => {
+    expect(apply('[t](https://a.test/) **b**')).toMatchObject({ mark: 'bold' });
+    expect(apply('see ](x) **b**')).toMatchObject({ mark: 'bold' });
+    expect(apply('[t](x and **b**')).toMatchObject({ mark: 'bold' });
+    expect(apply('[t](<x> **b**')).toMatchObject({ mark: 'bold' });
+    expect(apply('**b**')).toMatchObject({ mark: 'bold' });
+  });
+
+  test('a label is not a destination', () => {
+    expect(blocksFromMarkdown('[**b**](https://a.test/)')[0]?.content).toEqual([
+      { text: 'b', marks: ['bold'], link: 'https://a.test/' },
+    ]);
+  });
+});
+
+describe('a destination is open only where a link pattern could still close it', () => {
+  /**
+   * The test for "the caret is inside a link destination" was looser than the
+   * patterns it stands in for. Any earlier `[` counted as the label's opener,
+   * even one an intervening `]` or line break had already closed; a `](`
+   * inside the very code span being closed counted, although a code span binds
+   * tighter than a link; and an angle-bracketed destination stayed open across
+   * a `<` it cannot hold, and across any amount of prose behind a `](<` that
+   * never closes. Each of those suppressed a mark the text really had.
+   */
+  test('a code span holding "[label](" is code', () => {
+    expect(matchInlineRule('Write `[label](`')).toMatchObject({ start: 6, mark: 'code' });
+    expect(blocksFromMarkdown('Start a link with `[text](` and close it')[0]?.content).toEqual([
+      { text: 'Start a link with ' },
+      { text: '[text](', marks: ['code'] },
+      { text: ' and close it' },
+    ]);
+  });
+
+  test('a code span opened inside a destination is still part of it', () => {
+    expect(matchInlineRule('[t](https://a.test/`x`')).toBeNull();
+  });
+
+  test('a "[" closed by a "]" before the hinge opens no label', () => {
+    expect(apply('ref [x] then f](g*h*')).toMatchObject({
+      mark: 'italic',
+      text: 'ref [x] then f](gh',
+    });
+  });
+
+  test('a "[" on an earlier line opens no label', () => {
+    expect(apply('[a\nb](c*d*')).toMatchObject({ mark: 'italic', text: '[a\nb](cd' });
+  });
+
+  test('an earlier hinge with a real label still holds the destination open', () => {
+    // The nearest `](` has no label of its own, but the destination of the one
+    // before it may hold a `](`.
+    expect(matchInlineRule('[a](b](c*d*')).toBeNull();
+  });
+
+  test('a "[" right before the "]" opens an empty label, as the link rule reads it', () => {
+    // The link rule opens a label at the last `[` before its `]`, so `[a[]`
+    // and `[[]` are empty labels and their `](` can never become a link. The
+    // destination test counted the earlier `[` instead, and held marks off a
+    // destination that could never exist.
+    expect(apply('[a[](x)')).toBeNull();
+    expect(apply('[a[](**b**')).toMatchObject({ mark: 'bold', text: '[a[](b' });
+    expect(apply('[[](**b**')).toMatchObject({ mark: 'bold', text: '[[](b' });
+    expect(apply('[a[](x*y*')).toMatchObject({ mark: 'italic', text: '[a[](xy' });
+    // The angled hinge asks the same question.
+    expect(apply('[a[](<x **y**')).toMatchObject({ mark: 'bold', text: '[a[](<x y' });
+  });
+
+  test('an angle-bracketed destination ends at a "<"', () => {
+    expect(apply('[a](<b <c **d**')).toMatchObject({ mark: 'bold' });
+  });
+
+  test('pasted prose behind a "](<" that never closes keeps its marks', () => {
+    expect(blocksFromMarkdown('Use [a](<b to open, then **bold** later')[0]?.content).toEqual([
+      { text: 'Use [a](<b to open, then ' },
+      { text: 'bold', marks: ['bold'] },
+      { text: ' later' },
+    ]);
+  });
+
+  test('an escaped ">" does not close the destination', () => {
+    expect(blocksFromMarkdown('[a](<b **c** \\>) x')[0]?.content).toEqual([
+      { text: '[a](<b ' },
+      { text: 'c', marks: ['bold'] },
+      { text: ' >) x' },
+    ]);
+  });
+
+  test('a "](<" that does close keeps its destination literal', () => {
+    const href = blocksFromMarkdown('[t](<https://a.test/a b/**y**>) and **z**')[0]?.content;
+
+    expect(href).toEqual([
+      { text: 't', link: 'https://a.test/a%20b/**y**' },
+      { text: ' and ' },
+      { text: 'z', marks: ['bold'] },
+    ]);
+  });
+
+  test('an angled hinge with no label holds nothing open', () => {
+    // `](<` is a destination only after a label the link pattern accepts.
+    expect(matchInlineRule('see ](<**b**')).toMatchObject({ mark: 'bold' });
+  });
+
+  test('a ">" with no ")" after it does not close the destination', () => {
+    expect(blocksFromMarkdown('[a](<b **c**> x')[0]?.content).toEqual([
+      { text: '[a](<b ' },
+      { text: 'c', marks: ['bold'] },
+      { text: '> x' },
+    ]);
+  });
+
+  test('a ">)" on the next line does not close the destination', () => {
+    // An angled destination is one line, so the break ends it unclosed.
+    expect(blocksFromMarkdown('[a](<b **c**\\\nd>)')[0]?.content).toEqual([
+      { text: '[a](<b ' },
+      { text: 'c', marks: ['bold'] },
+      { text: '\nd>)' },
+    ]);
+  });
+
+  test('pasted prose behind a plain "](" that never closes keeps its marks', () => {
+    // A plain destination ends at the first `)` or whitespace. When that is
+    // not a `)`, the hinge opens no link, and CommonMark reads the bold.
+    expect(blocksFromMarkdown('**see [docs](x**')[0]?.content).toEqual([
+      { text: 'see [docs](x', marks: ['bold'] },
+    ]);
+    expect(blocksFromMarkdown('[a](b**c** d')[0]?.content).toEqual([
+      { text: '[a](b' },
+      { text: 'c', marks: ['bold'] },
+      { text: ' d' },
+    ]);
+    // An escaped paren is part of the destination, not its end.
+    expect(blocksFromMarkdown('[a](b**c**\\) d')[0]?.content).toEqual([
+      { text: '[a](b' },
+      { text: 'c', marks: ['bold'] },
+      { text: ') d' },
+    ]);
+  });
+
+  test('a plain destination that does close keeps it literal', () => {
+    expect(blocksFromMarkdown('[a](https://a.test/**y**) **z**')[0]?.content).toEqual([
+      { text: 'a', link: 'https://a.test/**y**' },
+      { text: ' ' },
+      { text: 'z', marks: ['bold'] },
+    ]);
+  });
+
+  test('while typing, a plain destination is still held open', () => {
+    expect(matchInlineRule('**see [docs](x**')).toBeNull();
+  });
+
+  test('while typing, an angled destination is still held open', () => {
+    // At the keystroke there is no telling whether a `>)` will follow, and the
+    // destination of a typed link may hold a space.
+    expect(matchInlineRule('Use [a](<b to open, then **bold**')).toBeNull();
+  });
+});
+
+describe('a plain destination does not begin with "<"', () => {
+  /**
+   * A `<` after `](` opens the bracketed form, and CommonMark's plain form
+   * excludes it as a first character, so a bracketed destination that has not
+   * closed is not a plain one either. Typing `[a](<u@x.test)` made a link to
+   * `https://%3Cu@x.test/` on the `)`, which the user meant as part of the URL.
+   */
+  test('the ")" of an unfinished bracketed destination closes nothing', () => {
+    expect(matchInlineRule('[a](<u@x.test)')).toBeNull();
+    expect(matchInlineRule('[call](<mailto:a@x.test?subject=Re:%20(draft)')).toBeNull();
+  });
+
+  test('the bracketed destination still closes on ">)"', () => {
+    expect(apply('[call](<mailto:a@x.test?subject=Re:%20(draft)>)')).toEqual({
+      text: 'call',
+      mark: undefined,
+      link: 'mailto:a@x.test?subject=Re:%20(draft)',
+    });
+  });
+
+  test('while typing, a "](" inside an unfinished bracketed destination waits', () => {
+    // The same hold as for marks: the `>)` that makes the inner pair part of
+    // the URL may be the next thing typed. Firing here replaced the user's
+    // half-typed `[see](<https://x.test/?q=[foo](https://y.test/)` with a link
+    // to y.test before they could finish the outer one.
+    expect(matchInlineRule('[a](<x[b](https://y.test/)')).toBeNull();
+    expect(matchInlineRule('[see](<https://x.test/?q=[foo](https://y.test/)')).toBeNull();
+  });
+
+  test('a later "](" is a link of its own once the line says the bracket never closes', () => {
+    expect(blocksFromMarkdown('[a](<x[b](https://y.test/)')[0]?.content).toEqual([
+      { text: '[a](<x' },
+      { text: 'b', link: 'https://y.test/' },
+    ]);
+  });
+});

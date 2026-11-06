@@ -126,6 +126,27 @@ function tagNameOf(node: Node): string {
   return node.nodeName.toUpperCase();
 }
 
+/**
+ * Whether `node` sits in a subtree the walker skips, counting up to `root`.
+ *
+ * The walker rejects a `SKIP_TAGS` element with everything under it, but a
+ * reader that looks a part up by query -- a quote's lists -- asked nothing of
+ * the sort, and found it inside a `<noscript>` all the same: Chromium and
+ * WebKit parse one in the inert paste document into elements. Anything found
+ * by query is asked this, so a query and the walk agree about what is
+ * content. A caption and a summary are found by {@link firstDescendant}
+ * instead, which never enters a skipped element in the first place.
+ */
+function insideSkipped(node: Element, root: Element): boolean {
+  for (let at: Element | null = node; at !== null && at !== root; at = at.parentElement) {
+    if (SKIP_TAGS.has(tagNameOf(at))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 /** The marks a pasted element turns on and off, from its tag and inline styles. */
 interface MarkChange {
   add: Mark[];
@@ -254,13 +275,6 @@ export function renderRichText(doc: Document, content: readonly TextRun[]): Docu
 /* -------------------------------------------------------------------------- */
 
 /**
- * True when real content follows this node's own subtree.
- *
- * A trailing `<br>` is the filler contenteditable appends to keep an empty
- * line selectable; it is presentation, not content, and must not become a
- * newline. Block elements reuse it to decide whether they end a line.
- */
-/**
  * Elements a reader wants treated as absent, along with everything inside them.
  *
  * This replaced cloning the subtree and deleting the unwanted parts out of the
@@ -274,14 +288,31 @@ type SkipPredicate = (element: Element, tag: string) => boolean;
 /** A list nested inside a list item is the *next* block, not this one's text. */
 const isNestedList: SkipPredicate = (_element, tag) => tag === 'UL' || tag === 'OL';
 
-function hasContentAfter(node: Node, root: Node, skip?: SkipPredicate): boolean {
+/**
+ * The last node under `root`, in document order, that is real content: a
+ * `<br>`, or text that is not just whitespace.
+ *
+ * A trailing `<br>` is the filler contenteditable appends to keep an empty
+ * line selectable; it is presentation, not content, and must not become a
+ * newline. Block elements ask the same question to decide whether they end a
+ * line. Both questions are "does content follow this node's own subtree",
+ * which is "has the walk not reached this node yet" -- so `walk` answers them
+ * from a flag it sets on arriving here, in constant time.
+ *
+ * They used to be answered by walking forward from the node, every time. N
+ * empty `<div>`s ahead of a list item's text each walked past all the others
+ * to find it, which is N squared: 8,000 of them took 7.7 seconds. Comparing
+ * document positions instead would not have fixed it, since an engine orders
+ * two siblings by stepping from one towards the other.
+ *
+ * `skip` is rejected here as well as in `walk`, or the two disagree about what
+ * "content" is: a <br> whose only follower is a nested list kept its newline
+ * here while the walk that produced the runs never saw the list.
+ */
+function lastContent(root: Node, skip?: SkipPredicate): Node | null {
   const walker = root.ownerDocument?.createTreeWalker(root, SHOW_TEXT | SHOW_ELEMENT, {
-    // FILTER_REJECT skips the element *and* its subtree, so a following
+    // FILTER_REJECT skips the element *and* its subtree, so a trailing
     // <script> never counts as content.
-    //
-    // `skip` is rejected here as well as in `walk`, or the two disagree about
-    // what "content" is: a <br> whose only follower is a nested list kept its
-    // newline here while the walk that produced the runs never saw the list.
     acceptNode: (candidate) => {
       const tag = tagNameOf(candidate);
 
@@ -293,36 +324,37 @@ function hasContentAfter(node: Node, root: Node, skip?: SkipPredicate): boolean 
   });
 
   if (!walker) {
-    return false;
+    return null;
   }
 
-  walker.currentNode = node;
+  // Down to the last node in document order, then back from there.
+  let current: Node | null = null;
 
-  // Step over this node's own descendants before looking ahead.
-  let next: Node | null = walker.nextSibling();
-
-  while (next === null) {
-    const parent = walker.parentNode();
-
-    if (parent === null || parent === root) {
-      return false;
-    }
-
-    next = walker.nextSibling();
+  for (let child = walker.lastChild(); child !== null; child = walker.lastChild()) {
+    current = child;
   }
 
-  for (let current: Node | null = next; current; current = walker.nextNode()) {
+  for (; current !== null; current = walker.previousNode()) {
     if (current.nodeName === 'BR') {
-      return true;
+      return current;
     }
 
     // Whitespace between block tags is formatting, not content.
     if (current.nodeType === TEXT_NODE && (current.nodeValue ?? '').trim().length > 0) {
-      return true;
+      return current;
     }
   }
 
-  return false;
+  return null;
+}
+
+/** What one `parseRichText` call carries down its walk. */
+interface WalkState {
+  readonly skip: SkipPredicate | undefined;
+  /** See {@link lastContent}. */
+  readonly last: Node | null;
+  /** Whether the walk has reached `last`, after which no content follows. */
+  passed: boolean;
 }
 
 /**
@@ -435,10 +467,11 @@ function walk(
   node: Node,
   marks: Mark[],
   link: string | undefined,
-  root: Node,
+  state: WalkState,
   out: TextRun[],
-  skip?: SkipPredicate,
 ): void {
+  const { skip } = state;
+
   // Safari writes a space at an element boundary as `&nbsp;` inside this span
   // when it copies. The class is its own record that the character was an
   // ordinary space, so it is read back as one; every other `&nbsp;` is kept.
@@ -461,11 +494,21 @@ function walk(
         out.push({ text, marks: [...marks], link });
       }
 
+      if (child === state.last) {
+        state.passed = true;
+      }
+
       continue;
     }
 
     if (tagNameOf(child) === 'BR') {
-      if (hasContentAfter(child, root, skip)) {
+      // Reaching the last content *is* passing it: a `<br>` that is the last
+      // content has none after it.
+      if (child === state.last) {
+        state.passed = true;
+      }
+
+      if (!state.passed) {
         out.push({ text: '\n', marks: [...marks], link });
       }
 
@@ -510,17 +553,23 @@ function walk(
       if (remainder.length > 0) {
         out.push({ text: remainder, marks: [...nextMarks], link: nextLink });
       }
+
+      // Read whole rather than walked, so the walk cannot arrive at `last`
+      // inside it; taking the subtree is passing whatever it holds.
+      if (state.last !== null && element.contains(state.last)) {
+        state.passed = true;
+      }
     } else {
       inlineNesting += 1;
 
       try {
-        walk(element, nextMarks, nextLink, root, out, skip);
+        walk(element, nextMarks, nextLink, state, out);
       } finally {
         inlineNesting -= 1;
       }
     }
 
-    if (isBlock && hasContentAfter(element, root, skip)) {
+    if (isBlock && !state.passed) {
       breakLine(out, marks, link);
     }
   }
@@ -529,7 +578,9 @@ function walk(
 /** Reads a rendered (or pasted) subtree back into canonical runs. */
 export function parseRichText(root: Node, skip?: SkipPredicate): RichText {
   const out: TextRun[] = [];
-  walk(root, [], undefined, root, out, skip);
+  const last = lastContent(root, skip);
+
+  walk(root, [], undefined, { skip, last, passed: last === null }, out);
   return normalizeRuns(out);
 }
 
@@ -555,6 +606,16 @@ const BLOCK_TAGS_OUT: Readonly<Record<BlockType, string>> = {
   table: 'table',
   divider: 'hr',
 };
+
+/**
+ * Marks a `<figure>` as an image block with no picture chosen yet.
+ *
+ * An image without a usable source is otherwise not an image to the reader --
+ * a foreign one would only render broken -- so without this the placeholder
+ * came back as an empty paragraph. Only the attribute makes one: a foreign
+ * figure with an unusable image is still read for whatever else it holds.
+ */
+const IMAGE_PLACEHOLDER_ATTR = 'data-neditor-image';
 
 /** Marks a blockquote as a callout and carries its icon. */
 const CALLOUT_ATTR = 'data-neditor-callout';
@@ -652,7 +713,16 @@ export function blocksToHtml(doc: Document, blocks: readonly Block[]): string {
 
       if (block.type === 'image') {
         const image = doc.createElement('img');
-        image.setAttribute('src', block.src ?? '');
+
+        if (block.src) {
+          image.setAttribute('src', block.src);
+        } else {
+          // The placeholder the slash menu inserts. With nothing to load it is
+          // only ours to read back, so the figure says what it is; an `<img>`
+          // with an empty `src` is a broken picture to every other paste target.
+          element.setAttribute(IMAGE_PLACEHOLDER_ATTR, '');
+        }
+
         image.setAttribute('alt', block.alt ?? '');
         element.append(image);
 
@@ -850,10 +920,11 @@ const STRUCTURE_TAGS = new Set([
  * apply it twice; only a wrapper *outside* the block needs a copy, which is
  * what `pushFormattingInward` exists to provide.
  *
- * `<details>` is here for a different reason with the same answer: its body is
- * re-visited as a copy of itself with the summary taken out, so a wrapper
- * inside is reached again there and pushed inward then — and the summary, read
- * from the original, never sees it at all.
+ * `<details>` is here for a different reason with the same answer: its summary
+ * is read whole by `parseRichText`, and its body is visited block by block by
+ * `visitDetails` -- the summary skipped by identity, or taken out of the tree
+ * where it is wrapped -- so a wrapper inside the body is reached there and
+ * pushed inward then. `sealsFormatting` asks the question of the body alone.
  *
  * The elements the visitor descends *through* — `<div>`, `<section>`, a
  * `<figure>` with no usable image — are deliberately absent: their children are
@@ -876,25 +947,34 @@ const SEALED_TAGS = new Set([
 /**
  * The first descendant of a kind, in document order, remembered per element.
  *
- * Both questions asked here — does this hold a block, where is its image — are
- * asked again at every level of a wrapper chain, because `visitBlocks` descends
- * into a wrapper and immediately asks them of the next one down. Answering by
- * scanning the subtree each time is quadratic in the depth of the chain, and
- * the depth is the pasted document's to choose: `<b>` nested 640 deep is four
- * kilobytes of clipboard. Every answer is derived from the answers about the
- * children, so a whole chain costs one walk instead of one per level.
+ * Each question asked through here — does this hold a block, where is its
+ * image, its summary, its caption; one memo apiece — is asked again at every
+ * level of a wrapper chain, because `visitBlocks` descends into a wrapper and
+ * immediately asks it of the next one down. Answering by scanning the subtree
+ * each time is quadratic in the depth of the chain, and the depth is the pasted
+ * document's to choose: `<b>` nested 640 deep is four kilobytes of clipboard.
+ * Every answer is derived from the answers about the children, so a whole
+ * chain costs one walk instead of one per level.
  *
  * Keying the memo on the element is safe because every element it ever sees was
  * parsed into a detached template by `blocksFromHtml` moments earlier, or
  * cloned below — none of them is reachable by a caller who could edit it behind
  * this file's back. The moves made while distributing formatting keep the
  * answers true as well: a run only ever moves into a fresh shell beside it,
- * which adds no element of either kind and reorders nothing.
+ * which adds no element any of the questions looks for and reorders nothing.
+ * The one removal, {@link detachSummary}, can falsify answers, and forgets the
+ * ones it can.
+ *
+ * @param enters Whether the search goes below a child that is not itself a
+ * match. A `SKIP_TAGS` element is never entered, whatever this says. Every
+ * call sharing one `seen` map must pass the same predicate, since the memo
+ * records answers to that search and no other.
  */
 function firstDescendant(
   element: Element,
   matches: (candidate: Element) => boolean,
   seen: WeakMap<Element, Element | null>,
+  enters: (candidate: Element) => boolean = () => true,
 ): Element | null {
   const remembered = seen.get(element);
 
@@ -938,8 +1018,17 @@ function firstDescendant(
 
     frame.index += 1;
 
+    // Never matched and never descended into, exactly as the walker rejects
+    // it: an image in a `<noscript>` made its figure an image block.
+    if (SKIP_TAGS.has(tagNameOf(child))) {
+      continue;
+    }
+
     // Checked before descending, so the answer is the first in document order.
-    const known = matches(child) ? child : seen.get(child);
+    // A child the search does not enter answers "none" without being asked,
+    // and is not remembered as such: its own answer, asked directly, is
+    // another question.
+    const known = matches(child) ? child : enters(child) ? seen.get(child) : null;
 
     if (known === undefined) {
       stack.push({ element: child, index: 0, found: null });
@@ -974,6 +1063,42 @@ function firstImage(element: Element): Element | null {
 
 function containsImage(element: Element): boolean {
   return firstImage(element) !== null;
+}
+
+const SUMMARY_DESCENDANTS = new WeakMap<Element, Element | null>();
+const CAPTION_DESCENDANTS = new WeakMap<Element, Element | null>();
+
+/**
+ * A toggle's summary: the first `<summary>` below it that is content, and not
+ * one that belongs to a `<details>` nested inside it.
+ *
+ * A query answered this once, and asked every match whether a skipped element
+ * held it. With toggles nested N deep over a `<noscript>` holding M summaries
+ * in a chain of K wrappers, that was N x M x K: every level found the hidden
+ * summaries first, and walked up from each to reject it. 167 KB of it held
+ * Chromium's paste handler for 10.6 seconds. Remembered per element, the whole
+ * chain costs one walk, and the walk never enters the `<noscript>` at all.
+ *
+ * A nested `<details>` is not entered either: the summary in it is that
+ * toggle's title, so taking it left the outer toggle with the inner one's
+ * title and the inner one with none.
+ */
+function firstSummary(element: Element): Element | null {
+  return firstDescendant(
+    element,
+    (candidate) => tagNameOf(candidate) === 'SUMMARY',
+    SUMMARY_DESCENDANTS,
+    (candidate) => tagNameOf(candidate) !== 'DETAILS',
+  );
+}
+
+/** A figure's caption: the first `<figcaption>` below it that is content. */
+function firstCaption(element: Element): Element | null {
+  return firstDescendant(
+    element,
+    (candidate) => tagNameOf(candidate) === 'FIGCAPTION',
+    CAPTION_DESCENDANTS,
+  );
 }
 
 /**
@@ -1039,8 +1164,9 @@ function sealsFormatting(element: Element, tag: string): boolean {
   // an inline wrapper happened to reach it first. `FIGURE` already carried this
   // qualification; these two needed the same one.
   // A `<summary>` is not among them, despite holding blocks the same way: it is
-  // never reached by `visitBlocks` at all, because `visitDetails` strips it out
-  // of the body clone and reads it whole with `parseRichText`. Unsealing it
+  // never reached by `visitBlocks` at all, because `visitDetails` reads it whole
+  // with `parseRichText` and then excludes it from the body, or takes it out of
+  // the tree where it is wrapped. Unsealing it
   // split a toggle's title into marked / plain / marked around its own
   // indentation — the discontinuity the seal exists to prevent.
   if (tag === 'FIGCAPTION') {
@@ -1440,6 +1566,9 @@ function contentsOf(doc: Document, element: Element): Node {
     : element;
 }
 
+/** Exactly the box `blocksToHtml` writes in front of a to-do's text. */
+const OWN_TODO_BOX = /^[\u2610\u2611] /;
+
 /** A checkbox written as text, including what `blocksToHtml` emits. */
 const TODO_PREFIX = /^\s*(?:\[([ xX])\]|☐|☑|✅)\s*/;
 
@@ -1517,12 +1646,6 @@ function pushCallout(out: Block[], element: Element, depth: number, icon: string
   out.push(block);
 }
 
-/**
- * A `<details>` becomes a toggle whose `<summary>` is its text.
- *
- * Whatever else it contains is nested one level deeper, so a `<details>` from
- * anywhere else keeps its structure rather than collapsing into one block.
- */
 /** Everything left below the bound, as one block rather than none. */
 function pushRemainder(out: Block[], node: Node, depth: number): void {
   const text = subtreeText(node);
@@ -1532,8 +1655,50 @@ function pushRemainder(out: Block[], node: Node, depth: number): void {
   }
 }
 
+/**
+ * Takes a wrapped `summary` out of the tree below `details`.
+ *
+ * What {@link firstDescendant} remembers about each element from the summary
+ * up to `details` may name something inside it -- a wrapper holding a block,
+ * or an image, only because the summary did -- so those answers are forgotten
+ * and asked afresh of the tree as it now stands. Nothing else below `details`
+ * holds the summary, so nothing else can be affected; the elements above it
+ * have already been answered and acted on.
+ *
+ * Two of the four are observable today, and both are pinned: an inline wrapper
+ * outside the toggle asks whether the elements below it hold a block, and
+ * whether a figure shows an image, before the toggle is reached. The summary
+ * and caption memos are forgotten for the same reason, but nothing asks either
+ * question of these elements first: `firstSummary` is asked only of the
+ * `<details>` being read, here, and `firstCaption` only of a figure that
+ * `pushImage` is turning into a block, which below `details` happens after
+ * this. They are kept so that a question added earlier later cannot be
+ * answered with a node that has left the tree.
+ */
+function detachSummary(summary: Element, details: Element): void {
+  for (let at = summary.parentElement; at !== null; at = at.parentElement) {
+    BLOCK_LEVEL_DESCENDANTS.delete(at);
+    IMAGE_DESCENDANTS.delete(at);
+    // Not observable today; see above.
+    SUMMARY_DESCENDANTS.delete(at);
+    CAPTION_DESCENDANTS.delete(at);
+
+    if (at === details) {
+      break;
+    }
+  }
+
+  summary.remove();
+}
+
+/**
+ * A `<details>` becomes a toggle whose `<summary>` is its text.
+ *
+ * Whatever else it contains is nested one level deeper, so a `<details>` from
+ * anywhere else keeps its structure rather than collapsing into one block.
+ */
 function visitDetails(doc: Document, element: Element, depth: number, out: Block[]): void {
-  const summary = element.querySelector('summary');
+  const summary = firstSummary(element);
   const block = createBlock(
     'toggle',
     summary ? parseRichText(summary) : [],
@@ -1548,17 +1713,22 @@ function visitDetails(doc: Document, element: Element, depth: number, out: Block
   //
   // Identity only reaches a direct child, though: `visitBlocksInner` tests it
   // against its own children, and the descents into lists, quotes and blocks
-  // do not carry it. A `<summary>` wrapped in anything -- which is malformed,
-  // since the element must be a details' first child, but is what a stray
-  // `<span>` or `<li>` around it produces -- was therefore read as the title
-  // *and* again as body content, in the list case concatenated into that
-  // item's own text. Those shapes take the copy, where removing it works at
-  // any depth; the cost is one clone for markup nobody generates, and the
-  // common case never reaches it.
+  // do not carry it. A `<summary>` wrapped in anything -- malformed, since the
+  // element must be a details' first child, but what a stray `<span>` or
+  // `<li>` around it produces, and what a hostile paste can repeat at will --
+  // was therefore read as the title *and* again as body content, in the list
+  // case concatenated into that item's own text. So that summary is taken out
+  // of the tree instead, which works at any depth. Its text has already been
+  // read, and the tree is the detached parse `blocksFromHtml` made, which the
+  // formatting moves rearrange already.
+  //
+  // It used to be taken out of a copy of the whole element, and a <details>
+  // holds every one nested below it, so wrapped summaries nested 500 deep
+  // copied the document 500 times: 3.1 s in Chromium against 117 ms with each
+  // summary in its place.
   if (summary && summary.parentElement !== element) {
-    const body = element.cloneNode(true) as Element;
-    body.querySelector('summary')?.remove();
-    visitBlocks(doc, body, block.depth + 1, out);
+    detachSummary(summary, element);
+    visitBlocks(doc, element, block.depth + 1, out);
 
     return;
   }
@@ -1642,6 +1812,10 @@ function outermostLists(element: Element): Element[] {
   return [...element.querySelectorAll('ul, ol')].filter((list) => {
     const enclosing = list.parentElement?.closest('ul, ol') ?? null;
 
+    if (insideSkipped(list, element)) {
+      return false;
+    }
+
     return enclosing === null || !element.contains(enclosing);
   });
 }
@@ -1652,15 +1826,18 @@ function pushImage(out: Block[], element: Element, depth: number): boolean {
   // in it is asked this again for every wrapper the visitor descends through on
   // its way down, and a query walks the whole subtree each time.
   const image = tagNameOf(element) === 'IMG' ? element : firstImage(element);
-  const src = sanitizeImageUrl(image?.getAttribute('src') ?? '');
+  const placeholder =
+    tagNameOf(element) === 'FIGURE' && element.hasAttribute(IMAGE_PLACEHOLDER_ATTR);
+  // A usable source wins; a placeholder of ours is what has none.
+  const src = sanitizeImageUrl(image?.getAttribute('src') ?? '') ?? (placeholder ? '' : null);
 
   // An unusable source would only render as a broken block. The caller
   // recurses into the element instead, so a <figure> keeps its other children.
-  if (!src) {
+  if (src === null || (src === '' && !placeholder)) {
     return false;
   }
 
-  const caption = element.querySelector('figcaption');
+  const caption = firstCaption(element);
   const block = createBlock(
     'image',
     caption ? parseRichText(caption) : [],
@@ -1731,10 +1908,15 @@ function visitListItemInner(
   let checked = false;
 
   if (state !== null) {
-    // Our own marker: exact, and the text still carries the box we wrote.
+    // Our own marker: exact, and the text still carries the box we wrote --
+    // one glyph and one space, so exactly that is what comes off. The foreign
+    // rule takes any whitespace after a box, and with it the to-do's own
+    // leading spaces, or the whole text of one that was only spaces.
     type = 'todo';
     checked = state === 'true';
-    runs = extractTodoPrefix(runs)?.runs ?? runs;
+    runs = OWN_TODO_BOX.test(richToPlainText(runs))
+      ? richDelete(runs, 0, 2)
+      : (extractTodoPrefix(runs)?.runs ?? runs);
   } else if (checkbox) {
     type = 'todo';
     checked = (checkbox as HTMLInputElement).checked || checkbox.hasAttribute('checked');
@@ -1749,8 +1931,12 @@ function visitListItemInner(
   }
 
   // An empty item is a real blank bullet — unless it exists only to hold the
-  // list nested under it, which is how indentation alone is written.
-  if (!isRichEmpty(runs) || nested.length === 0) {
+  // list nested under it, which is how indentation alone is written. Not in a
+  // list we wrote, though: `blocksToHtml` hangs a deeper list off the item
+  // before it, which is always a block of its own, so an empty item there is
+  // an empty block. Skipping it promoted its child into its place, a level
+  // shallower, and a to-do's state went with it.
+  if (declared || !isRichEmpty(runs) || nested.length === 0) {
     const block = createBlock(type, runs, itemDepth);
 
     if (type === 'todo') {
@@ -1916,9 +2102,9 @@ function visitBlocksInner(
       // `subtreeText`, not `textContent`: the latter includes the source of a
       // <script> or <style> that happens to sit inside the <pre>, so pasted
       // markup the sanitizer is supposed to drop arrived as document content
-      // instead. It is inert -- parsing happens in a detached template and this
-      // is text either way -- but it is still somebody else's code appearing in
-      // the user's document.
+      // instead. It is inert -- parsing happens in a document with no browsing
+      // context, and this is text either way -- but it is still somebody
+      // else's code appearing in the user's document.
       out.push(createBlock('code', subtreeText(element), depthOf(element, depth)));
       continue;
     }
@@ -1988,10 +2174,36 @@ function visitBlocksInner(
   flushInline();
 }
 
-/** Parses an HTML string into blocks, for a multi-block paste. */
+/**
+ * A document with no browsing context, to parse foreign markup into.
+ *
+ * Everything a parse builds -- the template, the fragment formatting is pushed
+ * inward through, the scratch `<div>` an inline run is read from -- is created
+ * here and never by the caller's document. A template's own content is inert,
+ * but a node cloned out of it and appended to something the live document
+ * made is adopted into the live document, and in a document that can load
+ * things an `<img>`, `<video>` or `<audio>` starts loading the moment it
+ * arrives: a pasted `<b><p>x</p><img src=/nope.png onerror=…></b>` ran its
+ * handler in the page, in Chromium and WebKit both. A document created by
+ * `createHTMLDocument` has no browsing context, so nothing adopted into it
+ * fetches anything or runs anything, whatever attributes it carries.
+ *
+ * Derived from `doc` rather than the global `document`, so a parse mounted in
+ * another realm stays in that realm.
+ */
+function inertDocument(doc: Document): Document {
+  return doc.implementation.createHTMLDocument('');
+}
+
+/**
+ * Parses an HTML string into blocks, for a multi-block paste.
+ *
+ * `doc` names the realm to parse in; no node is ever created by it (see
+ * `inertDocument`).
+ */
 export function blocksFromHtml(doc: Document, html: string): Block[] {
-  // A detached template never runs scripts or loads subresources.
-  const template = doc.createElement('template');
+  const inert = inertDocument(doc);
+  const template = inert.createElement('template');
   template.innerHTML = html;
 
   const out: Block[] = [];
@@ -2001,15 +2213,16 @@ export function blocksFromHtml(doc: Document, html: string): Block[] {
   blockNesting = 0;
   listNesting = 0;
   inlineNesting = 0;
-  visitBlocks(doc, template.content, 0, out);
+  // The inert document, never `doc`: every scratch node below is made by
+  // whatever document is threaded through here.
+  visitBlocks(inert, template.content, 0, out);
 
   return out;
 }
 
-/** Parses an HTML string, for clipboard payloads. */
+/** Parses an HTML string, for clipboard payloads, in an inert document. */
 export function parseRichTextFromHtml(doc: Document, html: string): RichText {
-  // A detached template never runs scripts or loads subresources.
-  const template = doc.createElement('template');
+  const template = inertDocument(doc).createElement('template');
   template.innerHTML = html;
 
   return parseRichText(template.content);
