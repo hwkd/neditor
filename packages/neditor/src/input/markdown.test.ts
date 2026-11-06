@@ -1071,6 +1071,28 @@ describe('a plain destination never begins with "<"', () => {
     expect(parseInlineMarkdown('[a](<u@x.test)')).toEqual([{ text: '[a](<u@x.test)' }]);
   });
 
+  test('an escaped "<" is a plain destination’s first character like any other', () => {
+    // An escaped `<` opens no bracketed form, so CommonMark reads it as the
+    // start of a plain destination. The href is re-read from the content when a
+    // destination holds an escape, and the content holds the `<` itself: asked
+    // there which form this was, the reader took the angled one and sliced off
+    // a character at each end -- `https://u@x.tes/`, a link to another host.
+    expect(parseInlineMarkdown('[a](\\<u@x.test)')).toEqual([
+      { text: 'a', link: 'https://%3Cu@x.test/' },
+    ]);
+    expect(parseInlineMarkdown('[a](\\<u@x.test/p)')).toEqual([
+      { text: 'a', link: 'https://%3Cu@x.test/p' },
+    ]);
+  });
+
+  test('an escape inside a bracketed destination still reads as one', () => {
+    // The other side of the same question: the angled form, with an escape in
+    // it, keeps its brackets out of the URL.
+    expect(parseInlineMarkdown('[a](<https://x.test/a\\>b>)')).toEqual([
+      { text: 'a', link: 'https://x.test/a%3Eb' },
+    ]);
+  });
+
   test('the "](<" that opens nothing does not hide a link after it', () => {
     // The first `](` in reach is not where a plain destination can open when a
     // `<` follows it, so the later one is the link.

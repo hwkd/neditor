@@ -883,10 +883,17 @@ export function parseInlineMarkdown(text: string): RichText {
     // whatever tail was left, which could name another host.
     let link = match.link;
 
-    if (link !== undefined && matchable.slice(innerEnd, match.end).includes(ESCAPED)) {
+    //
+    // Which form the destination has is asked of the projection, never of the
+    // content: there an escaped `<` is the `<` itself, so `[a](\<u@x.test)`
+    // read as the angled form and lost a character at each end -- a link to
+    // `https://u@x.tes/`, another host.
+    const projectedClosing = matchable.slice(innerEnd, match.end);
+
+    if (link !== undefined && projectedClosing.includes(ESCAPED)) {
       const closing = richToPlainText(content).slice(innerEnd - base, match.end - base);
       const href = sanitizeUrl(
-        closing.startsWith('](<') ? closing.slice(3, -2) : closing.slice(2, -1),
+        projectedClosing.startsWith('](<') ? closing.slice(3, -2) : closing.slice(2, -1),
       );
 
       // Nothing has been changed yet: flushing and recalling only move runs.
