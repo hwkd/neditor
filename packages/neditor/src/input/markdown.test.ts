@@ -1012,13 +1012,51 @@ describe('a backtick in a link destination', () => {
   });
 });
 
-describe('a code span keeps what CommonMark keeps', () => {
+describe('a code span reads as CommonMark reads it', () => {
   /**
-   * The cases of this branch's code-span suite that `main`'s reader shares.
+   * A run of N backticks opens a span that the next run of exactly N closes;
+   * with no such run its backticks are literal. Nothing inside a span is markup
+   * and no backslash escapes anything, which a rule anchored at the caret
+   * cannot see coming: by the closing backtick, a `*a*` inside had already
+   * fired. Typing still works that way; the reader has the whole line, and
+   * finds the span first.
+   *
    * Straight through `parseInlineMarkdown`: a block reader would trim the
    * spaces before the span rules were ever asked.
    */
   test.each([
+    ['a backslash is literal', '`a\\*b`', [{ text: 'a\\*b', marks: ['code'] }]],
+    ['so is a trailing one', '`a\\`', [{ text: 'a\\', marks: ['code'] }]],
+    ['a longer fence holds a backtick', '``a`b``', [{ text: 'a`b', marks: ['code'] }]],
+    ['one padding space is stripped', '`` `x ``', [{ text: '`x', marks: ['code'] }]],
+    ['other content loses one space each side', '` a `', [{ text: 'a', marks: ['code'] }]],
+    ['emphasis inside is literal', '`*a* **b**`', [{ text: '*a* **b**', marks: ['code'] }]],
+    ['a tag inside is literal', '`<em>hi</em>`', [{ text: '<em>hi</em>', marks: ['code'] }]],
+    ['runs of different lengths do not pair', 'x ``a` b', [{ text: 'x ``a` b' }]],
+    [
+      'marks around it still apply',
+      '**x `*` y**',
+      [
+        { text: 'x ', marks: ['bold'] },
+        { text: '*', marks: ['bold', 'code'] },
+        { text: ' y', marks: ['bold'] },
+      ],
+    ],
+    [
+      'a span opened in the link text wins over the link',
+      '[foo`](/uri)`',
+      [{ text: '[foo' }, { text: '](/uri)', marks: ['code'] }],
+    ],
+    [
+      'a span in a link destination that closes is part of the URL',
+      '[t](https://a.test/?q=`x`)',
+      [{ text: 't', link: 'https://a.test/?q=`x`' }],
+    ],
+    [
+      'and so is a span in an angled one',
+      '[t](<https://a.test/?q=`x`>)',
+      [{ text: 't', link: 'https://a.test/?q=`x`' }],
+    ],
     ['an escaped backtick opens nothing', '\\`a`', [{ text: '`a`' }]],
     [
       'content of nothing but spaces keeps its padding',

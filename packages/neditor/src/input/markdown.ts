@@ -13,8 +13,8 @@ import {
   richSplit,
   richToPlainText,
 } from '../model/rich-text.ts';
-import type { DestinationAhead } from './inline-rules.ts';
-import { INLINE_SPAN_LIMIT, matchInlineRule } from './inline-rules.ts';
+import type { DestinationAhead, InlineRuleMatch } from './inline-rules.ts';
+import { INLINE_SPAN_LIMIT, inOpenLinkSyntax, matchInlineRule } from './inline-rules.ts';
 
 /**
  * Markdown → blocks, for pasted plain text.
@@ -497,6 +497,93 @@ function joinSoftBreaks(lines: readonly string[]): string[] {
   return out;
 }
 
+/** A code span in a line: where its opening fence starts, its length, where its closing one starts. */
+interface CodeSpan {
+  readonly open: number;
+  readonly fence: number;
+  readonly close: number;
+}
+
+/**
+ * The code spans of a text, found the way CommonMark finds them, one opener at
+ * a time.
+ *
+ * A run of N backticks opens a span that the next run of exactly N closes;
+ * with no such run it is literal backticks. Backslash escapes count only
+ * outside a span -- an escaped backtick opens nothing, but inside a span a
+ * backslash is a backslash, so `` `a\` `` is the code `a\`.
+ *
+ * Whether a run opens at all is the caller's to say, which is why this answers
+ * one opener at a time rather than listing every span up front: a run that
+ * begins inside a link destination is part of the URL, and only the replay
+ * knows where the destinations are.
+ *
+ * Every maximal run is indexed by length once, and each length keeps a cursor
+ * that only moves forward, so a line of unmatched runs of every length is
+ * still one pass. `null` with no backtick in the text.
+ */
+function codeSpanFinder(
+  text: string,
+): ((at: number, fence: number, opens: boolean) => CodeSpan | null) | null {
+  if (!text.includes('`')) {
+    return null;
+  }
+
+  const runs = new Map<number, number[]>();
+
+  for (let at = 0; at < text.length;) {
+    if (text[at] !== '`') {
+      at += 1;
+      continue;
+    }
+
+    let end = at;
+
+    while (text[end] === '`') {
+      end += 1;
+    }
+
+    const starts = runs.get(end - at);
+
+    if (starts) {
+      starts.push(at);
+    } else {
+      runs.set(end - at, [at]);
+    }
+
+    at = end;
+  }
+
+  /** For each run length, how many of its runs are already behind the scan. */
+  const passed = new Map<number, number>();
+
+  /**
+   * The span a run of `fence` backticks at `at` opens, or `null` for literal
+   * backticks. `opens` false is a run the caller has ruled out; it is still
+   * passed over, so the cursors stay where a left-to-right scan puts them.
+   */
+  return (at, fence, opens) => {
+    const starts = runs.get(fence) ?? [];
+    let next = passed.get(fence) ?? 0;
+
+    while (next < starts.length && starts[next]! < at + fence) {
+      next += 1;
+    }
+
+    passed.set(fence, next);
+
+    const close = starts[next];
+
+    if (!opens || close === undefined) {
+      return null;
+    }
+
+    passed.set(fence, next + 1);
+
+    return { open: at, fence, close };
+  };
+}
+
 /** Removes backslash escapes without interpreting anything else. */
 function stripEscapes(text: string): string {
   return text.replace(/\\(.)/g, (whole, char: string) => (ESCAPABLE.test(char) ? char : whole));
@@ -594,6 +681,13 @@ export function parseInlineMarkdown(text: string): RichText {
   // Only a line with a `](` in it can hold a destination to look past.
   const ahead = text.includes('](') ? destinationsAhead(text) : undefined;
   let span = 0;
+  const findCode = codeSpanFinder(text);
+  /** The code span the replay is inside, from its opening fence to its closing one. */
+  let code: CodeSpan | null = null;
+  /** Where the open code span's fence starts, counted as `opens` counts. */
+  let codeOpen = 0;
+  /** Up to where the backticks of a run that opened nothing are still literal. */
+  let literalUntil = 0;
 
   // What a rule can still reach, plus the character of context the lookbehinds
   // need. Text before it is cut from `matchable` for good.
@@ -798,15 +892,70 @@ export function parseInlineMarkdown(text: string): RichText {
     }
   };
 
+  /**
+   * The match a code span makes once its closing fence is in, or `null` when
+   * its opening fence is out of reach -- the bound every rule has.
+   */
+  const codeSpanMatch = (found: CodeSpan, start: number): InlineRuleMatch | null => {
+    const end = matchable.length;
+
+    if (start < 0 || end - start > INLINE_SPAN_LIMIT) {
+      return null;
+    }
+
+    // One space comes off each end when both have one and the content is not
+    // all spaces, as in CommonMark.
+    const from = found.open + found.fence;
+    const padded =
+      found.close - from >= 2 &&
+      text[from] === ' ' &&
+      text[found.close - 1] === ' ' &&
+      /[^ ]/.test(text.slice(from, found.close));
+    const delimiter = found.fence + (padded ? 1 : 0);
+
+    return { start, end, openLength: delimiter, closeLength: delimiter, mark: 'code' };
+  };
+
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index] ?? '';
     const next = text[index + 1];
     let literal = char;
     let projected = char;
 
-    // A backslash makes the next character literal: it goes into the content
-    // but never into the string rules are matched against.
-    if (char === '\\' && next !== undefined && ESCAPABLE.test(next)) {
+    // Code spans are found here rather than by a rule: a rule fires when its
+    // closer arrives, by which time a `*a*` inside the span had already fired,
+    // and a backslash inside it had already escaped something. A run that
+    // begins inside a link destination or an autolink that closes opens
+    // nothing -- CommonMark reads those before it reaches the backtick.
+    if (code === null && char === '`' && index >= literalUntil && findCode) {
+      let fence = 1;
+
+      while (text[index + fence] === '`') {
+        fence += 1;
+      }
+
+      // The same window scans `matchInlineRule` makes for every closer, so a
+      // line of backtick runs costs what a line of asterisks does.
+      code = findCode(index, fence, !inOpenLinkSyntax(matchable, ahead?.(index)));
+
+      if (code === null) {
+        literalUntil = index + fence;
+      }
+    }
+
+    if (code !== null) {
+      // Inside a code span nothing is markup, a backslash included: every
+      // character is content, and none of it is visible to the rules. Spaces
+      // are, since they are what ends a plain destination the span may sit in.
+      projected = /\s/.test(char) ? char : ESCAPED;
+    } else if (char === '`') {
+      // A backtick no span claimed is a literal one, which no rule may pair
+      // differently: `` ``a` `` is not code in CommonMark, and one inside a
+      // destination is part of the URL.
+      projected = ESCAPED;
+    } else if (char === '\\' && next !== undefined && ESCAPABLE.test(next)) {
+      // A backslash makes the next character literal: it goes into the content
+      // but never into the string rules are matched against.
       index += 1;
       literal = next;
       projected = ESCAPED;
@@ -834,7 +983,12 @@ export function parseInlineMarkdown(text: string): RichText {
     pending += literal;
     matchable += projected;
 
-    if (OPENERS.has(projected)) {
+    if (code !== null && index === code.open) {
+      // Held open like any other delimiter, so nothing cuts it off before its
+      // closing fence arrives.
+      codeOpen = origin + matchable.length - 1;
+      opens.push(codeOpen);
+    } else if (OPENERS.has(projected)) {
       opens.push(origin + matchable.length - 1);
     }
 
@@ -842,14 +996,27 @@ export function parseInlineMarkdown(text: string): RichText {
       retire();
     }
 
-    if (!CLOSERS.has(projected)) {
-      continue;
-    }
+    let match: InlineRuleMatch | null;
 
-    const match = matchInlineRule(matchable, {
-      projection: true,
-      ahead: ahead?.(index + 1),
-    });
+    if (code !== null) {
+      if (index !== code.close + code.fence - 1) {
+        continue;
+      }
+
+      const closed = code;
+
+      code = null;
+      match = codeSpanMatch(closed, codeOpen - origin);
+    } else {
+      if (!CLOSERS.has(projected)) {
+        continue;
+      }
+
+      match = matchInlineRule(matchable, {
+        projection: true,
+        ahead: ahead?.(index + 1),
+      });
+    }
 
     if (!match) {
       continue;

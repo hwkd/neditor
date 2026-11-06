@@ -324,6 +324,23 @@ function inOpenDestination(window: string, ahead?: DestinationAhead): boolean {
   return ahead?.plainCloses(depth) ?? true;
 }
 
+/**
+ * Whether a backtick run arriving at the end of `textBeforeCaret` stands inside
+ * a link destination or an autolink, where it opens no code span.
+ *
+ * CommonMark reads a destination from the input when its `]` is reached, so a
+ * backtick in one was never seen as a delimiter; an autolink is the same, by
+ * the rule that whichever of it and a code span starts first wins. The
+ * Markdown reader asks this at each opening run, with `ahead` -- a destination
+ * that never closes is not one. Not exported from the package.
+ */
+export function inOpenLinkSyntax(textBeforeCaret: string, ahead?: DestinationAhead): boolean {
+  const offset = Math.max(0, textBeforeCaret.length - INLINE_SPAN_LIMIT - 1);
+  const window = offset === 0 ? textBeforeCaret : textBeforeCaret.slice(offset);
+
+  return inOpenAutolink(window) || inOpenDestination(window, ahead);
+}
+
 export interface InlineRuleMatch {
   /** Offset of the opening delimiter. */
   readonly start: number;
@@ -485,10 +502,14 @@ export function matchInlineRule(
   // underscores deleted -- before the `)` that makes it a destination was
   // read: `https://a.test/_y_` came back as `https://a.test/y`, from the
   // editor's own Markdown and while typing alike (the e2e audit's F15).
-  // Code spans are left alone: they take precedence over links in CommonMark,
-  // so `` `](` `` is code. The writer escapes a backtick in a destination (the
-  // URL parser percent-encodes one in a path but not in a query), so a code
-  // span cannot close inside a destination we wrote.
+  // Code spans are left alone here: one that opened in the link text takes
+  // precedence over the link in CommonMark, so `` `](` `` is code -- but one
+  // that opens inside a destination is part of the URL, and typing cannot tell
+  // which it has until the line is finished. The Markdown reader can, and
+  // finds code spans itself (see `inOpenLinkSyntax`), so this rule never fires
+  // there. The writer escapes a backtick in a destination (the URL parser
+  // percent-encodes one in a path but not in a query), so a code span cannot
+  // close inside a destination we wrote.
   const inDestination = inOpenDestination(window, options.ahead);
   const inAutolink = inOpenAutolink(window);
 

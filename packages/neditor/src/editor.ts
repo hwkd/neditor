@@ -572,6 +572,17 @@ const MARK_SHORTCUTS: Readonly<Record<string, Mark>> = {
 };
 
 /**
+ * A block's text with every non-whitespace character of a code run replaced
+ * by a placeholder, for the inline rules: what the Markdown reader matches
+ * against inside a code span, so typing and pasting agree on what code holds.
+ */
+function projectCode(content: RichText): string {
+  return content
+    .map((run) => (run.marks?.includes('code') ? run.text.replace(/\S/g, '\u0000') : run.text))
+    .join('');
+}
+
+/**
  * The ids an indent moves: each visible anchor with whatever it hides, minus
  * any anchor the indent cannot move.
  *
@@ -4325,7 +4336,18 @@ export class NEditor {
       return false;
     }
 
-    const match = matchInlineRule(beforeCaret);
+    // A code run holds no markup, so the rules see its characters as
+    // placeholders, as the Markdown reader projects a code span -- offsets stay
+    // aligned. Read raw, a `*` inside code paired with one typed after it, and
+    // the letter in `` `x`_y_ `` refused the italic as intra-word, where pasting
+    // the same Markdown read them as CommonMark does. Typed backticks are not
+    // code yet, so the code rule itself sees what it always saw. A real NUL in
+    // the text would be read as a placeholder, so then the text is used raw.
+    const projected = projectCode(this.#contentOf(target)).slice(0, beforeCaret.length);
+    const projecting = projected !== beforeCaret && !beforeCaret.includes('\u0000');
+    const match = projecting
+      ? matchInlineRule(projected, { projection: true })
+      : matchInlineRule(beforeCaret);
 
     if (!match) {
       return false;
@@ -4338,6 +4360,26 @@ export class NEditor {
       return false;
     }
 
+    let link = match.link;
+
+    // The rule read the destination off the projection; the URL is the real
+    // text. Which form it has is the projection's to say (see
+    // `parseInlineMarkdown`, which does the same).
+    if (link !== undefined && projecting) {
+      const closing = beforeCaret.slice(innerEnd, match.end);
+      const href = sanitizeUrl(
+        projected.slice(innerEnd, match.end).startsWith('](<')
+          ? closing.slice(3, -2)
+          : closing.slice(2, -1),
+      );
+
+      if (!href) {
+        return false;
+      }
+
+      link = href;
+    }
+
     // Strip the closing delimiter first, so the opening offsets stay valid.
     let content = richDelete(this.#contentOf(target), innerEnd, match.end);
     content = richDelete(content, match.start, innerStart);
@@ -4345,8 +4387,8 @@ export class NEditor {
     const start = match.start;
     const end = start + (innerEnd - innerStart);
 
-    if (match.link) {
-      content = richSetLink(content, start, end, match.link);
+    if (link) {
+      content = richSetLink(content, start, end, link);
     } else if (match.mark) {
       // Set, not toggled: a span typed around text that already has the mark
       // keeps it, as it does when the same line is pasted -- toggling made

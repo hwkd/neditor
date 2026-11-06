@@ -275,7 +275,8 @@ non-empty `[label]` opens one, so `ref [x] then f](g*h*` still italicises.
 
 The HTML spellings the Markdown writer uses for formatting that starts or ends
 with a space convert too: `<u>underline</u>`, `<strong>`, `<em>`, `<s>` and
-`<code>`. Inside a link destination only the link itself and a code span close, so `_x_`
+`<code>`. Inside a link destination only the link itself and a code span close (while typing; in pasted
+Markdown a backtick that begins inside a destination is part of the URL, as in CommonMark), so `_x_`
 in a URL is not italicised (up to the first space, if the destination is a pasted `<…>` one
 that holds any -- this editor never writes one), and neither is a `_x_` that opens inside a bare URL, up to the next
 whitespace; `_see https://a.test_`, which opens before it, still is. A bare URL here is
@@ -789,6 +790,10 @@ writes is what `blocksFromMarkdown` reads back:
 - CommonMark shows a backtick code span's content literally, backslashes
   included, so a code run that needs any escaping (`snake_case`, `a<b`) or holds
   a line break is written as `<code>…</code>`, where escapes are honoured.
+  The reader reads a backtick span as CommonMark does: a run of N backticks
+  closes on the next run of exactly N, its content is literal (no emphasis, no
+  escapes, one padding space off each end), and a backtick that begins inside
+  a link destination is part of the URL.
 - A line after a soft break (or an image's caption) that opens with `#`, `-`,
   `>`, `+`, `=`, `:-` or `1.` has the marker escaped, so other readers do not
   start a heading, a list or a table there, and a `!` straight before a link is escaped so the
