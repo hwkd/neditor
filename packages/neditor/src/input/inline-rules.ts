@@ -273,8 +273,16 @@ export interface DestinationAhead {
  * link, so the prose behind it keeps its marks -- `**see [docs](x**` is bold
  * in CommonMark. Typing passes none, and holds the destination open: the `)`
  * may be the next thing typed.
+ *
+ * `before` passes over any hinge at or after that offset. The code rule gives
+ * its opening backtick: a code span binds tighter than a link, so a `](` inside
+ * the span being closed opens nothing, and ``Write `[label](` `` is code.
  */
-function inOpenDestination(window: string, ahead?: DestinationAhead): boolean {
+function inOpenDestination(
+  window: string,
+  ahead?: DestinationAhead,
+  before: number = window.length,
+): boolean {
   let at = window.lastIndexOf('](');
   // Everything from here to the caret is known to hold no whitespace, so each
   // character is looked at once however many hinges are passed over. A label
@@ -290,7 +298,7 @@ function inOpenDestination(window: string, ahead?: DestinationAhead): boolean {
 
     clean = at;
 
-    if (closesLabel(window, at)) {
+    if (at + 2 <= before && closesLabel(window, at)) {
       break;
     }
   }
@@ -485,10 +493,12 @@ export function matchInlineRule(
   // underscores deleted -- before the `)` that makes it a destination was
   // read: `https://a.test/_y_` came back as `https://a.test/y`, from the
   // editor's own Markdown and while typing alike (the e2e audit's F15).
-  // Code spans are left alone: they take precedence over links in CommonMark,
-  // so `` `](` `` is code. The writer escapes a backtick in a destination (the
-  // URL parser percent-encodes one in a path but not in a query), so a code
-  // span cannot close inside a destination we wrote.
+  // Code spans ask their own version of this below: one that opened before the
+  // destination's `](` takes precedence over the link, as in CommonMark, so
+  // `` `](` `` is code; one that opened inside the destination is part of the
+  // URL. The writer escapes a backtick in a destination (the URL parser
+  // percent-encodes one in a path but not in a query), so a code span cannot
+  // close inside a destination we wrote.
   const inDestination = inOpenDestination(window, options.ahead);
   const inAutolink = inOpenAutolink(window);
 
@@ -585,6 +595,16 @@ export function matchInlineRule(
       }
 
       if (openCodeRun(window.slice(0, run)) !== 0) {
+        continue;
+      }
+
+      // A span whose opening run is inside a link destination is part of the
+      // URL: CommonMark reads the destination when it reaches the `]`, before
+      // the backtick. Closing here took both backticks out of the URL --
+      // `[t](https://a.test/?q=`x`)` linked to `?q=x` -- typed or pasted. Only
+      // a destination open before the run counts, so a `](` inside the span
+      // opens nothing.
+      if (inOpenDestination(window, options.ahead, run)) {
         continue;
       }
     }

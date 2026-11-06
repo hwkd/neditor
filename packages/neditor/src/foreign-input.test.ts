@@ -541,6 +541,8 @@ describe('typing a line and pasting it give the same result', () => {
     '**a _b**_',
     '<u>a *b</u> c*',
     '[x](https://a.test/_y_)',
+    '[t](https://a.test/?q=`x`)',
+    '[t](<https://a.test/?q=`x`>) and `c`',
     'a `](` b',
     'see [a](<b and *y*',
     'a<strong>b </strong>c',

@@ -1121,6 +1121,25 @@ describe('a backtick that begins inside a link destination', () => {
    */
   const runs = (source: string) => parseInlineMarkdown(source);
 
+  test('a pair of them is part of the URL too, not a code span inside it', () => {
+    // The code rule fired at the second backtick, while the destination was
+    // still open, and took both backticks out of the URL: `?q=x`.
+    expect(runs('[t](https://a.test/?q=`x`)')).toEqual([
+      { text: 't', link: 'https://a.test/?q=`x`' },
+    ]);
+    expect(runs('[t](<https://a.test/?q=`x`>)')).toEqual([
+      { text: 't', link: 'https://a.test/?q=`x`' },
+    ]);
+  });
+
+  test('a pair in a destination that never closes is still code', () => {
+    expect(runs('[t](https://a.test/?q=`x` y')).toEqual([
+      { text: '[t](https://a.test/?q=' },
+      { text: 'x', marks: ['code'] },
+      { text: ' y' },
+    ]);
+  });
+
   test('in a plain destination it is part of the URL', () => {
     expect(runs('[a](https://x.test/?q=`) and `code`')).toEqual([
       { text: 'a', link: 'https://x.test/?q=`' },

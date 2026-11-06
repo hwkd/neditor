@@ -275,7 +275,8 @@ non-empty `[label]` opens one, so `ref [x] then f](g*h*` still italicises.
 
 The HTML spellings the Markdown writer uses for formatting that starts or ends
 with a space convert too: `<u>underline</u>`, `<strong>`, `<em>`, `<s>` and
-`<code>`. Inside a link destination only the link itself and a code span close, so `_x_`
+`<code>`. Inside a link destination only the link itself and a code span that opened before it close
+(a backtick that begins inside one is part of the URL, as in CommonMark), so `_x_`
 in a URL is not italicised (up to the first space, if the destination is a pasted `<…>` one
 that holds any -- this editor never writes one), and neither is a `_x_` that opens inside a bare URL, up to the next
 whitespace; `_see https://a.test_`, which opens before it, still is. A bare URL here is

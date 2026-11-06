@@ -412,6 +412,26 @@ describe('a destination is open only behind a label the link rule accepts', () =
   });
 });
 
+describe('a code span closes only where the link rule could not', () => {
+  // A backtick that begins inside a destination is part of the URL in
+  // CommonMark. While typing, a destination is held open -- the `)` may be the
+  // next key -- so a pair of backticks in one waits, as `_y_` already did.
+  test('one opened inside a destination waits for it', () => {
+    expect(matchInlineRule('[t](https://a.test/`x`')).toBeNull();
+    expect(matchInlineRule('[t](<https://a.test/`x`')).toBeNull();
+  });
+
+  test('one opened before the destination still closes', () => {
+    // The span binds tighter than the link: its `](` is code, not a hinge.
+    expect(apply('Write `[label](`')).toMatchObject({ mark: 'code', text: 'Write [label](' });
+    expect(apply('`[a](x`')).toMatchObject({ mark: 'code', text: '[a](x' });
+  });
+
+  test('one after a destination that has closed still closes', () => {
+    expect(apply('[a](https://x.test/) `c`')).toMatchObject({ mark: 'code' });
+  });
+});
+
 describe('pasted prose behind a destination that never closes keeps its marks', () => {
   /**
    * Typing cannot know whether the `)` is about to arrive, so it holds the
