@@ -116,10 +116,16 @@ describe('pasting a collapsed toggle into text keeps the text after the caret, a
       pasteEvent('<details><summary>Answer</summary><p>42</p></details>', 'Answer'),
     );
 
-    const answer = editor.getDocument().blocks.find((b) => blockText(b) === '42')!;
+    // The fold is the paste's own, as a closed <details> is (the e2e suite's
+    // C6b), and nothing the reader had moved into it, so it stays shut; the
+    // caret lands at the end of the toggle rather than in the fold, where it
+    // could not land at all.
+    const toggle = editor.getDocument().blocks.find((b) => blockText(b) === 'Answer')!;
 
-    expect(visibleIds(editor)).toContain(answer.id);
-    expect(activeId()).toBe(answer.id);
+    expect(toggle.collapsed).toBe(true);
+    expect(visibleIds(editor)).toContain(toggle.id);
+    expect(activeId()).toBe(toggle.id);
+    expect(editor.getSelectionState()?.range).toEqual({ start: 6, end: 6 });
   });
 });
 

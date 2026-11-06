@@ -13,6 +13,8 @@ catalog:
   vite-plus: ^0.3.0
   vitest: 4.1.11
   '@vitest/coverage-v8': ^4.1.11
+  '@playwright/test': ^1.63.0
+  '@axe-core/playwright': ^4.13.0
 
 minimumReleaseAgeExclude:
   - '@astrojs/internal-helpers@0.11.0'

@@ -174,6 +174,54 @@ describe('the slash menu announces the option it will commit', () => {
     expect(content.getAttribute('aria-activedescendant')).toBe(id);
   });
 
+  /**
+   * F3 (e2e finding). Every mouseenter rebuilt the whole list, so the option
+   * under a resting pointer was replaced by a new element -- which Chromium
+   * then sent a fresh mouseenter, and so on every ~50 ms. A press landed on
+   * the list rather than an option, and a pixel of movement between down and
+   * up split the click across two elements: the command never ran. Hover
+   * moves the highlight on the options that are already there.
+   */
+  test('hovering an option moves the highlight without replacing the options', () => {
+    const editor = mount([block({})]);
+    const content = hosts(editor)[0]!;
+    content.focus();
+    typeSlash(content);
+
+    const options = () => [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    const before = options();
+    const third = before[2]!;
+    third.dispatchEvent(new MouseEvent('mouseenter'));
+    third.dispatchEvent(new MouseEvent('mouseenter'));
+
+    const after = options();
+    expect(after).toHaveLength(before.length);
+    expect(after.every((option, index) => option === before[index])).toBe(true);
+    expect(third.getAttribute('aria-selected')).toBe('true');
+    expect(before.filter((option) => option.getAttribute('aria-selected') === 'true')).toEqual([
+      third,
+    ]);
+    expect(content.getAttribute('aria-activedescendant')).toBe(third.id);
+
+    third.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(editor.getDocument().blocks[0]?.type).toBe('heading2');
+  });
+
+  test('arrowing keeps the same option elements as well', () => {
+    const editor = mount([block({})]);
+    const content = hosts(editor)[0]!;
+    content.focus();
+    typeSlash(content);
+
+    const before = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    press(content, 'ArrowDown');
+    const after = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+
+    expect(after.every((option, index) => option === before[index])).toBe(true);
+    expect(before[1]!.dataset.active).toBe('true');
+    expect(before[0]!.dataset.active).toBeUndefined();
+  });
+
   test('the highlight is announced against the filtered list, not the full one', () => {
     const editor = mount([block({})]);
     const content = hosts(editor)[0]!;

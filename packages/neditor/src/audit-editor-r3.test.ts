@@ -74,7 +74,7 @@ describe('a long press takes the text side back as well as selecting the block',
   // editor has selected the block; the exemption kept the block selection but
   // left focus and the word selection where the browser put them, so a soft
   // keyboard's insertText replaced the word -- both modes live at once.
-  test('focus arriving during the press goes back to the root, with no text range', async () => {
+  test('focus arriving during the press is back on the root, with no text range, once it lifts', async () => {
     const editor = mount([block({ id: 'a', content: text('Marks compose') })]);
     const host = hostOf(editor, 'a');
     host.dispatchEvent(
@@ -90,10 +90,57 @@ describe('a long press takes the text side back as well as selecting the block',
 
     expect(editor.getSelectedBlocks()).toEqual(['a']);
     caret(host, 0); // the browser's long-press focus and word selection
+    // The stray caret is taken out when the finger lifts (main's
+    // #takeStrayCaretOut): no soft keyboard types while it is still down.
+    host.dispatchEvent(
+      new PointerEvent('pointerup', {
+        bubbles: true,
+        pointerType: 'touch',
+        button: 0,
+        clientX: 5,
+        clientY: 5,
+      }),
+    );
 
     expect(editor.getSelectedBlocks()).toEqual(['a']);
     expect(document.activeElement).toBe(editor.element);
     expect(getSelection()!.rangeCount === 0 || String(getSelection()) === '').toBe(true);
+  });
+});
+
+describe('a long press that the browser cancels ends the same way', () => {
+  // Android Chrome often ends a long press with pointercancel, not pointerup.
+  // The stray caret its long press placed was taken out only on pointerup, so
+  // after a cancel both modes stayed live: the block selected, the word
+  // selected, focus in the host (AGENTS.md: a gesture can end without
+  // pointerup, and must be closed on both events).
+  test('a pointercancel takes the stray caret out too', async () => {
+    const editor = mount([block({ id: 'a', content: text('Marks compose') })]);
+    const host = hostOf(editor, 'a');
+    host.dispatchEvent(
+      new PointerEvent('pointerdown', {
+        bubbles: true,
+        pointerType: 'touch',
+        button: 0,
+        clientX: 5,
+        clientY: 5,
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 650));
+
+    expect(editor.getSelectedBlocks()).toEqual(['a']);
+    host.focus();
+    const node = document.createTreeWalker(host, NodeFilter.SHOW_TEXT).nextNode()!;
+    const range = document.createRange();
+    range.setStart(node, 0);
+    range.setEnd(node, 5);
+    getSelection()!.removeAllRanges();
+    getSelection()!.addRange(range);
+    host.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, pointerType: 'touch' }));
+
+    expect(editor.getSelectedBlocks()).toEqual(['a']);
+    expect(document.activeElement).toBe(editor.element);
+    expect(String(getSelection())).toBe('');
   });
 });
 

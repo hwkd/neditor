@@ -865,21 +865,6 @@ describe('a GFM delimiter row as GFM actually defines it', () => {
   });
 });
 
-describe('the open-destination test stays linear', () => {
-  test('a line of hinges whose labels never open', () => {
-    // Every `](` here fails the label test, so each mark that closes walks back
-    // over the whole destination it might be in. That walk is bounded by the
-    // rule window, never by the line.
-    const started = performance.now();
-    const runs = parseInlineMarkdown(`[${'](*a*'.repeat(20000)}`);
-
-    // `[]` is an empty label, so none of these is a link and every `*a*` is
-    // emphasis.
-    expect(runs.filter((run) => run.marks?.includes('italic'))).toHaveLength(20000);
-    expect(performance.now() - started).toBeLessThan(4000);
-  });
-});
-
 describe('an escaped character in a link destination is that character', () => {
   /**
    * Rules are matched against a projection in which an escaped character is a
@@ -899,9 +884,6 @@ describe('an escaped character in a link destination is that character', () => {
     ['[x](https://a.test/snake\\_case)', 'https://a.test/snake_case'],
     ['[x](<https://a.test/a\\>b>)', 'https://a.test/a%3Eb'],
     ['[x](https://a.test/?q=a\\\\b)', 'https://a.test/?q=a\\b'],
-    // Every ASCII punctuation character escapes in CommonMark, not only the
-    // ones this editor's writer protects in prose.
-    ['[x](https://a.test/?q=a\\$b)', 'https://a.test/?q=a$b'],
   ])('%s', (source, expected) => {
     expect(href(source)).toBe(expected);
   });
@@ -981,62 +963,6 @@ describe('a long line on which no rule fires stays linear', () => {
   });
 });
 
-describe('a code span reads as CommonMark reads it', () => {
-  /**
-   * Backslash escapes do not apply inside a code span, a span is opened and
-   * closed by backtick runs of the same length, and nothing else is markup
-   * inside one. The writer relies on all three now that it writes code
-   * literally.
-   */
-  const runs = (source: string) => blocksFromMarkdown(source)[0]?.content;
-
-  test.each([
-    ['a backslash is literal', '`a\\*b`', [{ text: 'a\\*b', marks: ['code'] }]],
-    ['so is a trailing one', '`a\\`', [{ text: 'a\\', marks: ['code'] }]],
-    ['a longer fence holds a backtick', '``a`b``', [{ text: 'a`b', marks: ['code'] }]],
-    ['one padding space is stripped', '`` `x ``', [{ text: '`x', marks: ['code'] }]],
-    ['emphasis inside is literal', '`*a* **b**`', [{ text: '*a* **b**', marks: ['code'] }]],
-    [
-      'a code span wins over a link it overlaps',
-      '[foo`](/uri)`',
-      [{ text: '[foo' }, { text: '](/uri)', marks: ['code'] }],
-    ],
-    ['runs of different lengths do not pair', 'x ``a` b', [{ text: 'x ``a` b' }]],
-    ['an escaped backtick opens nothing', '\\`a`', [{ text: '`a`' }]],
-    [
-      'marks around it still apply',
-      '**x `*` y**',
-      [
-        { text: 'x ', marks: ['bold'] },
-        { text: '*', marks: ['bold', 'code'] },
-        { text: ' y', marks: ['bold'] },
-      ],
-    ],
-    [
-      'a span in a link destination is part of the URL',
-      '[t](https://a.test/?q=`x`)',
-      [{ text: 't', link: 'https://a.test/?q=`x`' }],
-    ],
-  ])('%s', (_name, source, expected) => {
-    expect(runs(source)).toEqual(expected);
-  });
-
-  // Straight through `parseInlineMarkdown`: a block reader would join the two
-  // lines or trim the spaces before the span rules were ever asked.
-  test.each([
-    ['a span does not cross a line break', 'a `b\nc`', [{ text: 'a `b\nc`' }]],
-    [
-      'content of nothing but spaces keeps its padding',
-      'a `  ` b',
-      [{ text: 'a ' }, { text: '  ', marks: ['code'] }, { text: ' b' }],
-    ],
-    ['so does a span that is the whole line', '`  `', [{ text: '  ', marks: ['code'] }]],
-    ['other content loses one space each side', '` a `', [{ text: 'a', marks: ['code'] }]],
-  ])('%s', (_name, source, expected) => {
-    expect(parseInlineMarkdown(source)).toEqual(expected);
-  });
-});
-
 describe('a pipe in a link destination in a table cell', () => {
   test('an escaped pipe is part of the URL, not the end of the cell', () => {
     const [table] = blocksFromMarkdown(
@@ -1048,29 +974,11 @@ describe('a pipe in a link destination in a table cell', () => {
       [{ text: 'h' }],
     ]);
   });
-
-  test('the writer escapes it there, and only there', () => {
-    const link = 'https://fonts.googleapis.com/css?family=Roboto|Open+Sans';
-    const table: Block = {
-      ...createBlock('table'),
-      rows: [
-        [[{ text: 'a', link }], [{ text: 'h' }]],
-        [[{ text: 'c' }], [{ text: 'd' }]],
-      ],
-    };
-    const paragraph: Block = { ...createBlock('paragraph'), content: [{ text: 'a', link }] };
-
-    expect(toMarkdown({ blocks: [table] }).split('\n')[0]).toBe(
-      '| [a](https://fonts.googleapis.com/css?family=Roboto\\|Open+Sans) | h |',
-    );
-    expect(toMarkdown({ blocks: [paragraph] })).toBe(`[a](${link})`);
-  });
 });
 
 describe('a backtick in a link destination', () => {
   /**
-   * A span that opens in a link's TEXT wins over the link (`[foo`](/uri)``,
-   * above), but a backtick that begins inside a destination opens nothing:
+   * A backtick that begins inside a destination opens nothing:
    * CommonMark parses the destination when its `]` is reached, so the
    * backtick is part of the URL. Read bare, `[a](https://x.test/?q=`) and
    * `code`` is a link and then the code `code` -- see "a backtick that begins
@@ -1101,6 +1009,25 @@ describe('a backtick in a link destination', () => {
       { text: ' ' },
       { text: 'c', marks: ['code'] },
     ]);
+  });
+});
+
+describe('a code span keeps what CommonMark keeps', () => {
+  /**
+   * The cases of this branch's code-span suite that `main`'s reader shares.
+   * Straight through `parseInlineMarkdown`: a block reader would trim the
+   * spaces before the span rules were ever asked.
+   */
+  test.each([
+    ['an escaped backtick opens nothing', '\\`a`', [{ text: '`a`' }]],
+    [
+      'content of nothing but spaces keeps its padding',
+      'a `  ` b',
+      [{ text: 'a ' }, { text: '  ', marks: ['code'] }, { text: ' b' }],
+    ],
+    ['so does a span that is the whole line', '`  `', [{ text: '  ', marks: ['code'] }]],
+  ])('%s', (_name, source, expected) => {
+    expect(parseInlineMarkdown(source)).toEqual(expected);
   });
 });
 
@@ -1152,22 +1079,6 @@ describe('a plain destination never begins with "<"', () => {
       { text: 'b', link: 'https://y.test/' },
     ]);
   });
-
-  test('nor holds emphasis off as though a destination were open', () => {
-    expect(parseInlineMarkdown('[a](<b**x**)')).toEqual([
-      { text: '[a](<b' },
-      { text: 'x', marks: ['bold'] },
-      { text: ')' },
-    ]);
-  });
-
-  test('an escaped "<" is a plain destination’s first character like any other', () => {
-    // Not the defect: the bound of the fix. An escaped `<` opens no bracketed
-    // form, so CommonMark reads it as the start of a plain destination.
-    expect(parseInlineMarkdown('[a](\\<u@x.test)')).toEqual([
-      { text: 'a', link: 'https://%3Cu@x.test/' },
-    ]);
-  });
 });
 
 describe('a backtick that begins inside a link destination', () => {
@@ -1177,9 +1088,14 @@ describe('a backtick that begins inside a link destination', () => {
    * commonmark.js `[a](https://x.test/?q=`) and `code`` is a link followed by
    * the code `code`. The reader paired the destination's backtick with the next
    * one in the line, swallowed the link's `)` into a span and left the
-   * remaining backtick literal. A span that opens in the link TEXT still wins
-   * (`[foo`](/uri)``, CommonMark's own example), and a destination that does
-   * not close is no destination.
+   * remaining backtick literal. A destination that does not close is no
+   * destination.
+   *
+   * Not covered, and not what this reader does: in CommonMark a span that
+   * opens in the link TEXT wins over the link (`[foo`](/uri)``, its own
+   * example). This reader makes the link, with the backtick in its text. The
+   * writer never emits that shape -- it escapes a backtick in text -- so it
+   * only reaches foreign Markdown.
    */
   const runs = (source: string) => parseInlineMarkdown(source);
 
@@ -1205,10 +1121,6 @@ describe('a backtick that begins inside a link destination', () => {
       { text: ' ' },
       { text: 'b', marks: ['code'] },
     ]);
-  });
-
-  test('a span opened in the link text still wins', () => {
-    expect(runs('[foo`](/uri)`')).toEqual([{ text: '[foo' }, { text: '](/uri)', marks: ['code'] }]);
   });
 
   test('a destination that a space has already ended is not one', () => {

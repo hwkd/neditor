@@ -126,13 +126,19 @@ describe('the slash-menu combobox is named', () => {
     const host = hostOf(editor, 'p');
     typeInto(host, '/');
 
+    // Named by reference (main's design: an aria-label here would also rename
+    // a to-do's checkbox, which this host labels), so the name is the
+    // referenced element's text.
+    const labelledBy = host.getAttribute('aria-labelledby') ?? '';
+    const label = document.getElementById(labelledBy);
+
     expect(host.getAttribute('role')).toBe('combobox');
-    expect(host.getAttribute('aria-label')).toBeTruthy();
+    expect(label?.textContent?.trim()).toBeTruthy();
 
     press(host, 'Escape');
 
     expect(host.hasAttribute('role')).toBe(false);
-    expect(host.hasAttribute('aria-label')).toBe(false);
+    expect(host.hasAttribute('aria-labelledby')).toBe(false);
   });
 });
 

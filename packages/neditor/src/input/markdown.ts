@@ -2,7 +2,7 @@ import type { Block, BlockType } from '../model/document.ts';
 import { DEFAULT_CALLOUT_ICON, createBlock } from '../model/document.ts';
 import type { TableRows } from '../model/table.ts';
 import { normalizeTableRows } from '../model/table.ts';
-import { sanitizeImageUrl } from '../util/url.ts';
+import { sanitizeImageUrl, sanitizeUrl } from '../util/url.ts';
 import type { RichText } from '../model/rich-text.ts';
 import {
   richConcat,
@@ -10,9 +10,11 @@ import {
   richFromPlainText,
   richSetLink,
   richSetMark,
+  richSplit,
+  richToPlainText,
 } from '../model/rich-text.ts';
-import type { InlineRuleMatch } from './inline-rules.ts';
-import { INLINE_SPAN_LIMIT, insideLinkDestination, matchInlineRuleAhead } from './inline-rules.ts';
+import type { DestinationAhead } from './inline-rules.ts';
+import { INLINE_SPAN_LIMIT, matchInlineRule } from './inline-rules.ts';
 
 /**
  * Markdown → blocks, for pasted plain text.
@@ -65,18 +67,8 @@ const TOGGLE_MARKER = /^([\u25B8\u25BE])(?:\s+|$)/;
  * The destination comes in either form CommonMark allows, because a `)` in a
  * URL has to go inside angle brackets to survive; the alt text may carry
  * escapes, since a bare `]` would close the label early.
- *
- * The label's two branches must not both accept a backslash. With `[^\]\n]`
- * as the second one, a backslash could be spent either as an escape or as an
- * ordinary character, so a label that never closed was retried both ways at
- * every backslash -- exponential: `![` and thirty `a\` pairs took two seconds,
- * doubling every two characters more. {@link CALLOUT_MARKER} had the same
- * label and the same defect.
- *
- * The destination may be empty: `![]()` is the image block the slash menu
- * inserts before a picture is chosen, and the writer spells it that way.
  */
-const IMAGE_LINE = /^!\[((?:\\.|[^\]\n\\])*)\]\((?:<([^<>\n]*)>|([^)\s]*))\)$/;
+const IMAGE_LINE = /^!\[((?:\\.|[^\]\n\\])*)\]\((?:<([^<>\n]*)>|((?:[^\s<][^\s]*)?))\)$/;
 
 /** A GFM table row; the leading pipe is what identifies one. */
 const TABLE_ROW = /^\|/;
@@ -90,6 +82,125 @@ const TABLE_ROW = /^\|/;
  * generators emit -- into a paragraph of pipes.
  */
 const TABLE_DIVIDER_CELL = /^:?-+:?$/;
+
+/** Whether a destination's unescaped parentheses balance, never closing more than opened. */
+function balancedParens(destination: string): boolean {
+  let depth = 0;
+
+  for (let at = 0; at < destination.length; at += 1) {
+    const char = destination[at];
+
+    if (char === '\\') {
+      at += 1;
+    } else if (char === '(') {
+      depth += 1;
+    } else if (char === ')' && --depth < 0) {
+      return false;
+    }
+  }
+
+  return depth === 0;
+}
+
+/**
+ * The `<br>`s of a table cell or a heading as the line breaks they are.
+ *
+ * Both are one line in every reader, so the writer spells a break inside one
+ * `<br>`, as GFM tables do. An escaped `\<br>` is text, so only a `<` preceded by an even run
+ * of backslashes counts.
+ */
+function breaksFromHtml(cell: string): string {
+  const code = codeSpans(cell);
+  let span = 0;
+
+  // Matched on the tag alone and counted back from it: a pattern that leads
+  // with the backslashes is retried from each one of a long run.
+  return cell.replace(/<br\s*\/?>/gi, (tag, offset: number) => {
+    // Visited in order, so the lookup is a pointer that only moves on.
+    while (span < code.length && code[span]![1] <= offset) {
+      span += 1;
+    }
+
+    // Inside a backtick span it is code: `# The \`<br>\` element` shows it.
+    if (span < code.length && code[span]![0] <= offset) {
+      return tag;
+    }
+
+    let slashes = 0;
+
+    while (cell.charCodeAt(offset - 1 - slashes) === 92) {
+      slashes += 1;
+    }
+
+    return slashes % 2 === 0 ? '\n' : tag;
+  });
+}
+
+/**
+ * The `[start, end)` spans of backtick code in a line, in order: a run of
+ * backticks not escaped, up to the next run of the same length.
+ *
+ * Each run is paired once, through the next run of its length, which a pointer
+ * per length finds -- so a line of unpaired backticks is still one pass.
+ */
+function codeSpans(line: string): Array<readonly [number, number]> {
+  if (!line.includes('`')) {
+    return [];
+  }
+
+  const runs: Array<{ readonly at: number; readonly length: number }> = [];
+
+  for (let at = 0; at < line.length; at += 1) {
+    if (line[at] === '\\') {
+      at += 1;
+    } else if (line[at] === '`') {
+      const start = at;
+
+      while (line[at + 1] === '`') {
+        at += 1;
+      }
+
+      runs.push({ at: start, length: at - start + 1 });
+    }
+  }
+
+  const byLength = new Map<number, number[]>();
+
+  runs.forEach((run, index) => {
+    const list = byLength.get(run.length) ?? [];
+    list.push(index);
+    byLength.set(run.length, list);
+  });
+
+  const next = new Map<number, number>();
+  const spans: Array<readonly [number, number]> = [];
+  let after = -1;
+
+  for (const [index, run] of runs.entries()) {
+    if (run.at < after) {
+      continue;
+    }
+
+    const list = byLength.get(run.length)!;
+    let pointer = next.get(run.length) ?? 0;
+
+    while (pointer < list.length && list[pointer]! <= index) {
+      pointer += 1;
+    }
+
+    next.set(run.length, pointer);
+
+    const closing = list[pointer];
+
+    if (closing !== undefined) {
+      const end = runs[closing]!.at + run.length;
+      spans.push([run.at, end]);
+      after = end;
+    }
+  }
+
+  return spans;
+}
 
 /** Splits a GFM row on unescaped pipes and unescapes the rest. */
 function splitTableRow(line: string): string[] {
@@ -142,21 +253,13 @@ function parseTableLines(lines: readonly string[]): TableRows {
       continue;
     }
 
-    rows.push(cells.map(parseInlineMarkdown));
+    rows.push(cells.map((cell) => parseInlineMarkdown(breaksFromHtml(cell))));
   }
 
   return rows;
 }
-/**
- * An opening fence: three or more backticks, plus an optional info string.
- *
- * The info string may not hold a backtick, as in CommonMark, and that is what
- * keeps a paragraph opening with a long code span a paragraph: the writer puts
- * code in a fence longer than any backtick run inside it, so code holding
- * ` `` ` opens its line with three. The `(?!`)` keeps the run whole, so a
- * failed test is not retried at every shorter length of it.
- */
-const FENCE_OPEN = /^(`{3,})(?!`)(?=[^`]*$)/;
+/** An opening fence: three or more backticks, plus an optional info string. */
+const FENCE_OPEN = /^(`{3,})/;
 
 const CHECKED = /\[[xX]\]/;
 
@@ -214,28 +317,111 @@ const OPENERS = new Set(['*', '_', '~', '`', '<', '[']);
  * prose, which no other reader does; it is honoured at the one place the writer
  * emits it, the head of a bullet, and nowhere else.
  */
-const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!]/;
+const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!&=]/;
 
 /**
- * Stands in for a character no rule may read while rules are matched: an
- * escaped one, a backtick, and everything inside a code span but its spaces.
+ * A numeric character reference, which the writer uses for whitespace at the
+ * edge of a block (leading whitespace is indentation, and every reader trims
+ * the rest). Decoded as CommonMark decodes it; an `&` that is meant literally
+ * arrives escaped.
+ */
+const NUMERIC_REFERENCE = /^&#(?:(\d{1,7})|[xX]([0-9a-fA-F]{1,6}));/;
+
+/**
+ * Where references are decoded: a run at either edge of a block's text or at
+ * the start of a line after a soft break, and nowhere else, because those are
+ * the places the writer puts them (every reader strips leading whitespace from
+ * a line, and trims a block). Decoding them everywhere corrupted foreign text --
+ * a link destination holding `&#38;` came back with a NUL in it, and a pasted
+ * code span holding `&#169;` came back as a copyright sign.
+ */
+const LINE_LEADING_REFERENCES = /(?:^|\n)((?:&#(?:\d{1,7}|[xX][0-9a-fA-F]{1,6});)+)/g;
+const WHOLE_REFERENCE = /^&#(?:\d{1,7}|[xX][0-9a-fA-F]{1,6});$/;
+/** The longest a reference can be: `&#` + seven digits + `;`. */
+const REFERENCE_REACH = 10;
+
+/**
+ * Where the run of references that ends `text` starts, or -1 if none does.
+ *
+ * Walked back from the end one reference at a time. As a pattern ending in `$`
+ * it was retried from every `&` in the line, and each try read a whole run
+ * before failing: a long run of references in the middle of a line took a
+ * second to parse.
+ */
+function trailingReferences(text: string, end: number): number {
+  let start = end;
+
+  for (;;) {
+    const from = Math.max(0, start - REFERENCE_REACH);
+    const at = text.slice(from, start).lastIndexOf('&');
+
+    if (at === -1 || !WHOLE_REFERENCE.test(text.slice(from + at, start))) {
+      break;
+    }
+
+    start = from + at;
+  }
+
+  return start === end ? -1 : start;
+}
+
+/** The closing tags the writer's HTML spelling of a mark ends in. */
+const CLOSING_TAGS = ['</strong>', '</em>', '</s>', '</u>', '</code>'];
+
+/** Where the closing tags that end `text` start: its length if there are none. */
+function beforeClosingTags(text: string): number {
+  let end = text.length;
+
+  for (;;) {
+    const tag = CLOSING_TAGS.find((candidate) => text.endsWith(candidate, end));
+
+    if (!tag) {
+      return end;
+    }
+
+    end -= tag.length;
+  }
+}
+
+/** The `[start, end)` spans of `text` whose references are the writer's, in order. */
+function decodableReferences(text: string): Array<readonly [number, number]> {
+  const spans: Array<readonly [number, number]> = [];
+
+  for (const match of text.matchAll(LINE_LEADING_REFERENCES)) {
+    const run = match[1] ?? '';
+    const start = match.index + match[0].length - run.length;
+    spans.push([start, start + run.length]);
+  }
+
+  // The writer puts a block's last line break inside the tags of a run written
+  // as HTML, so the end of the text is looked for behind any closing tags.
+  const end = beforeClosingTags(text);
+  const trailing = trailingReferences(text, end);
+
+  // A run that is the whole of the last line is already there as a leading one.
+  if (trailing !== -1 && spans.at(-1)?.[1] !== end) {
+    spans.push([trailing, end]);
+  }
+
+  return spans;
+}
+
+function decodeReference(match: RegExpExecArray): string | null {
+  const code = match[1] !== undefined ? Number(match[1]) : Number.parseInt(match[2] ?? '', 16);
+
+  return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff)
+    ? String.fromCodePoint(code)
+    : null;
+}
+
+/**
+ * Stands in for an escaped character while rules are matched.
  *
  * The projection stays the same length as the content, offset for offset, so a
  * rule's offsets apply to both — but a placeholder can never be read as a
  * delimiter, which is the whole point of the escape.
  */
 const ESCAPED = '\u0000';
-
-const BACKSLASH = 0x5c;
-
-/**
- * What CommonMark lets a backslash escape: any ASCII punctuation character.
- *
- * Wider than {@link ESCAPABLE}, which is what the writer protects in prose and
- * so what the projection hides from the rules. In a link destination the rules
- * have finished, and the destination is read as CommonMark reads it.
- */
-const ASCII_PUNCTUATION = /[!-/:-@[-`{-~]/;
 
 /**
  * True when a line ends in a soft break rather than a literal backslash.
@@ -244,16 +430,9 @@ const ASCII_PUNCTUATION = /[!-/:-@[-`{-~]/;
  * trailing backslashes is unambiguously the break marker it emits for `\n`.
  */
 function endsWithSoftBreak(line: string): boolean {
-  // Counted back from the end rather than matched with `/\\+$/`, which has no
-  // left anchor and so is retried from every backslash of a run that does not
-  // reach the end: 40,000 of them mid-line took over a second.
   let count = 0;
 
-  for (
-    let index = line.length - 1;
-    index >= 0 && line.charCodeAt(index) === BACKSLASH;
-    index -= 1
-  ) {
+  while (line.charCodeAt(line.length - 1 - count) === 92) {
     count += 1;
   }
 
@@ -267,7 +446,20 @@ function endsWithSoftBreak(line: string): boolean {
  */
 function joinSoftBreaks(lines: readonly string[]): string[] {
   const out: string[] = [];
+  // The lines of the block being joined, as they arrived. Collected and joined
+  // once: appending each line to the block so far, and then asking that ever
+  // longer string whether it ends in a break, was quadratic in a long
+  // soft-broken paragraph.
+  let pending: string[] = [];
   let fence = 0;
+
+  const flush = (): void => {
+    if (pending.length > 0) {
+      const last = pending.length - 1;
+      out.push(pending.map((line, index) => (index < last ? line.slice(0, -1) : line)).join('\n'));
+      pending = [];
+    }
+  };
 
   for (const line of lines) {
     const trimmed = line.trimStart();
@@ -277,6 +469,7 @@ function joinSoftBreaks(lines: readonly string[]): string[] {
         fence = 0;
       }
 
+      flush();
       out.push(line);
       continue;
     }
@@ -285,19 +478,21 @@ function joinSoftBreaks(lines: readonly string[]): string[] {
 
     if (opening?.[1]) {
       fence = opening[1].length;
+      flush();
       out.push(line);
       continue;
     }
 
-    const previous = out.at(-1);
+    const previous = pending.at(-1);
 
-    if (previous !== undefined && endsWithSoftBreak(previous)) {
-      out[out.length - 1] = `${previous.slice(0, -1)}\n${line}`;
-      continue;
+    if (previous === undefined || !endsWithSoftBreak(previous)) {
+      flush();
     }
 
-    out.push(line);
+    pending.push(line);
   }
+
+  flush();
 
   return out;
 }
@@ -307,211 +502,81 @@ function stripEscapes(text: string): string {
   return text.replace(/\\(.)/g, (whole, char: string) => (ESCAPABLE.test(char) ? char : whole));
 }
 
-/** For each offset of a line, whether a destination open there would close. */
-interface Closers {
-  /** The angle-bracketed form; `null` when the line holds no `](<`. */
-  readonly angled: Uint8Array | null;
-  /** The plain form; `null` when the line holds no `](`. */
-  readonly plain: Uint8Array | null;
-}
-
 /**
- * For each offset, whether the text from there closes a link destination open
- * at that offset.
+ * For each caret in `text`, whether a link destination open there closes later
+ * on the line -- the one thing the reader knows that typing does not.
  *
- * For the angled form, whether the first unescaped `<`, `>` or line break from
- * it is a `>` with a `)` straight after. A destination in angle brackets admits
- * spaces, so a `](<` that never closes held every mark rule off the prose
- * behind it, as far as the rule window reaches -- `Use [a](<b to open, then
- * **bold**` kept its asterisks, where CommonMark, seeing no link, reads the
- * bold.
- *
- * For the plain form, whether the first unescaped `)` or whitespace from it is
- * the `)`. Only the angled form used to be asked, so `**see [docs](x**`, with
- * no `)` anywhere after it, kept its asterisks too.
- *
- * Typing cannot know what comes next; a whole line can, and one backward pass
- * answers every offset.
+ * Built once, right to left, so each answer is a lookup: scanning forward at
+ * every closing character instead made a long destination that never closes
+ * cost its length squared. Characters are read as the reader reads them: an
+ * escaped one is literal, never a parenthesis, bracket or whitespace, and a
+ * numeric reference is spelled with none of those.
  */
-function lineClosers(text: string): Closers | null {
-  if (!text.includes('](')) {
-    return null;
-  }
+function destinationsAhead(text: string): (caret: number) => DestinationAhead {
+  const length = text.length;
+  const escaped = new Uint8Array(length);
 
-  // Escapes are read left to right, as the replay reads them: an escaped
-  // character is not syntax, so a `\>` or a `\)` closes nothing.
-  const escaped = new Uint8Array(text.length);
-
-  for (let index = 0; index < text.length - 1; index += 1) {
-    if (text[index] === '\\' && ESCAPABLE.test(text[index + 1]!)) {
-      escaped[index + 1] = 1;
-      index += 1;
-    }
-  }
-
-  const angled = text.includes('](<') ? new Uint8Array(text.length + 1) : null;
-  const plain = new Uint8Array(text.length + 1);
-  let angledState = 0;
-  let plainState = 0;
-
-  for (let index = text.length - 1; index >= 0; index -= 1) {
-    const char = text[index]!;
-
-    if (escaped[index] === 0) {
-      if (char === '<' || char === '\n') {
-        angledState = 0;
-      } else if (char === '>') {
-        angledState = text[index + 1] === ')' ? 1 : 0;
-      }
-
-      if (char === ')') {
-        plainState = 1;
-      } else if (/\s/.test(char)) {
-        plainState = 0;
-      }
-    }
-
-    if (angled) {
-      angled[index] = angledState;
-    }
-
-    plain[index] = plainState;
-  }
-
-  return { angled, plain };
-}
-
-/** A code span in a line: its opening fence, the fence's length, its closing fence. */
-interface CodeSpan {
-  readonly open: number;
-  readonly fence: number;
-  readonly close: number;
-}
-
-/**
- * The code spans of a line, found the way CommonMark finds them, one opener at
- * a time.
- *
- * A run of N backticks opens a span that the next run of exactly N closes;
- * with no such run it is literal backticks. Backslash escapes count only
- * outside a span -- an escaped backtick opens nothing, but inside a span a
- * backslash is a backslash, so `` `a\` `` is the code `a\`. A span does not
- * cross a line break: the writer puts each line of a run in its own span, and
- * the reader's other rules are line-bounded too.
- *
- * Whether a run opens at all is the caller's to say, which is why this answers
- * one opener at a time rather than listing every span up front: a run that
- * begins inside a link destination is part of the URL, and only the replay
- * knows where the destinations are. Listing them first paired the backtick in
- * `[a](https://x.test/?q=`) and `code`` with the next one in the line.
- *
- * Every maximal run is indexed by length once, and each length keeps a cursor
- * that only moves forward, so a line of unmatched runs of every length is
- * still one pass. `null` with no backtick in the line.
- */
-function codeSpanFinder(
-  text: string,
-): ((at: number, fence: number, opens: boolean) => CodeSpan | null) | null {
-  if (!text.includes('`')) {
-    return null;
-  }
-
-  // Every maximal run, by length, in order: the candidates for a closer.
-  const runs = new Map<number, number[]>();
-
-  for (let at = 0; at < text.length;) {
-    if (text[at] !== '`') {
+  for (let at = 0; at < length; at += 1) {
+    if (text[at] === '\\' && at + 1 < length && ESCAPABLE.test(text[at + 1]!)) {
+      escaped[at + 1] = 1;
       at += 1;
+    }
+  }
+
+  const unbounded = 1 << 30;
+  // The lowest the parenthesis depth falls, relative to the depth before `at`,
+  // anywhere from `at` up to the next whitespace; `unbounded` at whitespace.
+  const lowest = new Int32Array(length + 1);
+  // Whether a `>)` follows `at` before any `<`, `>` or whitespace.
+  const angled = new Uint8Array(length + 1);
+
+  lowest[length] = unbounded;
+
+  for (let at = length - 1; at >= 0; at -= 1) {
+    const char = text[at]!;
+    const literal = escaped[at] === 1;
+
+    if (!literal && /\s/.test(char)) {
+      lowest[at] = unbounded;
+      angled[at] = 0;
       continue;
     }
 
-    let end = at;
+    const step = literal ? 0 : char === '(' ? 1 : char === ')' ? -1 : 0;
 
-    while (text[end] === '`') {
-      end += 1;
-    }
-
-    const starts = runs.get(end - at);
-
-    if (starts) {
-      starts.push(at);
-    } else {
-      runs.set(end - at, [at]);
-    }
-
-    at = end;
+    lowest[at] = step + Math.min(0, lowest[at + 1]!);
+    angled[at] = literal
+      ? angled[at + 1]!
+      : char === '<'
+        ? 0
+        : char === '>'
+          ? Number(text[at + 1] === ')' && escaped[at + 1] === 0)
+          : angled[at + 1]!;
   }
 
-  /** For each run length, how many of its runs are already behind the scan. */
-  const passed = new Map<number, number>();
-  let lineEnd = -1;
-
-  /**
-   * The span a run of `fence` backticks at `at` opens, or `null` for literal
-   * backticks. `opens` false is a run the caller has ruled out; it is still
-   * passed over, so the cursors stay where a left-to-right scan puts them.
-   */
-  return (at, fence, opens) => {
-    const starts = runs.get(fence) ?? [];
-    let next = passed.get(fence) ?? 0;
-
-    while (next < starts.length && starts[next]! < at + fence) {
-      next += 1;
-    }
-
-    passed.set(fence, next);
-
-    if (!opens) {
-      return null;
-    }
-
-    if (lineEnd < at) {
-      lineEnd = text.indexOf('\n', at);
-      lineEnd = lineEnd === -1 ? text.length : lineEnd;
-    }
-
-    const close = starts[next];
-
-    if (close === undefined || close >= lineEnd) {
-      return null;
-    }
-
-    passed.set(fence, next + 1);
-
-    return { open: at, fence, close };
-  };
+  return (caret) => ({
+    angledCloses: () => angled[caret] === 1,
+    // Open `depth` deep, the destination closes where the depth reaches -1.
+    plainCloses: (depth) => lowest[caret]! <= -(depth + 1),
+  });
 }
 
 /**
  * Applies inline rules to a whole string.
  *
- * Rather than a second grammar, this replays the rules typing uses over each
- * growing prefix, so pasting `**a**` and typing it give the same thing. Three
- * things differ, all because a paste has the whole line and typing has only
- * what is before the caret. A link destination that never closes on the line
- * is no link, so the marks after it apply -- `**see [docs](x**` pasted is bold
- * -- where typing holds the destination open because the `)` may be the next
- * key. A code span is read as CommonMark reads it (below), where typing fires
- * each rule as its closer is typed, so `*a*` typed inside backticks is already
- * italic when the closing backtick arrives. And a backslash escape is honoured
- * (`\*a*` pastes as literal `*a*`), where a typed backslash stays a backslash.
+ * Rather than a second grammar, this replays {@link matchInlineRule} over each
+ * growing prefix — exactly what typing the text would have produced, so pasting
+ * `**a**` and typing it cannot diverge. The one thing it adds is what only a
+ * reader can know: whether a link destination open at the caret closes later
+ * on the line. Typing holds one open, since the `)` may be the next key; a
+ * reader that can see it never arrives reads the `](` as text, so
+ * `**see [docs](x**` is bold, as it is in CommonMark.
  *
- * Code spans are the one exception, found by `codeSpanFinder` as each
- * opening run is reached: a span is closed by a backtick run of its opener's
- * length and holds no markup and no escapes, which a rule anchored at the caret
- * cannot see coming -- by the closing fence, a `*a*` inside would already have
- * fired. The writer emits code literally on the strength of this, as CommonMark
- * readers expect. A run that begins inside a link destination that closes
- * opens nothing: CommonMark parses a destination from the input when its `]`
- * is reached, so the backtick is part of the URL.
- *
- * Plain text is buffered and folded into the runs where a rule fires -- and,
- * on a line where none does, once the buffer outgrows the rule window -- the
+ * Plain text is buffered and folded into the runs only where a rule fires, the
  * rules are only tried on a character that could close one, and a match rebuilds
- * only the handful of runs around it, so the text each test looks at stays the
- * size of the window and the pass is linear in the length of the line rather
- * than quadratic. There used to be a length cap here instead, past which a
- * pasted paragraph kept its raw `**` markup.
+ * only the handful of runs around it — so the pass is linear in the length of
+ * the line rather than quadratic. There used to be a length cap here instead,
+ * past which a pasted paragraph kept its raw `**` markup.
  *
  * Runs already behind the caret are parked in `done` and pulled back out when a
  * span turns out to reach over them, rather than being written off at a fixed
@@ -524,19 +589,11 @@ export function parseInlineMarkdown(text: string): RichText {
     return [];
   }
 
-  const closers = lineClosers(text);
-  const findSpan = codeSpanFinder(text);
-  /** The code span the replay is inside, from its opening fence to its closing one. */
-  let span: CodeSpan | null = null;
-  /** Up to where the backticks of a run that opened nothing are still literal. */
-  let literalUntil = 0;
-  /** What the rest of the line says about a destination open at `index`. */
-  const aheadAt = (index: number): { angledCloses?: boolean; plainCloses?: boolean } => ({
-    angledCloses: closers?.angled ? closers.angled[index] === 1 : undefined,
-    plainCloses: closers?.plain ? closers.plain[index] === 1 : undefined,
-  });
-  /** Where the open code span's fence starts, counted as `opens` counts. */
-  let codeOpen = 0;
+  // Visited in order as `index` only grows, so the lookup is a moving pointer.
+  const decodable = text.includes('&#') ? decodableReferences(text) : [];
+  // Only a line with a `](` in it can hold a destination to look past.
+  const ahead = text.includes('](') ? destinationsAhead(text) : undefined;
+  let span = 0;
 
   // What a rule can still reach, plus the character of context the lookbehinds
   // need. Text before it is cut from `matchable` for good.
@@ -583,95 +640,6 @@ export function parseInlineMarkdown(text: string): RichText {
       content = richConcat(content, richFromPlainText(pending));
       pending = '';
     }
-  };
-
-  /**
-   * The match a code span makes once its closing fence is in, or `null`.
-   *
-   * Found by `codeSpanFinder` rather than by a rule, so the only
-   * question left is one every rule answers: whether the opening fence is
-   * still in reach. Whether the span sits in a link destination was settled at
-   * its opening fence, where a run inside one opens nothing at all.
-   */
-  const codeSpanMatch = (span: CodeSpan, start: number): InlineRuleMatch | null => {
-    const end = matchable.length;
-
-    if (start < 0 || end - start > INLINE_SPAN_LIMIT) {
-      return null;
-    }
-
-    // One space comes off each end when both have one and the content is not
-    // all spaces -- the padding the writer adds around a backtick at an end.
-    const from = span.open + span.fence;
-    const padded =
-      span.close - from >= 2 &&
-      text[from] === ' ' &&
-      text[span.close - 1] === ' ' &&
-      /[^ ]/.test(text.slice(from, span.close));
-    const delimiter = span.fence + (padded ? 1 : 0);
-
-    return {
-      start,
-      end,
-      openLength: delimiter,
-      closeLength: delimiter,
-      mark: 'code',
-    };
-  };
-
-  /**
-   * A link destination as the URL it spells, from its offsets in `matchable`.
-   *
-   * The projection holds a placeholder for each escaped character, and the
-   * content holds the character itself, offset for offset. A backslash still in
-   * the projection escaped nothing the projection hides, but CommonMark lets it
-   * escape any ASCII punctuation, so in a destination it does.
-   */
-  const destination = (from: number, to: number): string => {
-    let literal: string | undefined;
-    let out = '';
-
-    for (let at = from; at < to; at += 1) {
-      const char = matchable[at]!;
-      const next = matchable[at + 1];
-
-      if (char === ESCAPED) {
-        // Read in place, never by folding `pending` into the runs: this is
-        // asked of every link candidate, including the ones `sanitizeUrl` then
-        // refuses, and a flush per candidate kept `pending` empty, which is the
-        // one thing `retire` folds. On a line of `[a](x\`)` -- the writer's own
-        // spelling -- nothing ever fired, `content` grew to the line, and every
-        // candidate joined it afresh: quadratic.
-        if (literal === undefined) {
-          const pendingFrom = matchable.length - pending.length;
-
-          if (from >= pendingFrom) {
-            literal = pending.slice(from - pendingFrom);
-          } else {
-            recall(from);
-            literal =
-              content
-                .map((run) => run.text)
-                .join('')
-                .slice(from - base) + pending;
-          }
-        }
-
-        out += literal[at - from] ?? '';
-      } else if (
-        char === '\\' &&
-        at + 1 < to &&
-        next !== undefined &&
-        ASCII_PUNCTUATION.test(next)
-      ) {
-        out += next;
-        at += 1;
-      } else {
-        out += char;
-      }
-    }
-
-    return out;
   };
 
   /**
@@ -781,6 +749,34 @@ export function parseInlineMarkdown(text: string): RichText {
 
     const open = opens[openFrom];
     const barrier = open === undefined ? matchable.length : open - origin - 1;
+
+    // A line with no finished span has nothing parked, so nothing below could
+    // be cut and `matchable` grew to the whole line -- a rope flattened for
+    // every closing character, which made one long line quadratic. Parking all
+    // but the last window is layout as much as `park` is (the cut below still
+    // stops at the barrier, and a rule never looks further back than the
+    // window), and only done once it is twice the window, so each cut pays for
+    // itself.
+    if (recallable === 0 && matchable.length > 2 * window) {
+      const target = matchable.length - window - base;
+
+      if (target > 0) {
+        flush();
+        const [front, back] = richSplit(content, target);
+
+        for (const run of front) {
+          done.push(run);
+          recallable += 1;
+          base += run.text.length;
+        }
+
+        content = back;
+      }
+    }
+
+    if (recallable === 0) {
+      return;
+    }
     let cut = 0;
 
     while (recallable > 0) {
@@ -794,31 +790,6 @@ export function parseInlineMarkdown(text: string): RichText {
       recallable -= 1;
     }
 
-    // Nothing parked is left to cut, but the text no rule has fired over is
-    // still all in `matchable`: `content` and `pending` are folded only where
-    // a rule fires, so on a long line where none does -- `*b ` repeated, every
-    // `*` a closer and none of them closing -- `matchable` grew to the whole
-    // line, and each closer's test sliced it afresh. `'*b '.repeat(80000)`
-    // took 4.4 seconds. So once it is twice the window, everything behind the
-    // barrier is folded straight into `done`, keeping a full window: what the
-    // rules can see is exactly what they saw before. (A delimiter still in
-    // reach is inside that window anyway; the barrier is the same rule the
-    // parked cut obeys, stated where it applies.)
-    if (recallable === 0 && matchable.length - cut > 2 * window) {
-      const limit = Math.min(barrier, matchable.length - window);
-      // With nothing parked, `content` starts at `cut` and `pending` follows it.
-      const folded = limit - (matchable.length - pending.length);
-
-      if (folded > 0) {
-        done.push(...content, ...richFromPlainText(pending.slice(0, folded)));
-        content = [];
-        pending = pending.slice(folded);
-        // As though the folded text had been parked and cut with the rest.
-        base = limit;
-        cut = limit;
-      }
-    }
-
     if (cut > 0) {
       matchable = matchable.slice(cut);
       base -= cut;
@@ -830,60 +801,40 @@ export function parseInlineMarkdown(text: string): RichText {
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index] ?? '';
     const next = text[index + 1];
-
-    if (span === null && char === '`' && index >= literalUntil && findSpan) {
-      let fence = 1;
-
-      while (text[index + fence] === '`') {
-        fence += 1;
-      }
-
-      // Asked with the projection as it stands before this run, so the walk
-      // back from the caret starts at the character in front of it. A line
-      // whose rest closes no destination here cannot hold one, which spares
-      // the walk for nearly every run.
-      const ahead = aheadAt(index);
-      const inDestination =
-        (ahead.plainCloses === true || ahead.angledCloses === true) &&
-        insideLinkDestination(matchable, matchable.length, ahead);
-
-      span = findSpan(index, fence, !inDestination);
-
-      if (span === null) {
-        literalUntil = index + fence;
-      }
-    }
-
-    const inSpan = span !== null;
     let literal = char;
     let projected = char;
 
-    if (inSpan) {
-      // Inside a code span nothing is markup, a backslash included: every
-      // character is content, and none of it is visible to the rules. Spaces
-      // are, since they are what ends a plain destination the span may sit in.
-      projected = /\s/.test(char) ? char : ESCAPED;
-    } else if (char === '\\' && next !== undefined && ESCAPABLE.test(next)) {
-      // A backslash makes the next character literal: it goes into the content
-      // but never into the string rules are matched against.
+    // A backslash makes the next character literal: it goes into the content
+    // but never into the string rules are matched against.
+    if (char === '\\' && next !== undefined && ESCAPABLE.test(next)) {
       index += 1;
       literal = next;
       projected = ESCAPED;
-    } else if (char === '`') {
-      // A backtick no span claimed is a literal one, which no rule may pair
-      // differently: `` ``a` `` is not code in CommonMark.
-      projected = ESCAPED;
+    } else if (char === '&' && decodable.length > 0) {
+      // Visited in order, so the span lookup is a pointer that only moves on.
+      while (span < decodable.length && decodable[span]![1] <= index) {
+        span += 1;
+      }
+
+      const reference =
+        span < decodable.length && decodable[span]![0] <= index
+          ? NUMERIC_REFERENCE.exec(text.slice(index, index + 12))
+          : null;
+      const decoded = reference ? decodeReference(reference) : null;
+
+      // A decoded reference is text, never a delimiter -- the same opacity an
+      // escape gets, one placeholder per UTF-16 unit so offsets stay aligned.
+      if (reference && decoded !== null) {
+        index += reference[0].length - 1;
+        literal = decoded;
+        projected = ESCAPED.repeat(decoded.length);
+      }
     }
 
     pending += literal;
     matchable += projected;
 
-    if (span !== null && index === span.open) {
-      // Held open like any other delimiter, so nothing cuts it off before its
-      // closing fence arrives.
-      codeOpen = origin + matchable.length - 1;
-      opens.push(codeOpen);
-    } else if (OPENERS.has(projected)) {
+    if (OPENERS.has(projected)) {
       opens.push(origin + matchable.length - 1);
     }
 
@@ -891,24 +842,14 @@ export function parseInlineMarkdown(text: string): RichText {
       retire();
     }
 
-    let match: InlineRuleMatch | null;
-
-    if (span !== null) {
-      if (index !== span.close + span.fence - 1) {
-        continue;
-      }
-
-      const closed = span;
-
-      span = null;
-      match = codeSpanMatch(closed, codeOpen - origin);
-    } else {
-      if (!CLOSERS.has(projected)) {
-        continue;
-      }
-
-      match = matchInlineRuleAhead(matchable, { ...aheadAt(index + 1), destination });
+    if (!CLOSERS.has(projected)) {
+      continue;
     }
+
+    const match = matchInlineRule(matchable, {
+      projection: true,
+      ahead: ahead?.(index + 1),
+    });
 
     if (!match) {
       continue;
@@ -933,6 +874,29 @@ export function parseInlineMarkdown(text: string): RichText {
     // `content` before its offsets mean anything there.
     recall(match.start);
 
+    // The rule read the destination off the projection, where an escaped
+    // character is a placeholder: `[x](https://a.test/a\_b)` linked to
+    // `a%00b`. The content holds what the escape stands for, which is how
+    // CommonMark reads a destination, so the href is taken from there -- and
+    // only now, with the whole span recalled: a destination can hold more
+    // finished code spans than are kept to hand, and read any earlier it was
+    // whatever tail was left, which could name another host.
+    let link = match.link;
+
+    if (link !== undefined && matchable.slice(innerEnd, match.end).includes(ESCAPED)) {
+      const closing = richToPlainText(content).slice(innerEnd - base, match.end - base);
+      const href = sanitizeUrl(
+        closing.startsWith('](<') ? closing.slice(3, -2) : closing.slice(2, -1),
+      );
+
+      // Nothing has been changed yet: flushing and recalling only move runs.
+      if (!href) {
+        continue;
+      }
+
+      link = href;
+    }
+
     // Strip the closing delimiter first, so the opening offsets stay valid —
     // and apply the identical splice to the projection to keep them aligned.
     content = richDelete(content, innerEnd - base, match.end - base);
@@ -945,8 +909,8 @@ export function parseInlineMarkdown(text: string): RichText {
     const start = match.start - base;
     const end = start + (innerEnd - innerStart);
 
-    if (match.link) {
-      content = richSetLink(content, start, end, match.link);
+    if (link !== undefined) {
+      content = richSetLink(content, start, end, link);
     } else if (match.mark) {
       content = richSetMark(content, start, end, match.mark, true);
     }
@@ -960,75 +924,66 @@ export function parseInlineMarkdown(text: string): RichText {
   return done.length > 0 ? richConcat(done, content) : content;
 }
 
-/**
- * A numeric character reference, matched at one position only.
- *
- * Sticky, so it is tried where the previous one ended and nowhere else.
- */
-const REFERENCE_AT = /&#(\d{1,7});/y;
-
-/** `&`, which the writer encodes when text would otherwise begin `&#`. */
-const AMPERSAND = 38;
-
-/**
- * Splits off the run of references that opens a block's text, decoded.
- *
- * `toMarkdown` writes a block's leading whitespace as `&#32;`, `&#9;` and the
- * like, because bare it would be read as indentation or as the separator after
- * a marker and lost. Decoded only here, at the start of the text, and only the
- * references that writer emits there -- whitespace, line breaks included, and
- * the `&#38;` it puts in front of text that itself begins `&#` -- so a
- * reference anywhere else in the line stays the literal characters it was.
- *
- * A line break is among them because the writer spells a leading one `&#10;`:
- * as the escaped newline it is elsewhere, it was joined onto the next line and
- * trimmed off the front of it, with the spaces after it.
- */
-function decodeLeadingReferences(text: string): readonly [string, string] {
-  let lead = '';
-  let at = 0;
-
-  for (;;) {
-    REFERENCE_AT.lastIndex = at;
-    const reference = REFERENCE_AT.exec(text);
-
-    if (!reference) {
-      break;
-    }
-
-    const code = Number(reference[1]);
-    const char = code <= 0xffff ? String.fromCharCode(code) : '';
-
-    if (code !== AMPERSAND && (char === '' || !/\s/.test(char))) {
-      break;
-    }
-
-    lead += char;
-    at += reference[0].length;
-  }
-
-  return [lead, at === 0 ? text : text.slice(at)];
-}
-
-/** A block's text: its encoded leading run as literal text, then the inline rules. */
-function parseLeadAndInline(text: string): RichText {
-  const [lead, rest] = decodeLeadingReferences(text);
-
-  return lead.length === 0
-    ? parseInlineMarkdown(rest)
-    : richConcat(richFromPlainText(lead), parseInlineMarkdown(rest));
-}
-
-/** Leading whitespace as an indent level: two spaces or one tab per level. */
-function indentOf(line: string): number {
-  const leading = /^[ \t]*/.exec(line)?.[0] ?? '';
+/** Leading indentation in columns: a space is one, a tab two. */
+function columnsOf(line: string): number {
+  // A tab after spaces is not indentation: the writer indents with spaces,
+  // and `main` wrote a nested block's leading tab raw behind them, so counting
+  // it put the next child a level too shallow. (The tab is trimmed from the
+  // text, as it always was.) A line that starts with a tab is indented with
+  // tabs.
+  const leading = (line.startsWith('\t') ? /^[ \t]*/ : /^ */).exec(line)?.[0] ?? '';
   let spaces = 0;
 
   for (const char of leading) {
     spaces += char === '\t' ? 2 : 1;
   }
 
-  return Math.floor(spaces / 2);
+  return spaces;
+}
+
+/** A list item's marker, after its indentation. */
+const LIST_ITEM_START = /^\s*(?:[-*+]|\d+[.)])(?:\s|$)/;
+
+/**
+ * Reads a block's depth from its indentation, relative to the blocks above it.
+ *
+ * A line is a child of the nearest block above it whose own indentation is at
+ * least two columns less. That reads both what the writer emits now -- a child
+ * at its parent's content column, which under `1. ` is three -- and what it
+ * used to, two columns a level whatever the parent, at the same depths.
+ */
+function depthReader(): (line: string) => number {
+  const open: Array<{ readonly column: number; readonly depth: number; readonly item: boolean }> =
+    [];
+
+  return (line) => {
+    const column = columnsOf(line);
+
+    // Two columns further in -- or, under anything but a list item, a level
+    // deeper by two-columns-a-level: Markdown from `main` wrote a nested
+    // paragraph's leading space raw, so a child of one sat a column short of
+    // two more (`   b` then `    - c`). Not under a list item, whose child
+    // sits at its content column: `1. Step` / `   - a` / `    - b` is two
+    // siblings, as in CommonMark. A line indented with tabs is the exception:
+    // its column counts each tab as two, an estimate a column either way, so
+    // `\t\t- c` under `   - b` is its child although it reads a column short.
+    const tabbed = line.startsWith('\t');
+    const childOf = (parent: { readonly column: number; readonly item: boolean }): boolean =>
+      column >= parent.column + 2 ||
+      ((!parent.item || tabbed) && Math.floor(column / 2) > Math.floor(parent.column / 2));
+
+    while (open.length > 0 && !childOf(open.at(-1)!)) {
+      open.pop();
+    }
+
+    // With nothing above it to be a child of -- the first line of a pasted,
+    // indented fragment -- it is two columns a level, as it always was.
+    const parent = open.at(-1);
+    const depth = parent ? parent.depth + 1 : Math.floor(column / 2);
+    open.push({ column, depth, item: LIST_ITEM_START.test(line) });
+
+    return depth;
+  };
 }
 
 interface PrefixMatch {
@@ -1053,6 +1008,28 @@ function matchBlockPrefix(line: string): PrefixMatch | null {
   return null;
 }
 
+/**
+ * A fenced block's body, with the fence's own indentation taken off each line.
+ *
+ * The writer indents a nested code block's body as far as its fence, because
+ * under a list item a line at the margin ends the item in every other reader.
+ * Older versions wrote the body at the margin, and stripping from that would
+ * eat the code's own leading spaces -- so the indentation comes off only when
+ * every line that is not empty starts with it, which is the one shape the
+ * writer has ever produced with an indented body.
+ */
+function unindentBody(lines: readonly string[], indent: string): string {
+  // The fence's own indentation, as it is written -- spaces from this writer,
+  // a tab from editors that indent lists with tabs. The writer leaves an empty
+  // line empty and indents every other, so any line that does not start with
+  // it is older output, whose body sat at the margin.
+  if (indent !== '' && lines.every((line) => line === '' || line.startsWith(indent))) {
+    return lines.map((line) => line.slice(Math.min(indent.length, line.length))).join('\n');
+  }
+
+  return lines.join('\n');
+}
+
 /** Parses Markdown text into blocks. Returns an empty list for blank input. */
 export function blocksFromMarkdown(text: string): Block[] {
   const lines = joinSoftBreaks(text.replace(/\r\n?/g, '\n').split('\n'));
@@ -1060,8 +1037,10 @@ export function blocksFromMarkdown(text: string): Block[] {
   let fence: string[] | null = null;
   let fenceDepth = 0;
   let fenceLength = 0;
+  let fenceIndent = '';
   let table: string[] | null = null;
   let tableDepth = 0;
+  const depthOf = depthReader();
 
   const flushTable = (): void => {
     if (!table) {
@@ -1093,7 +1072,7 @@ export function blocksFromMarkdown(text: string): Block[] {
     if (fence === null && TABLE_ROW.test(trimmedStart)) {
       if (table === null) {
         table = [];
-        tableDepth = indentOf(raw);
+        tableDepth = depthOf(raw);
       }
 
       table.push(trimmedStart);
@@ -1106,7 +1085,7 @@ export function blocksFromMarkdown(text: string): Block[] {
       // Only a fence at least as long as the opening one closes the block; a
       // shorter one, or one carrying an info string, is code.
       if (closingFenceLength(trimmedStart) >= fenceLength) {
-        blocks.push(createBlock('code', fence.join('\n'), fenceDepth));
+        blocks.push(createBlock('code', unindentBody(fence, fenceIndent), fenceDepth));
         fence = null;
       } else {
         fence.push(raw);
@@ -1120,7 +1099,8 @@ export function blocksFromMarkdown(text: string): Block[] {
     if (opening?.[1]) {
       fence = [];
       fenceLength = opening[1].length;
-      fenceDepth = indentOf(raw);
+      fenceDepth = depthOf(raw);
+      fenceIndent = raw.slice(0, raw.length - trimmedStart.length);
       continue;
     }
 
@@ -1131,18 +1111,25 @@ export function blocksFromMarkdown(text: string): Block[] {
       continue;
     }
 
-    const depth = indentOf(raw);
+    const depth = depthOf(raw);
 
-    const image = IMAGE_LINE.exec(line);
+    // An image's caption follows it after a hard break, as `toMarkdown` writes
+    // it -- which every other reader shows as the picture with its caption on
+    // the line below.
+    const breakAt = line.indexOf('\n');
+    const image = IMAGE_LINE.exec(breakAt === -1 ? line : line.slice(0, breakAt));
 
-    if (image) {
+    // A plain destination's parentheses have to balance, as a link's do;
+    // `![a](b)(c)` is no image line.
+    if (image && (image[3] === undefined || balancedParens(image[3]))) {
+      // An empty destination is an image block with no picture yet -- the
+      // writer's own spelling of one. Anything else has to be a usable source.
       const destination = image[2] ?? image[3] ?? '';
-      // An empty destination is the placeholder, not an unsafe URL: it has no
-      // source to sanitize, and dropping it turned the block into `![]()` text.
-      const src = destination === '' ? '' : sanitizeImageUrl(destination);
+      const src = destination === '' ? '' : sanitizeImageUrl(stripEscapes(destination));
 
       if (src !== null) {
-        const block = createBlock('image', [], depth);
+        const caption = breakAt === -1 ? '' : line.slice(breakAt + 1);
+        const block = createBlock('image', parseInlineMarkdown(caption), depth);
         block.src = src;
         block.alt = stripEscapes(image[1] ?? '');
         blocks.push(block);
@@ -1186,7 +1173,11 @@ export function blocksFromMarkdown(text: string): Block[] {
       }
     }
 
-    const block = createBlock(type, parseLeadAndInline(rest), depth);
+    const block = createBlock(
+      type,
+      parseInlineMarkdown(type.startsWith('heading') ? breaksFromHtml(rest) : rest),
+      depth,
+    );
 
     if (type === 'todo') {
       block.checked = prefix?.checked ?? false;
@@ -1207,7 +1198,7 @@ export function blocksFromMarkdown(text: string): Block[] {
 
   // An unterminated fence still yields its content.
   if (fence && fence.length > 0) {
-    blocks.push(createBlock('code', fence.join('\n'), fenceDepth));
+    blocks.push(createBlock('code', unindentBody(fence, fenceIndent), fenceDepth));
   }
 
   return blocks;

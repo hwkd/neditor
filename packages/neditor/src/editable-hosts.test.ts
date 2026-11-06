@@ -328,3 +328,46 @@ describe('nodes the editor does not own', () => {
     expect(seen).toHaveLength(1);
   });
 });
+
+describe('moving a table keeps the caret in its cell', () => {
+  /**
+   * Found auditing F2. Cmd/Ctrl+Shift+Arrow restored the caret with
+   * `focus(block.id)`, and a block id does not name an editable host: for a
+   * table it is always cell 0:0, so moving a table from anywhere else in it
+   * threw the caret to the top-left cell.
+   */
+  test('Mod+Shift+ArrowDown on a table leaves the caret where it was', () => {
+    const editor = mount([
+      block({
+        id: 'tbl',
+        type: 'table',
+        rows: [
+          [[{ text: 'h1' }], [{ text: 'h2' }]],
+          [[{ text: 'a1' }], [{ text: 'a2' }]],
+        ],
+      }),
+      block({ id: 'after', content: [{ text: 'after' }] }),
+    ]);
+    const target = cell(editor, '1:1');
+    moveCaret(target, 1);
+
+    // At the end of the last row a plain arrow would leave the table, so the
+    // caret sits mid-cell: the modified key then moves the block.
+    const event = new KeyboardEvent('keydown', {
+      key: 'ArrowDown',
+      shiftKey: true,
+      ctrlKey: true,
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    target.dispatchEvent(event);
+
+    expect(editor.getDocument().blocks.map((b) => b.id)).toEqual(['after', 'tbl']);
+    expect(editor.getSelectionState()).toMatchObject({
+      blockId: 'tbl',
+      cell: { row: 1, column: 1 },
+      range: { start: 1, end: 1 },
+    });
+  });
+});

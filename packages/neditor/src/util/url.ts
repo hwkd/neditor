@@ -84,18 +84,14 @@ const SAFE_IMAGE_DATA =
  * `data:image/svg+xml` is deliberately excluded: an SVG can carry script, and
  * while it stays inert inside an `<img>`, the same string reaching an `<object>`
  * or a new tab would not.
- *
- * Base64 data comes back with its ASCII whitespace removed. Payloads wrapped
- * at 76 columns are common, and a browser decoding one skips that whitespace,
- * so the picture is the same -- but a newline kept in the model reached the
- * Markdown writer, which percent-encodes whitespace in a destination, and the
- * reader then refused the `%`, so the image came back as a paragraph of base64.
  */
 export function sanitizeImageUrl(input: string): string | null {
   const trimmed = input.trim();
 
+  // Line-wrapped base64 is accepted, and unwrapped: the breaks mean nothing to
+  // an `<img>`, and a source with whitespace in it has no Markdown spelling.
   if (SAFE_IMAGE_DATA.test(trimmed)) {
-    return trimmed.replaceAll(/[\t\n\f\r ]/g, '');
+    return trimmed.replace(/\s+/g, '');
   }
 
   const url = sanitizeUrl(trimmed);

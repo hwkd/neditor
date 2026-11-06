@@ -7,7 +7,8 @@
     "ready": "vp check && vp run -r test && vp run -r build",
     "dev": "vp run -r --parallel dev",
     "build": "vp run -r build",
-    "test": "vp run -r test"
+    "test": "vp run -r test",
+    "e2e": "pnpm --filter @neditor/core run build && pnpm --filter e2e run e2e"
   },
   "devDependencies": {
     "@types/node": "catalog:",

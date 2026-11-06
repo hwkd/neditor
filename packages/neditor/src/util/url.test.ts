@@ -85,6 +85,12 @@ describe('sanitizeImageUrl', () => {
     );
   });
 
+  test('line-wrapped base64 is accepted and unwrapped', () => {
+    expect(sanitizeImageUrl('data:image/png;base64,iVBORw0KGgo\n AAAA')).toBe(
+      'data:image/png;base64,iVBORw0KGgoAAAA',
+    );
+  });
+
   test('drops the whitespace a wrapped base64 payload carries', () => {
     // Base64 wrapped at 76 columns is common, and a browser decoding it skips
     // ASCII whitespace. Kept in the model, the newline was percent-encoded by

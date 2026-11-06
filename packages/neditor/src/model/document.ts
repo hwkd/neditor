@@ -1,7 +1,7 @@
 import { sanitizeImageUrl } from '../util/url.ts';
 import { createBlockId } from './ids.ts';
 import type { Mark, RichText, TextRun } from './rich-text.ts';
-import { INLINE_SPAN_LIMIT } from '../input/inline-rules.ts';
+import { BARE_URL_START, INLINE_SPAN_LIMIT } from '../input/inline-rules.ts';
 import type { TableRows } from './table.ts';
 import {
   cloneTableRows,
@@ -930,8 +930,10 @@ const INLINE_ESCAPE = /[\\`*_[\]~|<>]/g;
  * divider, and one reading `#` an empty heading, so requiring a space after the
  * marker let both through and destroyed the paragraph.
  */
-const LEADING_MARKER = /^(\s*)([#>+-])/;
-const LEADING_ORDINAL = /^(\s*)(\d+)([.)])(?=\s|$)/;
+const LEADING_MARKER = /^([#>+-])/;
+// A soft break follows as `\` + newline, which the reader rejoins before
+// testing for a prefix: `1.` then Shift+Enter came back a numbered list.
+const LEADING_ORDINAL = /^(\d+)([.)])(?=\s|$|\\\n)/;
 
 /**
  * Escapes run text for Markdown.
@@ -941,12 +943,292 @@ const LEADING_ORDINAL = /^(\s*)(\d+)([.)])(?=\s|$)/;
  * the trailing count stays unambiguous.
  */
 function escapeMarkdownText(text: string): string {
-  return text.replace(INLINE_ESCAPE, (char) => `\\${char}`).replaceAll('\n', '\\\n');
+  const urls = text.includes('_') ? bareUrls(text) : [];
+  let url = 0;
+
+  return text
+    .replace(INLINE_ESCAPE, (char, offset: number) => {
+      if (char === '_' && urls.length > 0) {
+        // Visited in order, so the lookup is a pointer that only moves on.
+        while (url < urls.length && urls[url]![1] <= offset) {
+          url += 1;
+        }
+
+        if (
+          url < urls.length &&
+          urls[url]![0] <= offset &&
+          ASCII_WORD.test(text[offset - 1] ?? '') &&
+          ASCII_WORD.test(text[offset + 1] ?? '')
+        ) {
+          return char;
+        }
+      }
+
+      return `\\${char}`;
+    })
+    .replace(REFERENCE_AMPERSAND, '\\&')
+    .replaceAll('\n', '\\\n');
 }
 
-/** Stops a paragraph that begins with `#`, `-` or `1.` becoming that block. */
+const ASCII_WORD = /[A-Za-z0-9]/;
+
+/**
+ * An absolute http(s) URL up to the first character an autolink cannot hold --
+ * or a backslash: CommonMark takes an autolink's text as it stands, but this
+ * reader resolves escapes before it looks for one, so `<http://a/c\>` never
+ * closed. The backslash is written escaped after the `>` instead. And a `|`,
+ * which inside one would still end a table cell.
+ */
+const AUTOLINKABLE = /https?:\/\/[^\s<>\\|]*/gi;
+
+/**
+ * What an autolink's text may not hold: it is plain text once the autolink
+ * closes, so a delimiter or a bracket in it could pair with one written after
+ * it -- `<https://a.test/*x>*y*` italicised the `x` out of the URL. Such a
+ * URL keeps the escaped spelling, which other readers link with the
+ * backslashes in it; nothing else does. Inside a struck run a single `~` is
+ * one too: the run's own `~~` cannot close over a body holding a tilde.
+ */
+const UNSAFE_IN_AUTOLINK = /[*`[\]]|~~/;
+const UNSAFE_IN_STRUCK_AUTOLINK = /[*`[\]~]/;
+/** Punctuation GFM leaves out of the end of a bare URL it links. */
+const TRAILING_URL_PUNCTUATION = new Set(['?', '!', '.', ',', ':', '*', '_', '~']);
+
+/**
+ * Where GFM would end a bare URL that starts at `start` and runs to `end`.
+ *
+ * It leaves trailing punctuation out, a trailing `)` that nothing in the URL
+ * opened, and an `&…;` that looks like an entity reference. Walked back from
+ * the end, with the parentheses counted once.
+ */
+function gfmUrlEnd(text: string, start: number, end: number): number {
+  let opens = 0;
+  let closes = 0;
+
+  for (let at = start; at < end; at += 1) {
+    const code = text.charCodeAt(at);
+    opens += code === 40 ? 1 : 0;
+    closes += code === 41 ? 1 : 0;
+  }
+
+  for (;;) {
+    const char = text[end - 1] ?? '';
+
+    if (TRAILING_URL_PUNCTUATION.has(char)) {
+      end -= 1;
+    } else if (char === ')' && closes > opens) {
+      end -= 1;
+      closes -= 1;
+    } else if (char === ';') {
+      let at = end - 2;
+
+      while (at > start && /[A-Za-z0-9]/.test(text[at] ?? '')) {
+        at -= 1;
+      }
+
+      if (at < end - 2 && text[at] === '&') {
+        end = at;
+      } else {
+        return end;
+      }
+    } else {
+      return end;
+    }
+  }
+}
+
+/**
+ * Escapes a run's text, writing each bare http(s) URL in it as an autolink.
+ *
+ * GFM links a bare URL up to the next whitespace or `<`, so whatever this
+ * writer put directly against one went into the link: the backslash of an
+ * escape (`https://a.test/\~x`) or of a line break, and the `&#32;` that
+ * keeps a trailing space. Inside `<…>` nothing is escaped -- CommonMark takes
+ * an autolink's text as it stands -- and the `>` ends it for every reader.
+ * The reader takes `<https://…>` back as the plain text it holds. A `www.`
+ * URL has no autolink spelling and is escaped as before.
+ */
+function escapeWithAutolinks(text: string, struck = false): string {
+  if (!/https?:\/\//i.test(text)) {
+    return escapeMarkdownText(text);
+  }
+
+  let written = '';
+  let from = 0;
+
+  for (const match of text.matchAll(AUTOLINKABLE)) {
+    const start = match.index;
+    const end = gfmUrlEnd(text, start, start + match[0].length);
+
+    // A scheme with nothing after it links nowhere, in GFM or here. And one
+    // longer than the reader's window is one it cannot close: written as an
+    // autolink it came back with its brackets, one more pair every save.
+    const unsafe = struck ? UNSAFE_IN_STRUCK_AUTOLINK : UNSAFE_IN_AUTOLINK;
+
+    if (
+      end - start <= match[0].indexOf('//') + 2 ||
+      end - start > INLINE_SPAN_LIMIT - 2 ||
+      unsafe.test(text.slice(start, end))
+    ) {
+      continue;
+    }
+
+    written += `${escapeMarkdownText(text.slice(from, start))}<${text.slice(start, end)}>`;
+    from = end;
+  }
+
+  return written + escapeMarkdownText(text.slice(from));
+}
+
+/**
+ * The `[start, end)` spans of `text` that are bare URLs, in order.
+ *
+ * GFM links a bare URL and takes a backslash as part of it, so `x\\_y` there
+ * linked to `x%5C_y` and showed the backslash. An http(s) URL is written as an
+ * autolink instead (`escapeWithAutolinks`), so this is for what is left: a
+ * `www.` URL, which has no autolink spelling. A `_` between two letters or
+ * digits cannot open or close emphasis in CommonMark, and cannot open a span in
+ * this reader either (its `_` rules refuse an opener after a word character),
+ * so that one is written bare: every `_` that could open is still escaped, and
+ * a closer with nothing to close is text. Any other `_`, and `*` and `~`, are
+ * escaped as before: CommonMark would read them as emphasis, and that is the
+ * worse failure.
+ */
+function bareUrls(text: string): Array<readonly [number, number]> {
+  if (!BARE_URL_START.test(text)) {
+    return [];
+  }
+
+  return [...text.matchAll(new RegExp(`(?:${BARE_URL_START.source})\\S*`, 'gi'))].map(
+    (match) => [match.index, match.index + match[0].length] as const,
+  );
+}
+
+/**
+ * An `&` that would begin a character reference.
+ *
+ * The reader decodes numeric references where the writer puts them, for
+ * whitespace (see {@link protectEdgeWhitespace}), and every other reader
+ * decodes named ones too -- so `&amp;` typed as text showed as `&` there. Text
+ * holding either shape is escaped so it comes back as typed; every other `&` is
+ * written bare.
+ */
+const REFERENCE_AMPERSAND = /&(?=#(?:\d+|[xX][0-9a-fA-F]+);|[a-zA-Z][a-zA-Z0-9]{0,31};)/g;
+
+/**
+ * Writes whitespace at either edge of a block's text as numeric references.
+ *
+ * Leading whitespace on a line is indentation -- depth, to this reader -- and
+ * every reader trims the rest, so written bare it was simply lost: Enter in the
+ * middle of "Alpha one" leaves " one", and a Markdown copy or save read it back
+ * as "one". A numeric reference is how CommonMark itself spells a character that
+ * must not be read as syntax, so other readers render it correctly too.
+ */
+function protectEdgeWhitespace(markdown: string): string {
+  // A newline at an edge arrives here as the soft-break marker, `\` + newline,
+  // and was lost the same way (the e2e audit's F14: Shift+Enter at the end of a
+  // block). One backslash before the newline is the marker; any before it are
+  // escaped literal backslashes, which these patterns never swallow.
+  const encode = (run: string) =>
+    run.replace(/\\\n|[^\S\n]/g, (token) =>
+      token === '\\\n' ? '&#10;' : `&#${token.codePointAt(0) ?? 32};`,
+    );
+
+  const led = markdown.replace(/^(?:\\\n|[^\S\n])+/, encode);
+
+  // The trailing run is walked back from the end rather than matched: as a
+  // pattern ending in `$` it was retried from every character of a whitespace
+  // run in the middle of the text, which is quadratic in a long one.
+  // It is looked for behind the closing tags of a run written as HTML, too. A
+  // break left there puts `</strong>` alone on the last line, which micromark
+  // takes for an HTML block: inside a list item or a quote that ended the
+  // block early and showed the backslash.
+  let end = led.length;
+
+  for (;;) {
+    const tag = MARK_CLOSERS.find((candidate) => led.endsWith(candidate, end));
+
+    if (!tag) {
+      break;
+    }
+
+    end -= tag.length;
+  }
+
+  let start = end;
+  let broken = false;
+
+  for (;;) {
+    const char = led[start - 1] ?? '';
+
+    if (char === '\n') {
+      // Always preceded by the one backslash that marks it.
+      start -= 2;
+      broken = true;
+    } else if (char !== '' && /\s/.test(char)) {
+      start -= 1;
+    } else {
+      break;
+    }
+  }
+
+  if (start === end || (end < led.length && !broken)) {
+    return led;
+  }
+
+  // Inside a tag only a break needs moving, so the spaces before the first one
+  // stay as they are: as `&#32;` against a URL they are taken into GFM's link.
+  const from = end < led.length ? led.indexOf('\\\n', start) : start;
+
+  return led.slice(0, from) + encode(led.slice(from, end)) + led.slice(end);
+}
+
+/**
+ * Stops text that begins with `#`, `-` or `1.` becoming that block.
+ *
+ * Anchored at the very start: every caller passes text that has been through
+ * `protectEdgeWhitespace`, so whitespace in front of a marker is already a
+ * reference and the marker behind it is no marker to any reader.
+ */
 function escapeLeadingMarker(text: string): string {
-  return text.replace(LEADING_ORDINAL, '$1$2\\$3').replace(LEADING_MARKER, '$1\\$2');
+  return text.replace(LEADING_ORDINAL, '$1\\$2').replace(LEADING_MARKER, '\\$1');
+}
+
+/**
+ * Escapes a run of `#` that would close an ATX heading.
+ *
+ * CommonMark 4.2: `# a #` is the heading "a" -- a trailing run of `#` after a
+ * space, or alone, is an optional closing sequence and is dropped.
+ */
+function escapeClosingSequence(text: string): string {
+  return text.replace(/(^|[ \t])(#+)$/, '$1\\$2');
+}
+
+/**
+ * Escapes a block marker at the start of each line after a soft break.
+ *
+ * This reader rejoins those lines into one block, but every other one reads a
+ * continuation line that opens with `#`, `-`, `>` or `1.` as a new heading or
+ * list -- and `---` under a line as a heading underline. Image captions follow
+ * a hard break, so the same goes for them.
+ */
+function escapeContinuations(markdown: string): string {
+  return (
+    markdown
+      .replace(/(\\\n[^\S\n]*)(\d+)([.)])(?=\s|$|\\\n)/g, '$1$2\\$3')
+      // `=` too: `===` under a line is a heading underline, as `---` is.
+      .replace(/(\\\n[^\S\n]*)([#>+=-])/g, '$1\\$2')
+      // And `:-`: a GFM delimiter row needs no pipe, so `:---` under a line
+      // makes that line a one-column table's header.
+      .replace(/(\\\n[^\S\n]*:)(?=-)/g, '$1\\')
+      // And the whitespace a line starts with, which every reader strips; the
+      // reader here decodes references at the start of a line for this.
+      .replace(
+        /(\\\n)([^\S\n]+)/g,
+        (_match, lineBreak: string, run: string) =>
+          lineBreak + run.replace(/[^\S\n]/g, (char) => `&#${char.codePointAt(0) ?? 32};`),
+      )
+  );
 }
 
 /**
@@ -954,116 +1236,42 @@ function escapeLeadingMarker(text: string): string {
  *
  * A `]` inside one closes it early and the rest leaks into the line as markup,
  * so the brackets are escaped and `blocksFromMarkdown` unescapes them back.
+ * A backtick and a `<` too: a label is inline content to other readers, so a
+ * backtick in an alt text paired with one in the caption, or `<!a` with a `>`
+ * later on the line, swallowed the `](` between them and the image was gone.
+ * For the same reason `*`, `_` and `~` would emphasise in them, and an `&`
+ * would decode an entity: GFM read alt `*a*` as `a`.
  */
-const LABEL_ESCAPE = /[\\[\]]/g;
+const LABEL_ESCAPE = /[\\[\]`<*_~&]/g;
 
 /**
- * A line break, in any of the spellings the reader splits lines on.
+ * A label is one line. An alt attribute pasted from HTML can be wrapped, and
+ * written raw the break split the image line in two: the block came back as
+ * two paragraphs. A break means a space there, so each run of breaks, with the
+ * whitespace around it, is written as one.
  *
- * Each alternative starts with a literal character, so this cannot be retried
- * from every position of a run the way a leading quantified class can.
+ * Split and trimmed rather than matched: `\s*[\r\n]+\s*` is retried from every
+ * character of a whitespace run that holds no break at all, which made an alt
+ * text of 80,000 spaces take three seconds to write.
  */
-const LABEL_BREAK = /\r\n?|\n/g;
+function oneLine(text: string): string {
+  if (!/[\r\n]/.test(text)) {
+    return text;
+  }
 
-/**
- * A label is one line, so a break in one is written as a space.
- *
- * The reader reads a document line by line, and an image or callout marker is
- * a pattern over a single line: an alt text or icon written across two of them
- * matched neither, and came back as two junk paragraphs with the image gone.
- * The break itself is not kept -- Markdown has no way to put one in a label --
- * but the block and the rest of its label are.
- */
+  const parts = text.split(/[\r\n]+/);
+  const last = parts.length - 1;
+
+  return parts
+    .map((part, index) =>
+      index === 0 ? part.trimEnd() : index === last ? part.trimStart() : part.trim(),
+    )
+    .filter((part, index) => index === 0 || index === last || part !== '')
+    .join(' ');
+}
+
 function escapeMarkdownLabel(text: string): string {
-  return text.replace(LABEL_BREAK, ' ').replace(LABEL_ESCAPE, (char) => `\\${char}`);
-}
-
-/** How {@link runToMarkdown} spells a line break: a backslash ending the line. */
-const HARD_BREAK = '\\\n';
-
-/**
- * Writes the whitespace that leads a block's text as numeric references.
- *
- * Bare, it was not text at all to the reader: on a line's own start it is
- * indentation, so `    indented` after a paragraph came back one level deep
- * with its spaces gone, and after a marker the reader -- like every Markdown
- * reader -- takes all of it as the marker's separator. `&#32;` is how
- * CommonMark itself spells a character that must not be read as syntax, so
- * other readers show the space too, and `blocksFromMarkdown` decodes exactly
- * this run back.
- *
- * A line break in that run is written `&#10;` rather than as the escaped
- * newline it is everywhere else. The reader joins an escaped newline onto the
- * next line and then trims the joined line, so a block that opened with a
- * break lost it and every space after it, and a block of nothing but a break
- * was not read at all.
- *
- * Text that already opens with `&#` has its `&` written as `&#38;`, since the
- * reader decodes references at that position and would otherwise turn a typed
- * `&#32;` into a space.
- *
- * `text` is Markdown already, so the break arrives as {@link HARD_BREAK}: a
- * literal backslash in the text was escaped to two, and cannot be mistaken
- * for one.
- */
-function protectLeadingWhitespace(text: string): string {
-  let lead = '';
-  let end = 0;
-
-  for (;;) {
-    if (text.startsWith(HARD_BREAK, end)) {
-      lead += '&#10;';
-      end += HARD_BREAK.length;
-      continue;
-    }
-
-    const char = text[end];
-
-    if (char === undefined || char === '\n' || !/\s/.test(char)) {
-      break;
-    }
-
-    lead += `&#${text.charCodeAt(end)};`;
-    end += 1;
-  }
-
-  const rest = end === 0 ? text : text.slice(end);
-
-  return lead + (rest.startsWith('&#') ? `&#38;${rest.slice(1)}` : rest);
-}
-
-/**
- * Drops the line breaks and the spaces or tabs that end a block's Markdown.
- *
- * Neither survives any reader: CommonMark strips the whitespace that ends a
- * paragraph and does not treat a backslash at its very end as a break. That
- * backslash is the worse half -- every other reader *shows* it, so a block
- * ending in a line break exported with a literal `\` on the end, and only this
- * editor's own reader, which drops it, hid that from the round trip.
- *
- * Applied after {@link protectLeadingWhitespace}, so a block of nothing but
- * whitespace has already been written as references and keeps them. Walked
- * back by hand rather than matched with a pattern ending in `$`, which would be
- * retried from every position of a long run of spaces.
- */
-function trimBlockEnd(text: string): string {
-  let end = text.length;
-
-  for (;;) {
-    if (end >= HARD_BREAK.length && text.startsWith(HARD_BREAK, end - HARD_BREAK.length)) {
-      end -= HARD_BREAK.length;
-      continue;
-    }
-
-    const char = text[end - 1];
-
-    if (char === ' ' || char === '\t') {
-      end -= 1;
-      continue;
-    }
-
-    return end === text.length ? text : text.slice(0, end);
-  }
+  return oneLine(text).replace(LABEL_ESCAPE, (char) => `\\${char}`);
 }
 
 /** Characters a destination cannot hold bare: the first `)` would close it. */
@@ -1072,51 +1280,41 @@ const DESTINATION_UNSAFE = /[()<>\s]/;
 /**
  * Writes a link or image destination.
  *
- * Anything holding a paren, a space or an angle bracket goes in angle brackets
- * rather than being backslash-escaped. A space has no escape at all, and the
- * bracketed form is the one spelling of such a URL that every reader agrees
- * on. Inside it, whitespace, `<` and `>` are percent-encoded: the form holds no
- * line break and no `<`, and a `>` would close it. The reader does resolve
- * escapes in a destination, as CommonMark does -- which is why
- * {@link linkDestinationToMarkdown} has to escape a backslash.
+ * Anything holding a paren or whitespace goes in angle brackets, where a paren
+ * needs no escape and the reader's pattern for the form can tell where the
+ * destination ends.
+ *
+ * Inside either form five things are escaped, all of which the reader takes
+ * back out of the content (`parseInlineMarkdown`): a backslash is doubled, or
+ * it and an escapable character after it are an escape (`?q=a\_b` came back as
+ * `?q=a_b`, and one ending the URL escaped the `)`); a `|` would end a table
+ * cell, in this reader and in GFM; two backticks would close a code span
+ * inside the destination (`?q=`y`` came back as `?q=y`); and an `&` that
+ * begins a reference is decoded by other readers even here, so `?a=1&amp;b`
+ * reached them as `?a=1&b`. And the `]` of a `](`, which is a link's hinge to
+ * the rules: `?q=[foo](b.ar)` was made a link of its own and lost its brackets,
+ * and after a closed `](b)` the rest of the destination read as prose, so
+ * `*x*` there was emphasised.
  */
 function destinationToMarkdown(url: string): string {
-  if (!DESTINATION_UNSAFE.test(url)) {
-    return url;
+  // A model that predates `sanitizeImageUrl` unwrapping base64 may still hold it wrapped.
+  const source = /^data:/i.test(url) ? url.replace(/\s+/g, '') : url;
+  const escaped = source
+    .replaceAll('\\', '\\\\')
+    .replaceAll('|', '\\|')
+    .replaceAll('`', '\\`')
+    .replaceAll('](', '\\](')
+    .replace(REFERENCE_AMPERSAND, '\\&');
+
+  if (!DESTINATION_UNSAFE.test(source)) {
+    return escaped;
   }
 
-  // Not a no-op for a sanitized URL. `sanitizeUrl` returns an in-page `#…` or
-  // a site-relative `/…` link as it was given, and the URL parser leaves `<`
-  // and `>` alone in a mailto: or tel: path, so `#a<b` arrives with its `<`
-  // and is written `%3C` here.
-  return `<${url.replace(/[<>\s]/g, (char) => encodeURIComponent(char))}>`;
-}
-
-/**
- * Writes a link destination: {@link destinationToMarkdown}, with every
- * backslash and every backtick escaped -- and, in a table cell, every pipe.
- *
- * A destination reads backslash escapes as CommonMark does, so a URL that kept
- * a backslash through `sanitizeUrl` -- in a query, say -- would otherwise come
- * back with it spent on the character after it. A backtick needs no escape in
- * CommonMark: a destination is parsed from the input when its `]` is reached,
- * so a backtick in it is part of the URL and opens no code span, and this
- * reader agrees. The escape is kept because it is correct and costs nothing --
- * the reader resolves it -- and a reader that pairs code spans before it finds
- * links, as this one once did, still reads the link rather than a span that
- * swallows its closing paren. A pipe in a cell would end the cell, as it would
- * anywhere else in the row; the table reader turns `\|` back into a pipe before
- * the cell is parsed. An image source is read literally by its line pattern,
- * so it is given no escapes -- only the percent-encoding of whitespace and
- * angle brackets that {@link destinationToMarkdown} applies to every
- * destination, which that pattern does not decode. That is why
- * `sanitizeImageUrl` drops the whitespace of a base64 payload: encoded here, it
- * would not read back as an image.
- */
-function linkDestinationToMarkdown(url: string, inTable: boolean): string {
-  const escaped = url.replace(/[\\`]/g, (char) => `\\${char}`);
-
-  return destinationToMarkdown(inTable ? escaped.replaceAll('|', '\\|') : escaped);
+  // `<`, `>` and whitespace would end the bracketed form or the line, so they
+  // are percent-encoded. An absolute URL that came through `sanitizeUrl` has
+  // them encoded already; a relative one (`/a b`) does not, and comes back as
+  // `/a%20b` -- the same resource, but not the same string.
+  return `<${escaped.replace(/[<>\s]/g, (char) => encodeURIComponent(char))}>`;
 }
 
 /**
@@ -1132,24 +1330,29 @@ function fenceFor(text: string): string {
 }
 
 /**
- * Delimiters applied from the innermost mark outwards.
- *
- * Code is innermost too, but it is not here: its delimiter depends on the
- * content, and is written by {@link codeSpan}.
+ * The HTML spelling of each mark, for a run a delimiter cannot express: edge
+ * whitespace or a line break, code that needs an escape, or a run whose
+ * delimiters would not be flanking where it sits (see runToMarkdown).
  */
+const MARK_TAGS: Record<Mark, string> = {
+  code: 'code',
+  bold: 'strong',
+  italic: 'em',
+  strikethrough: 's',
+  underline: 'u',
+};
+
+const MARK_CLOSERS = Object.values(MARK_TAGS).map((tag) => `</${tag}>`);
+
+/** Delimiters applied from the innermost mark outwards. */
 const MARK_DELIMITERS: ReadonlyArray<readonly [Mark, string, string]> = [
+  ['code', '`', '`'],
   ['bold', '**', '**'],
   ['italic', '*', '*'],
   ['strikethrough', '~~', '~~'],
   ['underline', '<u>', '</u>'],
 ];
 
-/**
- * Wraps a run in its Markdown delimiters.
- *
- * Surrounding whitespace is hoisted outside the delimiters, because `**bold **`
- * does not parse as emphasis in any Markdown dialect.
- */
 /**
  * The longest text a single emphasis or link span is written across.
  *
@@ -1162,133 +1365,170 @@ const MARK_DELIMITERS: ReadonlyArray<readonly [Mark, string, string]> = [
 const SAFE_SPAN = Math.floor(INLINE_SPAN_LIMIT * 0.75);
 
 /**
- * Splits at the last space at or before `SAFE_SPAN`, or nowhere if there is none.
+ * Where to cut a span that is too long: the last space or line break at or
+ * before `SAFE_SPAN`, or 0 if there is none.
  *
- * `emitted` is what the span will actually cost the reader -- the escaped text
- * plus its delimiters -- and it is what the limit applies to. Testing the raw
- * text against `SAFE_SPAN` instead split runs between 1501 and 1996 characters
- * that the reader would have read whole, putting an unmarked space into text
- * that had none.
+ * A line break too, because a long run of lines with no space in reach --
+ * paths, identifiers -- otherwise went out as one span the reader could not
+ * close, and came back as raw markup. A single unbroken token longer than the
+ * bound cannot be cut without changing the text, so it is written whole and
+ * does not round-trip. Nothing a person types looks like that.
  */
-function splitLongSpan(text: string, emitted: number): [string, string] | null {
-  if (emitted <= INLINE_SPAN_LIMIT) {
-    return null;
-  }
+function splitPoint(text: string): number {
+  return Math.max(text.lastIndexOf(' ', SAFE_SPAN), text.lastIndexOf('\n', SAFE_SPAN), 0);
+}
 
-  const at = text.lastIndexOf(' ', SAFE_SPAN);
+/** What a run is written next to, and how the block it is in handles breaks. */
+interface RunContext {
+  /** The character before the run in its block, or '' at the start. */
+  before?: string;
+  /** The character after it, or '' at the end. */
+  after?: string;
+  /** Write HTML tags whatever the text: the run's delimiters would merge with a neighbour's. */
+  tagged?: boolean;
+  /** The run is a piece already cut to length, or one that cannot be cut: do not split it. */
+  whole?: boolean;
+}
 
-  // A single unbroken token longer than the bound cannot be split without
-  // changing the text, so it is written whole and does not round-trip. Nothing
-  // a person types looks like that.
-  return at <= 0 ? null : [text.slice(0, at), text.slice(at)];
+const PUNCTUATION = /[\p{P}\p{S}]/u;
+const SPACE = /\s/u;
+
+/**
+ * Whether `*`-style delimiters around a run would open and close it.
+ *
+ * CommonMark's flanking rule, in the part that bites: a delimiter against
+ * punctuation also needs whitespace or punctuation on its outer side, so
+ * `word**(x)**` is literal asterisks there. `text` is what the delimiters
+ * enclose as written -- the caller passes a code run's backtick, or the `*` a
+ * `~~` wraps -- while `before` and `after` are the neighbouring runs' text,
+ * which is conservative on that side: the character actually written there may
+ * be another run's delimiter, punctuation, so this errs towards HTML where `**`
+ * would have done. Delimiters of two runs that touch are the caller's to catch.
+ */
+function flanks(text: string, before: string, after: string): boolean {
+  const first = text[0] ?? '';
+  const last = text.at(-1) ?? '';
+  const outside = (char: string) => char === '' || SPACE.test(char) || PUNCTUATION.test(char);
+
+  return (
+    (!PUNCTUATION.test(first) || outside(before)) && (!PUNCTUATION.test(last) || outside(after))
+  );
 }
 
 /**
- * Where the whitespace (other than newlines) at the end of `text` begins, never
- * before `floor`.
+ * Wraps a run in its Markdown delimiters.
  *
- * Walked back from the end rather than matched with `/[^\S\n]*$/`: a pattern
- * ending in `$` with no left anchor is retried from every character of a run
- * that turns out not to reach the end, so a long stretch of spaces inside a
- * run cost its length squared -- 80,000 of them took 4.6 seconds.
+ * Whitespace at the edge of a marked run stays inside the mark: it used to be
+ * written outside the delimiters, and the mark on it was lost -- invisible for
+ * bold, a visible gap in an underline, a strike, a code span or a link. `**`,
+ * `*` and `~~` cannot open or close against whitespace, and CommonMark strips a
+ * space from each side of a code span, so such a run is written as HTML tags
+ * instead (`a<strong>bold </strong>b`), which this reader reads back and any
+ * reader that allows inline HTML renders as written -- one that escapes raw
+ * HTML, as markdown-it does by default, shows the tags. (Numeric references inside `**` were tried first:
+ * `a**bold&#32;**b` is literal asterisks in CommonMark, whose closer there is
+ * not right-flanking.) A link's text holds the whitespace as it is.
  */
-function trailingWhitespaceStart(text: string, floor: number): number {
-  let start = text.length;
+function runToMarkdown(run: TextRun, context: RunContext = {}): string {
+  const marks = new Set(run.marks ?? []);
+  // Link text is not a bare URL: GFM autolinks nothing inside a link. A code
+  // run's text is not either, in a backtick span -- but one written as
+  // `<code>…</code>` is ordinary inline text to other readers, which autolink
+  // a URL in it like any other.
+  const escaped =
+    run.link === undefined
+      ? escapeWithAutolinks(run.text, marks.has('strikethrough'))
+      : escapeMarkdownText(run.text);
 
-  while (start > floor && text[start - 1] !== '\n' && /\s/.test(text[start - 1]!)) {
-    start -= 1;
-  }
-
-  return start;
-}
-
-/**
- * A code span around `text`, which is written as it is.
- *
- * CommonMark processes no backslash escapes inside a code span, so escaping
- * its content as prose put the backslashes on screen in every other reader:
- * `**bold**` as code was written `\*\*bold\*\*`. A span is delimited by
- * backtick runs instead -- one longer than any run in the content -- and a
- * fence may not touch a backtick of the content, so content that begins or
- * ends with one is padded with a space at both ends, which the reader strips.
- *
- * `blocksFromMarkdown` reads spans by the same rules, so it hands back exactly
- * this text.
- */
-function codeSpan(text: string): string {
-  let longest = 0;
-  let run = 0;
-
-  for (const char of text) {
-    run = char === '`' ? run + 1 : 0;
-    longest = Math.max(longest, run);
-  }
-
-  const fence = '`'.repeat(longest + 1);
-  const pad = text.startsWith('`') || text.endsWith('`') ? ' ' : '';
-
-  return `${fence}${pad}${text}${pad}${fence}`;
-}
-
-/**
- * @param inTable Whether the run is in a table cell, where GFM splits the row
- * on every unescaped pipe -- a code span's included -- and reads `\|` back as
- * a pipe there.
- */
-function runToMarkdown(run: TextRun, inTable = false): string {
-  // One span per line. A mark or a link is line-bounded in the reader -- every
-  // inline pattern excludes `\n`, so no rule can match a span that crosses one
-  // -- and writing `**one\<break>two**` whole therefore came back as literal
-  // asterisks sitting in the prose with the formatting gone. Reachable from
-  // Shift+Enter inside bold text, and from pasting `<b>one<br>two</b>`.
-  if (run.text.includes('\n')) {
-    return run.text
-      .split('\n')
-      .map((line) => runToMarkdown({ ...run, text: line }, inTable))
-      .join('\\\n');
-  }
-
-  const code = run.marks?.includes('code') === true;
-  // Whitespace is never escaped, so the code text hoists the same whitespace.
-  const escaped = code ? run.text : escapeMarkdownText(run.text);
-  const leading = /^[^\S\n]*/.exec(escaped)?.[0] ?? '';
-  const trailing = escaped.slice(trailingWhitespaceStart(escaped, leading.length));
-  let core = escaped.slice(leading.length, escaped.length - trailing.length);
-
-  if (core.length === 0) {
+  if (escaped.length === 0 || (marks.size === 0 && !run.link)) {
     return escaped;
   }
 
-  if (code) {
-    core = codeSpan(inTable ? core.replaceAll('|', '\\|') : core);
-  }
-
-  const marks = new Set(run.marks ?? []);
+  // HTML where a delimiter cannot say it. Emphasis cannot open or close
+  // against whitespace -- a space or a line break -- and CommonMark takes a
+  // backtick span's content literally, so a code run that needed an escape, or
+  // holds a line break (written `\` + newline), would show the backslash.
+  const edged = /^\s|\s$/.test(run.text);
+  // A reference is not one of those escapes: nothing decodes `&nbsp;` inside a
+  // backtick span, here or in CommonMark, so code about HTML stays a span.
+  const bare = marks.has('code') && !/[\n`]/.test(run.text) && !run.text.match(INLINE_ESCAPE);
+  const literalCode = !marks.has('code') || bare;
+  // Inside a link the delimiters sit against `[` and `]`, which always flank.
+  const emphasis = marks.has('bold') || marks.has('italic') || marks.has('strikethrough');
+  // Judged on what the delimiters will actually touch, which for a code run is
+  // its backtick: `**`x`**1` is literal asterisks.
+  // `~~` outside `**` or `*` touches an asterisk, and GFM holds it to the same
+  // rule: `a~~**x**~~b` is literal tildes.
+  const stacked = marks.has('strikethrough') && (marks.has('bold') || marks.has('italic'));
+  // And for any other run, what is written: an autolink's `<` is punctuation
+  // where the URL's first letter was not.
+  const inner = marks.has('code') ? '`' : stacked ? '*' : escaped;
+  const flanking =
+    !emphasis || run.link !== undefined || flanks(inner, context.before ?? '', context.after ?? '');
+  const tagged = context.tagged || edged || !literalCode || !flanking;
+  let core = bare && !tagged ? run.text : escaped;
 
   for (const [mark, open, close] of MARK_DELIMITERS) {
     if (marks.has(mark)) {
-      core = `${open}${core}${close}`;
+      core = tagged ? `<${MARK_TAGS[mark]}>${core}</${MARK_TAGS[mark]}>` : `${open}${core}${close}`;
     }
   }
 
   if (run.link) {
-    core = `[${core}](${linkDestinationToMarkdown(run.link, inTable)})`;
+    core = `[${core}](${destinationToMarkdown(run.link)})`;
   }
 
-  // And one span per readable length, for the same reason as the line split
-  // above: a span whose opening delimiter the reader cannot reach is one it
-  // leaves in the prose as literal characters. Measured on what was actually
-  // emitted rather than on the raw text, so a run only splits when it really
-  // is too long for the reader.
-  if ((run.marks?.length || run.link) && core.length > INLINE_SPAN_LIMIT) {
-    const split = splitLongSpan(run.text, core.length);
+  // And one span per readable length: a span whose opening delimiter the reader
+  // cannot reach is one it leaves in the prose as literal characters. Measured
+  // on what was actually emitted rather than on the raw text, so a run only
+  // splits when it really is too long for the reader.
+  if (core.length <= INLINE_SPAN_LIMIT || context.whole) {
+    return core;
+  }
 
-    if (split) {
-      return split.map((part) => runToMarkdown({ ...run, text: part }, inTable)).join('');
+  // Piece by piece rather than head-and-recurse: recursing on the tail escaped
+  // what was left of the run once per piece, which is quadratic in a long one.
+  // The limit applies to what is emitted -- the escaped text and its delimiters
+  // -- so a rest that might fit is written and measured; testing the raw text
+  // against `SAFE_SPAN` instead split runs the reader would have read whole.
+  const pieces: string[] = [];
+  let rest = run.text;
+  let written = core;
+
+  for (;;) {
+    if (written.length <= INLINE_SPAN_LIMIT) {
+      pieces.push(written);
+      break;
     }
+
+    const at = splitPoint(rest);
+
+    if (at === 0) {
+      pieces.push(written);
+      break;
+    }
+
+    pieces.push(runToMarkdown({ ...run, text: rest.slice(0, at) }, context));
+    rest = rest.slice(at);
+    // Escaping never shortens, so a rest longer than the limit is known to be
+    // too long without being written.
+    written =
+      rest.length > INLINE_SPAN_LIMIT && splitPoint(rest) > 0
+        ? rest
+        : runToMarkdown({ ...run, text: rest }, { ...context, whole: true });
   }
 
-  return `${leading}${core}${trailing}`;
+  return pieces.join('');
+}
+
+/**
+ * The line breaks of a block that must stay on one line -- a heading, a table
+ * cell -- as `<br>`, which every reader renders as a break and this one reads
+ * back as one. The single backslash in front of a newline is always the
+ * break's own: a literal one is doubled.
+ */
+function oneLineBreaks(markdown: string): string {
+  return markdown.replaceAll('\\\n', '<br>');
 }
 
 /** A GFM table. Row 0 is the header, which the delimiter row follows. */
@@ -1297,8 +1537,15 @@ function tableToMarkdown(block: Block, indent: string): string {
   const { columns } = tableSize(rows);
 
   // A literal pipe would end the cell, so it has to be escaped.
+  // Cells are trimmed on the way back, so their edge whitespace is protected too.
+  // A GFM row is one line, so a break inside a cell is `<br>`, which is how GFM
+  // tables spell one: written as `\` + newline it split the row in every other
+  // reader. The one backslash before a newline is always the break's own (a
+  // literal one is doubled), so it is that backslash that goes.
+  const cellToMarkdown = (cell: readonly TextRun[]): string =>
+    oneLineBreaks(protectEdgeWhitespace(richToMarkdown(cell)));
   const line = (cells: readonly RichText[]): string =>
-    `${indent}| ${cells.map((cell) => cell.map((run) => runToMarkdown(run, true)).join('')).join(' | ')} |`;
+    `${indent}| ${cells.map(cellToMarkdown).join(' | ')} |`;
 
   const divider = `${indent}| ${Array.from({ length: columns }, () => '---').join(' | ')} |`;
   const [header, ...body] = rows;
@@ -1306,22 +1553,167 @@ function tableToMarkdown(block: Block, indent: string): string {
   return header ? [line(header), divider, ...body.map(line)].join('\n') : `${indent}`;
 }
 
+/**
+ * True when `text` ends in `char` and that character is not escaped.
+ *
+ * Counted back from the end: a pattern like `(\\*)!$` retries from every
+ * backslash in a long run of them, which is quadratic.
+ */
+function endsUnescaped(text: string, char: string): boolean {
+  if (!text.endsWith(char)) {
+    return false;
+  }
+
+  let slashes = 0;
+
+  while (text.charCodeAt(text.length - 2 - slashes) === 92) {
+    slashes += 1;
+  }
+
+  return slashes % 2 === 0;
+}
+
+/** How many unescaped `*` a written run starts or ends with. */
+function asterisks(written: string, side: 'start' | 'end'): number {
+  let count = 0;
+
+  if (side === 'start') {
+    while (written[count] === '*') {
+      count += 1;
+    }
+
+    return count;
+  }
+
+  while (written[written.length - 1 - count] === '*') {
+    count += 1;
+  }
+
+  // The first of them is text if the run before it is an escape.
+  return count > 0 && !endsUnescaped(written.slice(0, written.length - count + 1), '*')
+    ? count - 1
+    : count;
+}
+
+/** CommonMark's rule of three, for two delimiter runs that can each open and close. */
+function unpairable(left: number, right: number): boolean {
+  return (left + right) % 3 === 0 && (left % 3 !== 0 || right % 3 !== 0);
+}
+
+/** The character a run's delimiters sit against on one side: a code run's is its backtick. */
+function innerEdge(run: TextRun | undefined, side: 'first' | 'last'): string {
+  if (!run) {
+    return '';
+  }
+
+  return run.marks?.includes('code')
+    ? '`'
+    : ((side === 'first' ? run.text[0] : run.text.at(-1)) ?? '');
+}
+
 export function richToMarkdown(content: readonly TextRun[]): string {
-  return content.map((run) => runToMarkdown(run)).join('');
+  // A carriage return is a line break to every reader, this one included:
+  // written raw it split the block in two, and took a table apart row by row.
+  // It is written as the break it is read as.
+  if (content.some((run) => run.text.includes('\r'))) {
+    return richToMarkdown(
+      content.map((run) => ({ ...run, text: run.text.replace(/\r\n?/g, '\n') })),
+    );
+  }
+
+  let previous = '';
+  const contextAt = (index: number): RunContext => ({
+    before: content[index - 1]?.text.at(-1) ?? '',
+    after: content[index + 1]?.text[0] ?? '',
+  });
+  // Each run is written once here and looked at twice: as the run after the
+  // one being decided, and then as that run itself.
+  let upcoming = content[0] ? runToMarkdown(content[0], contextAt(0)) : '';
+
+  return content
+    .map((run, index) => {
+      const context = contextAt(index);
+      const next = content[index + 1];
+      let written = upcoming;
+
+      upcoming = next ? runToMarkdown(next, contextAt(index + 1)) : '';
+
+      // `**(**` then `**`(`**` is `**(****`(`**`: the two closing and opening
+      // delimiters are one run of four to CommonMark, punctuation on both sides
+      // lets it open as well as close, and the rule of three then leaves the
+      // first span unclosed. Only measured between punctuation -- between
+      // letters a pair of runs (`**a*****b***`) resolves as written, with the
+      // two exceptions below.
+      // `~~(~~` then `~~*(*~~` needs no such condition: four tildes are not
+      // a strikethrough delimiter in GFM, whatever they stand between.
+      const touching =
+        (written.startsWith('~') && endsUnescaped(previous, '~')) ||
+        (written.startsWith('*') &&
+          endsUnescaped(previous, '*') &&
+          ((PUNCTUATION.test(innerEdge(content[index - 1], 'last')) &&
+            PUNCTUATION.test(innerEdge(run, 'first'))) ||
+            // And one pair between letters: `***a***` then `*b*`, which
+            // micromark closes as `<em><strong>a</strong>**b</em>` where
+            // commonmark.js reads it as written. The other five pairs of
+            // bold, italic and both agree in both.
+            (previous.endsWith('***') && !written.startsWith('**')) ||
+            // And one chain: `*a*` + `***b***` + `**c**` is a run of four and
+            // then a run of five, each able to open and close, and CommonMark
+            // will not pair two such runs whose lengths sum to a multiple of
+            // three unless both lengths are. commonmark.js leaves `***b***`
+            // literal; of the chains of bold, italic and both up to four runs
+            // long, the ones that fail are exactly the ones with this sum.
+            unpairable(
+              asterisks(previous, 'end') + asterisks(written, 'start'),
+              asterisks(written, 'end') + asterisks(upcoming, 'start'),
+            )));
+
+      if (touching) {
+        written = runToMarkdown(run, { ...context, tagged: true });
+      }
+
+      // `!` straight before a link makes it an image in every other reader. An
+      // even run of backslashes before it is escaped backslashes, not an escape.
+      previous =
+        content[index + 1]?.link && endsUnescaped(written, '!')
+          ? `${written.slice(0, -1)}\\!`
+          : written;
+
+      return previous;
+    })
+    .join('');
 }
 
 /** Serializes the document to Markdown. Useful for copy/paste and export. */
 export function toMarkdown(doc: NEditorDocument): string {
   const numbers = computeListNumbers(doc.blocks);
+  // Where the children of the latest block at each depth start. A child sits
+  // at its parent's content column: two spaces in for most parents, but past
+  // `1. ` -- three, or four for `10. ` -- under a numbered item, where at two
+  // every other reader ended the list and left the child outside it.
+  const columns: number[] = [];
 
   return doc.blocks
     .map((block) => {
-      const indent = '  '.repeat(block.depth);
+      let column = 0;
+
+      for (let level = 0; level < block.depth; level += 1) {
+        column = columns[level] ?? column + 2;
+      }
+
+      columns.length = block.depth;
+      columns[block.depth] =
+        column +
+        (block.type === 'numbered_list' ? String(numbers.get(block.id) ?? 1).length + 2 : 2);
+
+      const indent = ' '.repeat(column);
       // A code block is literal: its text must not be re-escaped as Markdown.
       const text =
         block.type === 'code'
-          ? blockText(block)
-          : trimBlockEnd(protectLeadingWhitespace(richToMarkdown(block.content)));
+          ? // Its carriage returns are line breaks too. One left at the end
+            // joined the newline before the closing fence into a single CRLF.
+            blockText(block).replace(/\r\n?/g, '\n')
+          : protectEdgeWhitespace(escapeContinuations(richToMarkdown(block.content)));
       // An empty block is a bare marker. The space after it is what makes the
       // marker readable, not what makes it a marker, and trailing whitespace
       // does not survive the trip back — ours trims it, and so does every other
@@ -1330,39 +1722,44 @@ export function toMarkdown(doc: NEditorDocument): string {
         body.length === 0 ? `${indent}${marker}` : `${indent}${marker} ${body}`;
 
       switch (block.type) {
-        // Only a paragraph can be mistaken for another block by its first
-        // characters; everywhere else the marker already disambiguates.
+        // To this reader only a paragraph can be mistaken for another block by
+        // its first characters. Every other reader also starts a block at a
+        // marker inside a list item or a quote (`- 1. x` is a nested list,
+        // `> # x` a heading), so their text is escaped the same way below.
         case 'paragraph':
           return `${indent}${escapeLeadingMarker(text)}`;
+        // An ATX heading is one line in every reader, so a break inside one is
+        // `<br>`, which they all render as one -- written as `\` + newline it
+        // ended the heading there, and a span across it left its delimiters on
+        // both sides. (Splitting each span at the break kept the delimiters
+        // whole but lost the break's own mark, and other readers still showed
+        // the backslash and a paragraph.)
         case 'heading1':
-          return marked('#');
+          return marked('#', escapeClosingSequence(oneLineBreaks(text)));
         case 'heading2':
-          return marked('##');
+          return marked('##', escapeClosingSequence(oneLineBreaks(text)));
         case 'heading3':
-          return marked('###');
+          return marked('###', escapeClosingSequence(oneLineBreaks(text)));
         // A bullet is the one block whose text can still be misread, because a
         // toggle is written as a bullet led by a triangle. Escaped here and
         // nowhere else: `\▾` is not an escape any CommonMark reader honours,
         // so escaping the triangle in ordinary prose would put a literal
         // backslash into everyone else's rendering of "press ▾ to expand".
         case 'bulleted_list':
-          // `^(\s*)` like the other leading-marker escapes in this file, not a
-          // bare `^`: the reader's bullet prefix eats the marker and every
-          // space after it, so a triangle behind whitespace still lands where a
-          // toggle's marker is read. Anchored tighter, `-  ▾ x` came back as a
-          // toggle with the triangle eaten.
-          // The prefix also skips an escaped line break, which is how a leading
-          // newline used to be written. Neither alternative matches anything
-          // today -- `protectLeadingWhitespace` has already written leading
-          // whitespace and breaks as references, which the toggle marker
-          // cannot be read through -- but the escape does not lean on that.
-          return marked('-', text.replace(/^((?:\\\n|\s)*)([\u25B8\u25BE])/, '$1\\$2'));
+          // Anchored at the very start: a triangle behind whitespace or a line
+          // break needs nothing, because `protectEdgeWhitespace` has already
+          // written what precedes it as references, and `- &#32;▾ x` is not a
+          // toggle to the reader. (This used to skip leading whitespace and
+          // escaped breaks itself, from before the edge was protected.)
+          return marked('-', escapeLeadingMarker(text.replace(/^([\u25B8\u25BE])/, '\\$1')));
         case 'numbered_list':
-          return marked(`${numbers.get(block.id) ?? 1}.`);
+          return marked(`${numbers.get(block.id) ?? 1}.`, escapeLeadingMarker(text));
         case 'todo':
           return marked(`- [${block.checked ? 'x' : ' '}]`);
+        // A quote whose text opens with a link labelled `!…` would read as a
+        // callout's `[!icon]`; the `!` is escaped inside the label.
         case 'quote':
-          return marked('>');
+          return marked('>', escapeLeadingMarker(text).replace(/^\[!/, '[\\!'));
         // The icon is bracketed rather than merely leading, so a quote that
         // starts with an emoji stays a quote and an icon that is not an emoji
         // still names a callout. `[` is escaped in text, so the two can never
@@ -1375,12 +1772,36 @@ export function toMarkdown(doc: NEditorDocument): string {
         case 'code': {
           const fence = fenceFor(text);
 
-          return `${indent}${fence}\n${text}\n${indent}${fence}`;
+          // The body is indented as far as the fence. Under a list item, a
+          // line at the margin ends the item in every other reader, which then
+          // saw an empty code block and the body as a paragraph outside the
+          // list. The reader strips up to the fence's indentation again.
+          const body = indent
+            ? text
+                .split('\n')
+                .map((line) => (line === '' ? line : `${indent}${line}`))
+                .join('\n')
+            : text;
+
+          return `${indent}${fence}\n${body}\n${indent}${fence}`;
         }
-        case 'image':
-          return `${indent}![${escapeMarkdownLabel(block.alt ?? '')}](${destinationToMarkdown(
+        // The caption follows after a hard break: every other reader shows the
+        // picture with the caption beneath it, and this one reads it back.
+        case 'image': {
+          const image = `${indent}![${escapeMarkdownLabel(block.alt ?? '')}](${destinationToMarkdown(
             block.src ?? '',
           )})`;
+
+          // The caption's first line follows a break too, so its marker is
+          // escaped -- and a `=` or a `:-`, as on any continuation line: `===`
+          // under the image line made the image a heading in every other
+          // reader, and `:---` made it a table header in GFM ones.
+          return text.length === 0
+            ? image
+            : `${image}\\\n${escapeLeadingMarker(text)
+                .replace(/^=/, '\\=')
+                .replace(/^:(?=-)/, ':\\')}`;
+        }
         case 'table':
           return tableToMarkdown(block, indent);
         case 'divider':

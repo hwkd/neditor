@@ -1,0 +1,57 @@
+name: E2E
+
+# Not yet a release gate (docs/e2e-test-plan.md, decision D1): this workflow
+# runs on every push and pull request but nothing depends on it. After 20
+# consecutive green runs on main with no retry used, the job moves into
+# ci.yml, which release.yml reuses, and from then on it gates every publish.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: E2E (${{ matrix.browser }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - browser: chromium
+            projects: --project=chromium --project=chromium-touch
+          - browser: firefox
+            projects: --project=firefox
+          - browser: webkit
+            projects: --project=webkit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # The suite tests the built package -- what consumers install -- so the
+      # exports map and the code-split Markdown chunk are exercised too.
+      - run: pnpm --filter @neditor/core run build
+
+      - run: pnpm --filter e2e exec playwright install --with-deps ${{ matrix.browser }}
+      - run: pnpm --filter e2e exec playwright test ${{ matrix.projects }}
+        env:
+          CI: 'true'
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report-${{ matrix.browser }}
+          path: |
+            apps/e2e/playwright-report
+            apps/e2e/test-results
+          retention-days: 14

@@ -230,34 +230,44 @@ export class SlashMenu {
       return;
     }
 
-    this.#highlight((this.#activeIndex + delta + count) % count);
+    this.#highlight((this.#activeIndex + delta + count) % count, { scroll: true });
   }
 
   /**
-   * Moves the highlight by updating the options in place.
+   * Moves the highlight on the options already in the list.
    *
-   * Rebuilding the list here is what broke the mouse: hovering an option
-   * replaced it, the pointer was then over a new element, and Chromium and
-   * WebKit answer that with another `mouseenter` -- so a resting pointer
-   * rebuilt the menu several times a second and the option under a press was
-   * gone before the release, which is a click that never happens.
+   * Never by rebuilding it. A rebuild on `mouseenter` replaced the option under
+   * a resting pointer, Chromium sent the new element a fresh `mouseenter`, and
+   * the list re-rendered continuously: a press landed on the list rather than an
+   * option, and a pixel of movement between press and release split the click
+   * across two elements, so a mouse could not pick a command at all.
+   *
+   * `scroll` is for the keyboard. A hover never scrolls the list: the option
+   * is under the pointer already, and moving the list under a still pointer is
+   * how a hover turns into a different hover.
    */
-  #highlight(index: number): void {
+  #highlight(index: number, options: { scroll: boolean }): void {
+    if (index === this.#activeIndex) {
+      return;
+    }
+
     this.#activeIndex = index;
 
     for (const [position, item] of [...this.#list.children].entries()) {
-      const element = item as HTMLElement;
       const active = position === index;
-      element.setAttribute('aria-selected', String(active));
+      item.setAttribute('aria-selected', String(active));
 
       if (active) {
-        element.dataset.active = 'true';
+        (item as HTMLElement).dataset.active = 'true';
       } else {
-        delete element.dataset.active;
+        delete (item as HTMLElement).dataset.active;
       }
     }
 
-    this.#scrollActiveIntoView();
+    if (options.scroll) {
+      this.#scrollActiveIntoView();
+    }
+
     this.#hooks.onActiveChange();
   }
 
@@ -299,9 +309,7 @@ export class SlashMenu {
       });
 
       item.addEventListener('mouseenter', () => {
-        if (index !== this.#activeIndex) {
-          this.#highlight(index);
-        }
+        this.#highlight(index, { scroll: false });
       });
 
       this.#list.append(item);
@@ -313,10 +321,11 @@ export class SlashMenu {
       positionPortal(this.#element, this.#anchor, { prefer: 'below' });
     }
 
-    // Every path that moves the highlight ends here — opening, filtering, the
-    // arrow keys, a mouse crossing an item — so this is the one place that can
-    // promise the announced option is the highlighted one. The ids exist by
-    // now, which is why it is the last thing the render does.
+    // Opening and filtering end here, and the arrow keys and a mouse crossing
+    // an item end in #highlight, which asks the same thing -- so every path
+    // that moves the highlight promises the announced option is the
+    // highlighted one. The ids exist by now, which is why it is the last thing
+    // the render does.
     this.#hooks.onActiveChange();
   }
 
