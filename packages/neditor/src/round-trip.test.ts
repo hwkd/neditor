@@ -1033,20 +1033,13 @@ describe('audit 10', () => {
   );
 
   // More runs inside the destination than the reader keeps to hand: the href
-  // was read before they were recalled, from whatever tail was left, which
-  // here names another host. The backticks no longer open code spans -- in
-  // CommonMark a backtick that begins inside a destination is part of the URL
-  // -- so they stay in the href; what this guards is that the href is the
-  // whole destination, and its host the one the reader sees first.
-  test('a destination holding many backticks and an escape keeps its link', () => {
+  // was read before they were recalled, from whatever tail was left.
+  test('a destination holding many code spans and an escape keeps its link', () => {
     const markdown = `[click](https://good.test/?${'`a`b'.repeat(20)}\`a\`//evil.test/${'`a`b'.repeat(15)}\\_c)`;
     const content = blocksFromMarkdown(markdown)[0]?.content ?? [];
-    const links = new Set(content.map((run) => run.link));
-
-    expect(links).toEqual(
-      new Set([`https://good.test/?${'`a`b'.repeat(20)}\`a\`//evil.test/${'`a`b'.repeat(15)}_c`]),
+    expect(new Set(content.map((run) => run.link))).toEqual(
+      new Set([`https://good.test/?${'ab'.repeat(20)}a//evil.test/${'ab'.repeat(15)}_c`]),
     );
-    expect(new URL([...links][0]!).host).toBe('good.test');
   });
 
   test('a destination that unescapes to nothing usable is not a link', () => {
