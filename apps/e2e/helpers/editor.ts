@@ -105,7 +105,8 @@ export class EditorPage {
       | 'link-editor'
       | 'image-editor'
       | 'icon-picker'
-      | 'table-toolbar',
+      | 'table-toolbar'
+      | 'math-editor',
   ): Locator {
     return this.scope.locator(`.neditor-portal.neditor-${name}`);
   }

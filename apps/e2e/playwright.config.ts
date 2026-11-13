@@ -1,6 +1,11 @@
 import { defineConfig, devices } from '@playwright/test';
 
 const CI = Boolean(process.env.CI);
+// Overridable together with the harness's own port (vite.config.ts): with
+// `reuseExistingServer`, a server another checkout left on the default port
+// would silently be the one under test.
+const PORT = Number(process.env.E2E_PORT ?? 4390);
+const DEMO_PORT = Number(process.env.DEMO_PORT ?? 4391);
 
 export default defineConfig({
   testDir: './tests',
@@ -13,7 +18,7 @@ export default defineConfig({
   reporter: CI ? [['list'], ['html', { open: 'never' }], ['github']] : [['list']],
   expect: { timeout: 5_000 },
   use: {
-    baseURL: 'http://localhost:4390',
+    baseURL: `http://localhost:${PORT}`,
     trace: 'retain-on-failure',
     viewport: { width: 1100, height: 800 },
   },
@@ -47,7 +52,7 @@ export default defineConfig({
   webServer: [
     {
       command: 'pnpm exec vp dev',
-      url: 'http://localhost:4390',
+      url: `http://localhost:${PORT}`,
       reuseExistingServer: !CI,
       stdout: 'ignore',
       stderr: 'pipe',
@@ -55,8 +60,32 @@ export default defineConfig({
     {
       // The Astro demo, for the smoke spec (27).
       // Not Astro's default 4321, which is often taken by another project.
-      command: 'pnpm --filter web exec astro dev --port 4391',
-      url: 'http://localhost:4391',
+      //
+      // Astro 7 detects an AI coding agent (Claude Code, Codex, ...) and then
+      // starts `astro dev` as a detached background process: the command
+      // returns as soon as that server is up, which Playwright almost always
+      // reports as "exited early", and the server outlives the run either
+      // way. ASTRO_DEV_BACKGROUND=0 is Astro's documented opt-out; Astro only
+      // asks whether the variable is non-empty, so `0` works but is not read
+      // as "off". Outside an agent the foreground is already the default, so
+      // CI is unaffected.
+      //
+      // --ignore-lock: Astro's lock is per project, not per port, so any
+      // other `astro dev` in this checkout (`vp run dev` on 4321, one an
+      // agent's preview tool left running) otherwise refuses to start this one
+      // whatever DEMO_PORT says. It also keeps this server out of the lock, so
+      // `astro dev stop` cannot kill it mid-run and a run leaves no lock
+      // behind -- and, by the same token, `astro dev status` cannot see it.
+      // Astro allows the flag only in the foreground, hence the env.
+      //
+      // DEMO_STRICT_PORT makes astro.config.mjs set Vite's strictPort: when
+      // Vite cannot bind DEMO_PORT, Astro exits with "Port ... is already in
+      // use" instead of moving to another port that Playwright does not watch.
+      // Vite binds one address, so an occupant on another address can go
+      // unnoticed (OS-dependent); the run then waits out the timeout.
+      command: `pnpm --filter web exec astro dev --port ${DEMO_PORT} --ignore-lock`,
+      env: { ASTRO_DEV_BACKGROUND: '0', DEMO_STRICT_PORT: '1' },
+      url: `http://localhost:${DEMO_PORT}`,
       reuseExistingServer: !CI,
       stdout: 'ignore',
       stderr: 'pipe',

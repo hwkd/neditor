@@ -17,7 +17,9 @@ import Layout from '../layouts/Layout.astro';
         <strong>Hover a block</strong> for its handle: click to select, drag to reorder.
         <kbd>Esc</kbd> steps up from text to the block itself. Paste Markdown or rich
         HTML and it arrives as real blocks. Inside a table, <kbd>Tab</kbd> walks the
-        cells and adds a row at the end.
+        cells and adds a row at the end. Math is TeX, drawn here by KaTeX: type
+        <code>$x^2$</code> inline or <code>$$</code> for an equation, press <kbd>⌘⇧E</kbd>,
+        and click a formula to edit it.
       </p>
     </header>
 
@@ -47,6 +49,8 @@ import Layout from '../layouts/Layout.astro';
 
 <script>
   import { createEditor, type NEditorDocument } from '@neditor/core';
+  import katex from 'katex';
+  import 'katex/dist/katex.min.css';
 
   const seed: NEditorDocument = {
     blocks: [
@@ -106,6 +110,27 @@ import Layout from '../layouts/Layout.astro';
           { text: '[text](url)', marks: ['code'] },
           { text: ' and it converts as you finish it' },
         ],
+        depth: 0,
+      },
+      { id: 'seed-20', type: 'heading2', content: [{ text: 'Math' }], depth: 0 },
+      {
+        id: 'seed-21',
+        type: 'paragraph',
+        content: [
+          { text: 'Formulas are TeX, stored as TeX: Euler wrote ' },
+          { text: '\uFFFC', math: 'e^{i\\pi} + 1 = 0' },
+          { text: ', and a circle of radius ' },
+          { text: '\uFFFC', math: 'r' },
+          { text: ' has area ' },
+          { text: '\uFFFC', math: '\\pi r^2' },
+          { text: '. Click one to edit it.' },
+        ],
+        depth: 0,
+      },
+      {
+        id: 'seed-22',
+        type: 'math',
+        content: [{ text: '\\int_{-\\infty}^{\\infty} e^{-x^2}\\,dx = \\sqrt{\\pi}' }],
         depth: 0,
       },
       { id: 'seed-7', type: 'heading2', content: [{ text: 'Next up' }], depth: 0 },
@@ -210,6 +235,11 @@ import Layout from '../layouts/Layout.astro';
       element: mount,
       doc: seed,
       autofocus: false,
+      // The package bundles no typesetter; the page brings its own. KaTeX's
+      // defaults keep \href and friends off, which matters: the TeX comes from
+      // the document, and the HTML it returns is drawn as it stands.
+      renderMath: (tex, { displayMode }) =>
+        katex.renderToString(tex, { displayMode, throwOnError: false }),
       onChange: (doc) => {
         if (markdownOut) {
           markdownOut.textContent = editor.getMarkdown();

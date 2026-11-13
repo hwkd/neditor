@@ -30,6 +30,8 @@ let counter = 0;
 const b = (over: Partial<Block>): Block =>
   ({ id: `b${++counter}`, type: 'paragraph', depth: 0, content: [], ...over }) as Block;
 const t = (text: string, extra: Record<string, unknown> = {}) => [{ text, ...extra }];
+/** One inline formula: the atom character, carrying its TeX. */
+const m = (tex: string) => ({ text: '\uFFFC', math: tex });
 
 const CORPUS: Record<string, Block[]> = {
   'plain paragraph': [b({ content: t('hello world') })],
@@ -222,6 +224,64 @@ const CORPUS: Record<string, Block[]> = {
   'long block with bold': [
     b({ content: [{ text: 'x'.repeat(2100) }, { text: 'bold', marks: ['bold'] }] }),
   ],
+
+  // Math. TeX is written between dollars exactly as it stands and read back
+  // from the source between them, so every character the writer escapes in
+  // prose has a case here inside a formula.
+  'inline formula': [b({ content: [{ text: 'Let ' }, m('x^2'), { text: ' be' }] })],
+  'formula holding Markdown punctuation': [
+    b({ content: [m('a_1 * b_2 + \\|x\\| + [0,1](y) + \\#\\&\\_ + `c` + <u>')] }),
+  ],
+  'formula holding emphasis that would close': [b({ content: [m('a*b*c + __d__ + ~~e~~')] })],
+  'formula with an escaped dollar': [b({ content: [m('\\$5 + x')] })],
+  'formula ending in a TeX line break': [b({ content: [m('a \\\\')] })],
+  'adjacent formulas': [b({ content: [m('\\alpha'), m('b')] })],
+  'formula between bold runs': [
+    b({
+      content: [{ text: 'a', marks: ['bold'] }, m('x'), { text: 'b', marks: ['bold'] }],
+    }),
+  ],
+  'formula after a literal dollar': [b({ content: [{ text: 'US$' }, m('5')] })],
+  'formula opening a heading': [
+    b({ type: 'heading2', content: [m('\\mathbb{R}'), { text: ' is' }] }),
+  ],
+  'formula in a list item': [b({ type: 'bulleted_list', content: [{ text: 'take ' }, m('n')] })],
+  'formula in an image caption': [
+    b({ type: 'image', src: 'https://a.test/x.png', alt: 'plot', content: [m('y = e^x')] }),
+  ],
+  'formulas with pipes in a table cell': [
+    b({
+      type: 'table',
+      rows: [
+        [[m('|x| + \\|y\\|')], t('h')],
+        [t('a'), [{ text: 'b ' }, m('a|b')]],
+      ],
+    }),
+  ],
+  'formula inside a link label': [
+    b({ content: [{ text: 'see ', link: 'https://a.test/' }, m('x'), { text: ' here' }] }),
+  ],
+  'text with dollars': [b({ content: t('costs $5 and $6, or $$ even, or US$') })],
+  'text that looks like a formula': [b({ content: t('$x$ and $$y$$') })],
+  'code span holding dollars': [b({ content: t('echo $HOME $x$', { marks: ['code'] }) })],
+  'display equation': [b({ type: 'math', content: t('\\int_0^1 x\\,dx') })],
+  'multi-line display equation': [
+    b({ type: 'math', content: t('\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}') }),
+  ],
+  'display equation whose rows look like a table': [
+    b({ type: 'math', content: t('| a | b |\n|---|---|') }),
+  ],
+  'display equation with edge newlines': [b({ type: 'math', content: t('\nx\n') })],
+  'empty display equation': [b({ type: 'math', content: [] })],
+  'display equation nested under a bullet': [
+    b({ type: 'bulleted_list', content: t('item') }),
+    b({ type: 'math', content: t('a\nb'), depth: 1 }),
+  ],
+  // Known failures, registered below.
+  'inline TeX holding a bare dollar': [b({ content: [m('a$b')] })],
+  'inline TeX ending in an unpaired backslash': [b({ content: [m('x\\')] })],
+  'display TeX holding a $$ line': [b({ type: 'math', content: t('a\n$$\nb') })],
+  'inline formula longer than the reader reaches': [b({ content: [m('x'.repeat(2100))] })],
 };
 
 /** Currently broken through `toMarkdown` -> `blocksFromMarkdown`. */
@@ -229,6 +289,16 @@ const KNOWN_MARKDOWN_FAILURES: Record<string, string> = {
   // Markdown has no way to express an empty paragraph: the writer emits a blank
   // line and the reader skips blank lines. The HTML path preserves them.
   'empty paragraph between': 'documented gap: Markdown cannot express an empty paragraph',
+  // Each of the next three is invalid TeX, which no `$` spelling can carry:
+  // a bare `$` ends math mode in TeX as it ends the span here, a trailing
+  // backslash escapes the closing `$`, and a `$$` line ends display math.
+  // The HTML path carries the TeX in an attribute and keeps all three.
+  'inline TeX holding a bare dollar': 'invalid TeX: a bare $ ends the formula early',
+  'inline TeX ending in an unpaired backslash': 'invalid TeX: the backslash escapes the closing $',
+  'display TeX holding a $$ line': 'invalid TeX: a $$ line closes the equation early',
+  // The reader looks back INLINE_SPAN_LIMIT characters for an opening `$`,
+  // and a formula has no other spelling to cut it into.
+  'inline formula longer than the reader reaches': 'beyond INLINE_SPAN_LIMIT, as for any span',
 };
 
 /** Currently broken through `blocksToHtml` -> `blocksFromHtml`. */
@@ -311,6 +381,7 @@ describe('round-trip coverage is not silently shrinking', () => {
       'divider',
       'image',
       'table',
+      'math',
     ]) {
       expect(covered, `no round-trip case covers "${type}"`).toContain(type);
     }

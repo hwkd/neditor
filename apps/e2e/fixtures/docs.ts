@@ -206,6 +206,25 @@ export const DOCS = {
     ],
   }),
 
+  /**
+   * Inline formulas and a display equation. `m1` reads "Area " + formula
+   * `\pi r^2` + " and " + formula `r` + " end": the formulas sit at offsets 5
+   * and 11, and the text is 15 characters long.
+   */
+  math: () => ({
+    blocks: [
+      block('m1', 'paragraph', [
+        { text: 'Area ' },
+        { text: '\uFFFC', math: '\\pi r^2' },
+        { text: ' and ' },
+        { text: '\uFFFC', math: 'r' },
+        { text: ' end' },
+      ]),
+      block('eq', 'math', 'E = mc^2'),
+      p('p2', 'After'),
+    ],
+  }),
+
   'long-2000': () => ({
     blocks: Array.from({ length: 2000 }, (_, index) => p(`p${index}`, `Paragraph number ${index}`)),
   }),

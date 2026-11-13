@@ -25,9 +25,54 @@ export interface TextRun {
   marks?: Mark[];
   /** Already sanitized by `sanitizeUrl` before it reaches the model. */
   link?: string;
+  /**
+   * Inline math: the TeX source of one formula.
+   *
+   * A formula is an *atom*: its run's `text` is always the single character
+   * {@link MATH_ATOM}, whatever the TeX says, so a formula is one character of
+   * offset arithmetic -- a caret stands before it or after it, and no slice,
+   * mark or split can land inside it. The TeX is the whole payload; what a
+   * renderer draws for it is view-only and never read back. An atom carries no
+   * marks and no link, and never merges with a neighbour, even an identical
+   * one: `\alpha` beside `b` is two formulas, and one `\alphab` is not TeX.
+   */
+  math?: string;
 }
 
 export type RichText = TextRun[];
+
+/**
+ * The character an inline formula occupies in a block's text.
+ *
+ * U+FFFC OBJECT REPLACEMENT CHARACTER is what it is for. It is no delimiter to
+ * any inline rule, not whitespace, and not something a person types, so a rule
+ * reading the text before the caret sees a formula as one opaque symbol.
+ */
+export const MATH_ATOM = '￼';
+
+/** Whether a run is an inline formula. */
+export function isMathRun(run: TextRun | undefined): boolean {
+  return typeof run?.math === 'string';
+}
+
+/**
+ * Canonical inline TeX: one line, no edge whitespace.
+ *
+ * Inline math is written `$…$`, and that spelling can neither hold a line break
+ * nor open or close against whitespace -- so a formula that did would be one
+ * the Markdown writer could not write back. Neither means anything in TeX,
+ * where a line break is a space and space at the edge of math mode is ignored.
+ * Split and trimmed rather than matched with `\s*[\r\n]+\s*`, which is retried
+ * from every character of a long whitespace run.
+ */
+export function normalizeInlineTex(tex: string): string {
+  return (/[\r\n]/.test(tex) ? tex.split(/[\r\n]+/).join(' ') : tex).trim();
+}
+
+/** One inline formula, or nothing when the TeX is empty. */
+export function richMath(tex: string): RichText {
+  return normalizeRuns([{ text: MATH_ATOM, math: tex }]);
+}
 
 const MARK_ORDER = new Map<Mark, number>(MARKS.map((mark, index) => [mark, index]));
 
@@ -52,7 +97,15 @@ function makeRun(
   text: string,
   marks: readonly Mark[] | undefined,
   link: string | undefined,
+  math?: unknown,
 ): TextRun {
+  // A formula is its TeX and nothing else: the atom character, no marks, no
+  // link. Stored documents are untrusted, so a `math` that is not a string is
+  // no formula, and the run is read as the text it carries.
+  if (typeof math === 'string') {
+    return { text: MATH_ATOM, math: normalizeInlineTex(math) };
+  }
+
   const run: TextRun = { text };
   const sorted = sortMarks(marks ?? []);
 
@@ -81,6 +134,18 @@ export function normalizeRuns(runs: readonly TextRun[]): RichText {
   const out: RichText = [];
 
   for (const raw of runs) {
+    // A formula is one atom whatever its stored `text` says, and an empty one
+    // is nothing: there is no TeX to keep and nothing a renderer could draw.
+    if (typeof raw?.math === 'string') {
+      const atom = makeRun(MATH_ATOM, undefined, undefined, raw.math);
+
+      if (atom.math !== '') {
+        out.push(atom);
+      }
+
+      continue;
+    }
+
     if (typeof raw?.text !== 'string' || raw.text.length === 0) {
       continue;
     }
@@ -88,7 +153,7 @@ export function normalizeRuns(runs: readonly TextRun[]): RichText {
     const run = makeRun(raw.text, raw.marks, raw.link);
     const previous = out.at(-1);
 
-    if (previous && formatKey(previous) === formatKey(run)) {
+    if (previous && !isMathRun(previous) && formatKey(previous) === formatKey(run)) {
       previous.text += run.text;
       continue;
     }
@@ -103,11 +168,32 @@ export function richFromPlainText(text: string, marks?: readonly Mark[], link?: 
   return text.length === 0 ? [] : normalizeRuns([makeRun(text, marks, link)]);
 }
 
+/**
+ * The text of the content, offset for offset: each formula is one
+ * {@link MATH_ATOM}. This is what carets, input rules and slices measure.
+ */
 export function richToPlainText(content: readonly TextRun[]): string {
   let text = '';
 
   for (const run of content) {
     text += run.text;
+  }
+
+  return text;
+}
+
+/**
+ * The text a person would read off the content: each formula as `$TeX$`.
+ *
+ * Not offset-aligned with the content, so never for measuring. It is for the
+ * places that turn rich text into plain text for good -- pasting into a code
+ * block, announcing a selection.
+ */
+export function richToSourceText(content: readonly TextRun[]): string {
+  let text = '';
+
+  for (const run of content) {
+    text += isMathRun(run) ? `$${run.math}$` : run.text;
   }
 
   return text;
@@ -145,13 +231,14 @@ export function richEquals(a: readonly TextRun[], b: readonly TextRun[]): boolea
       other !== undefined &&
       run.text === other.text &&
       run.link === other.link &&
+      run.math === other.math &&
       (run.marks ?? []).join(',') === (other.marks ?? []).join(',')
     );
   });
 }
 
 export function cloneRichText(content: readonly TextRun[]): RichText {
-  return content.map((run) => makeRun(run.text, run.marks, run.link));
+  return content.map((run) => makeRun(run.text, run.marks, run.link, run.math));
 }
 
 /** Half-open slice `[start, end)` in character offsets. Clamps out-of-range. */
@@ -184,7 +271,7 @@ export function richSlice(content: readonly TextRun[], start: number, end: numbe
     const sliceEnd = Math.min(run.text.length, to - runStart);
 
     if (sliceEnd > sliceStart) {
-      out.push(makeRun(run.text.slice(sliceStart, sliceEnd), run.marks, run.link));
+      out.push(makeRun(run.text.slice(sliceStart, sliceEnd), run.marks, run.link, run.math));
     }
   }
 
@@ -229,7 +316,7 @@ function withMark(run: TextRun, mark: Mark, active: boolean): TextRun {
   const current = run.marks ?? [];
   const next = active ? [...current, mark] : current.filter((existing) => existing !== mark);
 
-  return makeRun(run.text, next, run.link);
+  return makeRun(run.text, next, run.link, run.math);
 }
 
 /** Adds or removes a mark across `[start, end)`. */
@@ -285,14 +372,19 @@ export function richSetLink(
 
   return richConcat(
     richSlice(content, 0, start),
-    richSlice(content, start, end).map((run) => makeRun(run.text, run.marks, href ?? undefined)),
+    richSlice(content, start, end).map((run) =>
+      makeRun(run.text, run.marks, href ?? undefined, run.math),
+    ),
     richSlice(content, end, total),
   );
 }
 
 /** Marks carried by every character in `[start, end)`. Empty for an empty range. */
 export function richActiveMarks(content: readonly TextRun[], start: number, end: number): Mark[] {
-  const runs = richSlice(content, start, end);
+  // A formula carries no marks, so counting one would make every range holding
+  // a formula read as unformatted: bolding "a $x$ b" twice bolded it both
+  // times. Formatting is the text's, and a range of formulas alone has none.
+  const runs = richSlice(content, start, end).filter((run) => !isMathRun(run));
   const first = runs[0];
 
   if (!first) {
@@ -315,7 +407,8 @@ export function richActiveLink(
   start: number,
   end: number,
 ): string | null {
-  const runs = richSlice(content, start, end);
+  // Formulas carry no link, for the reason they carry no marks.
+  const runs = richSlice(content, start, end).filter((run) => !isMathRun(run));
   const first = runs[0];
 
   if (!first?.link) {

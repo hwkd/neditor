@@ -5,9 +5,12 @@ import { normalizeTableRows } from '../model/table.ts';
 import { sanitizeImageUrl, sanitizeUrl } from '../util/url.ts';
 import type { RichText } from '../model/rich-text.ts';
 import {
+  MATH_ATOM,
   richConcat,
   richDelete,
   richFromPlainText,
+  richInsert,
+  richMath,
   richSetLink,
   richSetMark,
   richSplit,
@@ -281,7 +284,7 @@ function closingFenceLength(line: string): number {
  * Every rule is anchored at the caret, so a character that ends none of them
  * cannot complete a match and the scan can skip the rules entirely.
  */
-const CLOSERS = new Set(['*', '_', '~', '`', '>', ')']);
+const CLOSERS = new Set(['*', '_', '~', '`', '>', ')', '$']);
 
 /**
  * How many runs a rule may reach back over once nothing is left open.
@@ -306,7 +309,7 @@ const RUN_WINDOW = 32;
  * the moment their rule fires, so what remains is exactly the still-open ones:
  * in ordinary prose, none at all.
  */
-const OPENERS = new Set(['*', '_', '~', '`', '<', '[']);
+const OPENERS = new Set(['*', '_', '~', '`', '<', '[', '$']);
 
 /**
  * Characters `escapeMarkdownText` protects, and which `\\` therefore makes literal.
@@ -316,7 +319,7 @@ const OPENERS = new Set(['*', '_', '~', '`', '<', '[']);
  * prose, which no other reader does; it is honoured at the one place the writer
  * emits it, the head of a bullet, and nowhere else.
  */
-const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!&=]/;
+const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!&=$]/;
 
 /**
  * A numeric character reference, which the writer uses for whitespace at the
@@ -423,6 +426,28 @@ function decodeReference(match: RegExpExecArray): string | null {
 const ESCAPED = '\u0000';
 
 /**
+ * A line that opens or closes a display equation: `$$` alone.
+ *
+ * Only alone. `$$` with TeX after it on the same line is Pandoc's spelling of
+ * an equation that ends on a later line; the writer never emits it, and taking
+ * it for a fence would swallow the lines after it whenever the closing `$$`
+ * sits at the end of a line instead of on its own.
+ */
+const MATH_FENCE = /^\$\$[ \t]*$/;
+
+function isMathFence(trimmedStart: string): boolean {
+  return MATH_FENCE.test(trimmedStart);
+}
+
+/**
+ * A display equation on one line, `$$TeX$$`, as other writers emit it.
+ *
+ * The body may not hold `$$` itself: `$$a$$ and $$b$$` is two inline-display
+ * spans in a paragraph, not one equation running from the first to the last.
+ */
+const MATH_LINE = /^\$\$((?:(?!\$\$)[^\n])+)\$\$$/;
+
+/**
  * True when a line ends in a soft break rather than a literal backslash.
  *
  * `escapeMarkdownText` doubles a literal backslash, so an odd number of
@@ -451,6 +476,10 @@ function joinSoftBreaks(lines: readonly string[]): string[] {
   // soft-broken paragraph.
   let pending: string[] = [];
   let fence = 0;
+  // A display equation's lines are TeX, where a trailing `\\` is a row
+  // break, not this writer's soft break: they pass through untouched, as a
+  // code fence's do.
+  let math = false;
 
   const flush = (): void => {
     if (pending.length > 0) {
@@ -462,6 +491,13 @@ function joinSoftBreaks(lines: readonly string[]): string[] {
 
   for (const line of lines) {
     const trimmed = line.trimStart();
+
+    if (math || (fence === 0 && isMathFence(trimmed))) {
+      math = !math || !isMathFence(trimmed);
+      flush();
+      out.push(line);
+      continue;
+    }
 
     if (fence > 0) {
       if (closingFenceLength(trimmed) >= fence) {
@@ -565,6 +601,13 @@ export function parseInlineMarkdown(text: string): RichText {
    * reach, and only waiting to be compacted away.
    */
   let opens: number[] = [];
+  /**
+   * Where each entry of `opens` stands in `text`, the raw source, index for
+   * index with it. A formula's TeX is read from the source between its
+   * dollars: the projection has already taken the backslash out of every
+   * escape in it, and TeX needs them (`$a\_b$`, `$\|x\|$`).
+   */
+  let openSources: number[] = [];
   let openFrom = 0;
   let origin = 0;
   let retired = false;
@@ -602,11 +645,30 @@ export function parseInlineMarkdown(text: string): RichText {
 
       if (open >= to) {
         opens[write] = open - (to - from);
+        openSources[write] = openSources[read]!;
         write += 1;
       }
     }
 
     opens.length = write;
+    openSources.length = write;
+  };
+
+  /** Where in the source the opening delimiter at `offset` of `matchable` is. */
+  const sourceOf = (offset: number): number => {
+    const target = offset + origin;
+
+    for (let at = opens.length - 1; at >= openFrom; at -= 1) {
+      if (opens[at] === target) {
+        return openSources[at]!;
+      }
+
+      if (opens[at]! < target) {
+        break;
+      }
+    }
+
+    return -1;
   };
 
   /**
@@ -678,6 +740,7 @@ export function parseInlineMarkdown(text: string): RichText {
     // stays the size of what is really open.
     if (openFrom > 32 && openFrom * 2 > opens.length) {
       opens = opens.slice(openFrom);
+      openSources = openSources.slice(openFrom);
       openFrom = 0;
     }
 
@@ -770,6 +833,7 @@ export function parseInlineMarkdown(text: string): RichText {
 
     if (OPENERS.has(projected)) {
       opens.push(origin + matchable.length - 1);
+      openSources.push(index);
     }
 
     if (matchable.length > window) {
@@ -789,6 +853,33 @@ export function parseInlineMarkdown(text: string): RichText {
     // The first retained character is the one place a lookbehind has nothing to
     // look at, so a span opening there is not trusted rather than guessed at.
     if (retired && match.start === 0) {
+      continue;
+    }
+
+    // A formula replaces its whole span with one atom. Its TeX is the source
+    // between the dollars, not the projection's version of it: there an escape
+    // has lost its backslash, and a rule that fired inside the span -- `*b*`
+    // in `$a*b*c$` -- has eaten its delimiters. The writer puts TeX between
+    // the dollars exactly as it stands, so this is the inverse of that.
+    if (match.math !== undefined) {
+      const open = sourceOf(match.start);
+      const formula = open === -1 ? [] : richMath(text.slice(open + 1, index));
+
+      if (formula.length === 0) {
+        continue;
+      }
+
+      flush();
+      recall(match.start);
+      content = richInsert(
+        richDelete(content, match.start - base, match.end - base),
+        match.start - base,
+        formula,
+      );
+      matchable = matchable.slice(0, match.start) + MATH_ATOM;
+      spliceOpens(match.start, match.end);
+      park();
+      retire();
       continue;
     }
 
@@ -969,6 +1060,10 @@ export function blocksFromMarkdown(text: string): Block[] {
   let fenceDepth = 0;
   let fenceLength = 0;
   let fenceIndent = '';
+  /** The lines of an open `$$` display equation, as a code fence collects its own. */
+  let math: string[] | null = null;
+  let mathDepth = 0;
+  let mathIndent = '';
   let table: string[] | null = null;
   let tableDepth = 0;
   const depthOf = depthReader();
@@ -998,6 +1093,27 @@ export function blocksFromMarkdown(text: string): Block[] {
 
   for (const raw of lines) {
     const trimmedStart = raw.trimStart();
+
+    // A display equation's lines are TeX, taken verbatim up to the closing
+    // `$$` -- a row of `|` in a matrix is no table, and `\\` is no soft break.
+    if (math) {
+      if (isMathFence(trimmedStart)) {
+        blocks.push(createBlock('math', unindentBody(math, mathIndent), mathDepth));
+        math = null;
+      } else {
+        math.push(raw);
+      }
+
+      continue;
+    }
+
+    if (fence === null && isMathFence(trimmedStart)) {
+      flushTable();
+      math = [];
+      mathDepth = depthOf(raw);
+      mathIndent = raw.slice(0, raw.length - trimmedStart.length);
+      continue;
+    }
 
     // A run of pipe-led lines is one table, not one block per line.
     if (fence === null && TABLE_ROW.test(trimmedStart)) {
@@ -1043,6 +1159,12 @@ export function blocksFromMarkdown(text: string): Block[] {
     }
 
     const depth = depthOf(raw);
+    const display = MATH_LINE.exec(line);
+
+    if (display?.[1] && display[1].trim().length > 0) {
+      blocks.push(createBlock('math', display[1].trim(), depth));
+      continue;
+    }
 
     // An image's caption follows it after a hard break, as `toMarkdown` writes
     // it -- which every other reader shows as the picture with its caption on
@@ -1130,6 +1252,12 @@ export function blocksFromMarkdown(text: string): Block[] {
   // An unterminated fence still yields its content.
   if (fence && fence.length > 0) {
     blocks.push(createBlock('code', unindentBody(fence, fenceIndent), fenceDepth));
+  }
+
+  // So does an unterminated equation -- and an empty one is still the
+  // equation someone opened, which the writer spells `$$` + `$$` anyway.
+  if (math) {
+    blocks.push(createBlock('math', unindentBody(math, mathIndent), mathDepth));
   }
 
   return blocks;

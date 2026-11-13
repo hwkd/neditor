@@ -41,6 +41,25 @@ parallel, rebuilds `@neditor/core` on change.
 | `vp -C apps/web dev`          | Run only the Astro dev server.                         |
 | `vp -C packages/neditor pack` | Build only the library.                                |
 
+The Playwright suite in `apps/e2e` serves its harness on port 4390 and the demo
+on 4391. Set `E2E_PORT` and `DEMO_PORT` to move them -- with
+`reuseExistingServer`, a server another checkout left on the default port would
+otherwise be the one under test.
+
+Playwright starts both servers and stops them when the run ends, on Ctrl+C, or
+when `--global-timeout <ms>` runs out, so bound a run with that rather than with
+`timeout`. On macOS and Linux the servers run in process groups of their own,
+so a runner killed by SIGTERM or SIGKILL (`timeout` included) can leave them
+behind, and the next run may reuse a leftover and fail. The demo server takes
+no Astro lock, so `astro dev status` cannot see one. Stop leftovers by port
+before the next run:
+
+```bash
+lsof -ti tcp:4390,4391 -sTCP:LISTEN | xargs -r kill
+```
+
+Use your `E2E_PORT` and `DEMO_PORT` instead if you set them.
+
 Vite+ owns formatting (Oxfmt), linting (Oxlint), type checking (tsgolint), testing
 (Vitest), task caching, and library builds (tsdown). Configuration lives in the
 root [`vite.config.ts`](vite.config.ts); per-package Vite/Vitest/tsdown settings
@@ -81,7 +100,8 @@ The package is a working foundation, not a finished product. Rich text
 (bold, italic, underline, strikethrough, inline code and links), the selection
 toolbar, inline and block Markdown input rules, the slash menu, nesting,
 undo/redo, block selection with drag handles, callouts, collapsible toggles,
-images, tables, and a sanitized multi-block clipboard all work. See the
+images, tables, math (TeX, drawn by a renderer such as KaTeX that the host
+passes in), and a sanitized multi-block clipboard all work. See the
 package README for the known gaps (list semantics, IME input rules, Markdown
 round-tripping of empty paragraphs). See [`packages/neditor/README.md`](packages/neditor/README.md#roadmap)
 for the full list.

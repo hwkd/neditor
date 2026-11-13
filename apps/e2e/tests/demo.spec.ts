@@ -6,7 +6,7 @@ import { expect, test } from '../helpers/test.ts';
  * run, as any web server in that config does. DEMO_URL points the spec at a
  * demo running elsewhere; if that one is unreachable, these two skip.
  */
-const DEMO_URL = process.env.DEMO_URL ?? 'http://localhost:4391/';
+const DEMO_URL = process.env.DEMO_URL ?? `http://localhost:${process.env.DEMO_PORT ?? 4391}/`;
 
 test.describe('27 · demo site smoke', () => {
   test.use({ invariants: false });
@@ -38,6 +38,7 @@ test.describe('27 · demo site smoke', () => {
         'heading1',
         'heading2',
         'image',
+        'math',
         'paragraph',
         'quote',
         'table',

@@ -5,7 +5,21 @@
 Found by the end-to-end suite (`apps/e2e`, `docs/e2e-progress.md`) and its audits. Behaviour
 that changes what you store or what other applications receive is listed first.
 
+### Added
+
+- **Math.** Inline formulas (a run carrying `math: '<TeX>'`, one atom of offset)
+  and display equations (the `math` block type), typed as `$…$` and `$$`,
+  picked from the slash menu, or opened with `Mod+Shift+E` /
+  `openMathEditor()`. The document stores TeX only; drawing it is the host's,
+  through the new `renderMath` option (KaTeX in the demo), and without one the
+  TeX is shown as source. See the README's Math section for the serialization
+  and its limits.
+
 ### Changed output
+
+- **Markdown: a `$` in text is written `\$`**, because `$…$` is now a
+  formula; and `\$` is read as a literal `$` (before, the backslash was kept).
+  Inside a backtick code span `$` is still written bare.
 
 - **Markdown (`toMarkdown`, and the `text/plain` of a block copy).**
   - Whitespace and newlines at the edge of a block's text are written as
