@@ -41,6 +41,11 @@ parallel, rebuilds `@neditor/core` on change.
 | `vp -C apps/web dev`          | Run only the Astro dev server.                         |
 | `vp -C packages/neditor pack` | Build only the library.                                |
 
+The Playwright suite in `apps/e2e` serves its harness on port 4390 and the demo
+on 4391. Set `E2E_PORT` and `DEMO_PORT` to move them -- with
+`reuseExistingServer`, a server another checkout left on the default port would
+otherwise be the one under test.
+
 Vite+ owns formatting (Oxfmt), linting (Oxlint), type checking (tsgolint), testing
 (Vitest), task caching, and library builds (tsdown). Configuration lives in the
 root [`vite.config.ts`](vite.config.ts); per-package Vite/Vitest/tsdown settings
@@ -81,7 +86,8 @@ The package is a working foundation, not a finished product. Rich text
 (bold, italic, underline, strikethrough, inline code and links), the selection
 toolbar, inline and block Markdown input rules, the slash menu, nesting,
 undo/redo, block selection with drag handles, callouts, collapsible toggles,
-images, tables, and a sanitized multi-block clipboard all work. See the
+images, tables, math (TeX, drawn by a renderer such as KaTeX that the host
+passes in), and a sanitized multi-block clipboard all work. See the
 package README for the known gaps (list semantics, IME input rules, Markdown
 round-tripping of empty paragraphs). See [`packages/neditor/README.md`](packages/neditor/README.md#roadmap)
 for the full list.

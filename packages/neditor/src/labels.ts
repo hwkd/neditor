@@ -48,6 +48,21 @@ export interface NEditorLabels {
   strikethrough: string;
   code: string;
   link: string;
+  /**
+   * The toolbar button and shortcut that turn the selection into an inline
+   * equation, and the name of the popover that edits one.
+   */
+  inlineMath: string;
+
+  /** Inline equation popover. */
+  mathTex: string;
+  mathPlaceholder: string;
+  /**
+   * Announced when a renderer rejects the TeX, and shown in place of the
+   * preview. The TeX is still kept: an equation half-typed is not an error to
+   * throw away.
+   */
+  mathError: string;
 
   /** Link and image popovers. */
   linkPlaceholder: string;
@@ -105,6 +120,8 @@ export interface NEditorLabels {
    * pseudo-element's content is not in the DOM to be translated afterwards.
    */
   codeBlockLabel: string;
+  /** The word printed in the corner of a display equation, as for a code block. */
+  mathBlockLabel: string;
 
   /** Live-region announcements. `{count}` and `{type}` are substituted. */
   blocksSelected: string;
@@ -192,6 +209,11 @@ export const DEFAULT_SLASH_COMMANDS: Record<BlockType, SlashCommandLabel> = {
     description: 'Capture a code snippet.',
     keywords: ['code', 'snippet', 'pre', 'monospace'],
   },
+  math: {
+    label: 'Equation',
+    description: 'Display a TeX equation on its own line.',
+    keywords: ['math', 'equation', 'tex', 'latex', 'katex', 'formula'],
+  },
   callout: {
     label: 'Callout',
     description: 'Make writing stand out.',
@@ -232,6 +254,7 @@ export const DEFAULT_LABELS: NEditorLabels = {
     todo: 'To-do',
     quote: 'Empty quote',
     code: 'Code',
+    math: 'TeX, e.g. E = mc^2',
     callout: 'Callout',
     toggle: 'Toggle',
     image: 'Add a caption',
@@ -252,6 +275,11 @@ export const DEFAULT_LABELS: NEditorLabels = {
   strikethrough: 'Strikethrough',
   code: 'Code',
   link: 'Link',
+  inlineMath: 'Inline equation',
+
+  mathTex: 'TeX source',
+  mathPlaceholder: 'e.g. x^2 + y^2',
+  mathError: 'This TeX could not be rendered',
 
   linkPlaceholder: 'Paste a link or type a URL',
   invalidUrl: 'That is not a URL this editor can use',
@@ -281,6 +309,7 @@ export const DEFAULT_LABELS: NEditorLabels = {
   deleteColumn: 'Delete this column',
   deleteColumnGlyph: '⤫ col',
   codeBlockLabel: 'code',
+  mathBlockLabel: 'TeX',
 
   blocksSelected: '{count} blocks selected',
   blockSelected: '1 block selected',

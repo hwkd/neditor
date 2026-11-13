@@ -69,6 +69,34 @@ A monorepo for a block-based rich-text editor, packaged as a reusable, framework
 - Floating UI is portalled to `document.body`, so it sits outside `.neditor` and does not inherit its custom properties. Use `ui/portal.ts`: it applies the `neditor-portal` class the theme tokens key off, and `positionPortal` measures the real element rather than estimating. Never call `scrollIntoView` inside a fixed portal — it scrolls the page to the portal's layout origin.
 - Styles live as a string in `src/styles.ts` and are injected at runtime. This is what lets the package work with no CSS loader. Theme through the custom properties on `.neditor`.
 
+- **A formula is an atom, and its TeX is the whole of it.** An inline formula is
+  one run, `{ text: MATH_ATOM, math: tex }`: one character of offset whatever it
+  draws, no marks, no link, never merged with a neighbour (`\alpha` beside `b`
+  is not `\alphab`). Its element is `contenteditable="false"` and carries the
+  TeX in `data-neditor-math`; `parseRichText` reads that attribute and never
+  looks inside, which is what keeps renderer output -- and any pasted math
+  markup -- out of the model. `view/selection.ts` counts the element as one
+  character; any new offset code must do the same, or every caret after a
+  formula lands hundreds of characters too far. A display equation is a `math`
+  block whose content is its TeX, literal like a code block's: `isLiteralType`
+  is the test, `contentForType` is how anything enters one.
+- **Rendering math is the host's, through `renderMath`, and its output is
+  view-only.** `@neditor/core` stays dependency-free: no typesetter is bundled,
+  and without one the TeX is drawn as source. A renderer is called with
+  untrusted TeX and its string is assigned as HTML, so the README tells hosts it
+  must be safe for any input. A display equation's picture lives outside its
+  editing host, so typing never reaches it; `Renderer.syncFromDom` redraws it,
+  because typing does not render.
+- **A formula's TeX is written raw and read from the source.** `$…$` holds TeX
+  unescaped, and `parseInlineMarkdown` takes it from the raw text between the
+  dollars (`openSources`), not from the projection, where escapes have lost
+  their backslashes and rules that fired inside the span have eaten their
+  delimiters. A `$` in prose is escaped, so the only unescaped dollars the
+  writer emits are formulas. The typing path cannot recover what an earlier
+  rule took out of the text, and that divergence is documented rather than
+  hidden. Invalid TeX the `$` spelling cannot carry is in the known-failure
+  registry; the HTML path carries it in an attribute.
+
 ## Dependency constraints
 
 - **TypeScript stays on 6.x.** `@astrojs/check` peer-depends on `^5 || ^6`.

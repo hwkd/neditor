@@ -1,6 +1,11 @@
 import { defineConfig, devices } from '@playwright/test';
 
 const CI = Boolean(process.env.CI);
+// Overridable together with the harness's own port (vite.config.ts): with
+// `reuseExistingServer`, a server another checkout left on the default port
+// would silently be the one under test.
+const PORT = Number(process.env.E2E_PORT ?? 4390);
+const DEMO_PORT = Number(process.env.DEMO_PORT ?? 4391);
 
 export default defineConfig({
   testDir: './tests',
@@ -13,7 +18,7 @@ export default defineConfig({
   reporter: CI ? [['list'], ['html', { open: 'never' }], ['github']] : [['list']],
   expect: { timeout: 5_000 },
   use: {
-    baseURL: 'http://localhost:4390',
+    baseURL: `http://localhost:${PORT}`,
     trace: 'retain-on-failure',
     viewport: { width: 1100, height: 800 },
   },
@@ -47,7 +52,7 @@ export default defineConfig({
   webServer: [
     {
       command: 'pnpm exec vp dev',
-      url: 'http://localhost:4390',
+      url: `http://localhost:${PORT}`,
       reuseExistingServer: !CI,
       stdout: 'ignore',
       stderr: 'pipe',
@@ -55,8 +60,8 @@ export default defineConfig({
     {
       // The Astro demo, for the smoke spec (27).
       // Not Astro's default 4321, which is often taken by another project.
-      command: 'pnpm --filter web exec astro dev --port 4391',
-      url: 'http://localhost:4391',
+      command: `pnpm --filter web exec astro dev --port ${DEMO_PORT}`,
+      url: `http://localhost:${DEMO_PORT}`,
       reuseExistingServer: !CI,
       stdout: 'ignore',
       stderr: 'pipe',

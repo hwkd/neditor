@@ -131,23 +131,24 @@ inlines the chunk for that path.
 
 ## Options
 
-| Option            | Type                          | Default              | Description                                                   |
-| ----------------- | ----------------------------- | -------------------- | ------------------------------------------------------------- |
-| `element`         | `HTMLElement \| string`       | —                    | Mount point, or a selector. Required.                         |
-| `doc`             | `NEditorDocument`             | one empty paragraph  | Initial content.                                              |
-| `editable`        | `boolean`                     | `true`               | Set `false` for a read-only view.                             |
-| `autofocus`       | `boolean`                     | `false`              | Focus the first block on mount.                               |
-| `injectStyles`    | `boolean`                     | `true`               | Set `false` to supply your own CSS.                           |
-| `theme`           | `'light' \| 'dark' \| 'auto'` | `'auto'`             | `auto` follows `prefers-color-scheme`.                        |
-| `toolbar`         | `boolean`                     | `true`               | Set `false` to suppress the selection toolbar.                |
-| `historyLimit`    | `number`                      | `200`                | Undo steps retained.                                          |
-| `dragHandles`     | `boolean`                     | `true`               | Set `false` to suppress the hover gutter.                     |
-| `onChange`        | `(doc) => void`               | —                    | Shorthand for `editor.on('change', …)`.                       |
-| `onError`         | `(error) => void`             | `console.error`      | Called when one of your listeners throws.                     |
-| `label`           | `string`                      | `'Rich text editor'` | Accessible name. Ignored if the element already has one.      |
-| `labels`          | `Partial<NEditorLabels>`      | English              | Accessible names, placeholders, menu entries, announcements.  |
-| `portalContainer` | `HTMLElement \| ShadowRoot`   | the mount's root     | Where toolbars and popovers are appended.                     |
-| `styleNonce`      | `string`                      | —                    | `nonce` for the injected `<style>`, for a strict `style-src`. |
+| Option            | Type                                       | Default              | Description                                                       |
+| ----------------- | ------------------------------------------ | -------------------- | ----------------------------------------------------------------- |
+| `element`         | `HTMLElement \| string`                    | —                    | Mount point, or a selector. Required.                             |
+| `doc`             | `NEditorDocument`                          | one empty paragraph  | Initial content.                                                  |
+| `editable`        | `boolean`                                  | `true`               | Set `false` for a read-only view.                                 |
+| `autofocus`       | `boolean`                                  | `false`              | Focus the first block on mount.                                   |
+| `injectStyles`    | `boolean`                                  | `true`               | Set `false` to supply your own CSS.                               |
+| `theme`           | `'light' \| 'dark' \| 'auto'`              | `'auto'`             | `auto` follows `prefers-color-scheme`.                            |
+| `toolbar`         | `boolean`                                  | `true`               | Set `false` to suppress the selection toolbar.                    |
+| `historyLimit`    | `number`                                   | `200`                | Undo steps retained.                                              |
+| `dragHandles`     | `boolean`                                  | `true`               | Set `false` to suppress the hover gutter.                         |
+| `onChange`        | `(doc) => void`                            | —                    | Shorthand for `editor.on('change', …)`.                           |
+| `onError`         | `(error) => void`                          | `console.error`      | Called when one of your listeners throws.                         |
+| `label`           | `string`                                   | `'Rich text editor'` | Accessible name. Ignored if the element already has one.          |
+| `labels`          | `Partial<NEditorLabels>`                   | English              | Accessible names, placeholders, menu entries, announcements.      |
+| `portalContainer` | `HTMLElement \| ShadowRoot`                | the mount's root     | Where toolbars and popovers are appended.                         |
+| `styleNonce`      | `string`                                   | —                    | `nonce` for the injected `<style>`, for a strict `style-src`.     |
+| `renderMath`      | `(tex, { displayMode }) => string \| Node` | —                    | Draws TeX. See [Math](#math). Without it, TeX is shown as source. |
 
 ## API
 
@@ -159,6 +160,7 @@ editor.getMarkdown(): string            // serialize to Markdown
 editor.toggleMark(mark): void           // 'bold' | 'italic' | 'underline' | …
 editor.setLink(href | null): boolean    // false if the URL is unsafe
 editor.openLinkEditor(): void
+editor.openMathEditor(): void           // edit or insert an inline formula
 editor.getSelectionState(): SelectionState | null
 
 editor.undo(): boolean                  // false when there is nothing to undo
@@ -245,7 +247,7 @@ block.
 
 These convert the moment you type the closing delimiter:
 
-`**bold**` `__bold__` `*italic*` `_italic_` `` `code` `` `~~strike~~` `[text](url)`
+`**bold**` `__bold__` `*italic*` `_italic_` `` `code` `` `~~strike~~` `[text](url)` `$TeX$`
 
 The HTML spellings the Markdown writer uses for formatting that starts or ends
 with a space convert too: `<u>underline</u>`, `<strong>`, `<em>`, `<s>` and
@@ -271,7 +273,7 @@ plain link destination may hold balanced parentheses, as CommonMark allows
 
 Typing these at the start of a paragraph converts the block:
 
-`# ` `## ` `### ` `- ` `* ` `1. ` `> ` `[] ` ` ``` ` `---`
+`# ` `## ` `### ` `- ` `* ` `1. ` `> ` `[] ` ` ``` ` `$$` `---`
 
 Both sets fire on **typing only**. A rule reads the text before the caret and
 takes it as something you have just finished typing, which a deletion leaves
@@ -475,6 +477,7 @@ one pointer per block and there is no inverse operation to get wrong.
 | `↑` / `↓` at a boundary         | Move to the previous / next block.                       |
 | `⌘`/`Ctrl` + `Shift` + `↑`/`↓`  | Move the block itself.                                   |
 | `⌘`/`Ctrl` + `Enter`            | Toggle a to-do.                                          |
+| `⌘`/`Ctrl` + `Shift` + `E`      | Insert or edit an inline equation.                       |
 | `⌘`/`Ctrl` + `Z`                | Undo.                                                    |
 | `⌘⇧Z` / `Ctrl` + `Y`            | Redo.                                                    |
 | `Escape`                        | Step up from text to the block.                          |
@@ -490,8 +493,8 @@ a `syncFromDom`, the clipboard — treats a trailing `<br>` as nothing.
 ## Block types
 
 `paragraph`, `heading1`, `heading2`, `heading3`, `bulleted_list`,
-`numbered_list`, `todo`, `quote`, `code`, `callout`, `toggle`, `image`, `table`,
-`divider`
+`numbered_list`, `todo`, `quote`, `code`, `math`, `callout`, `toggle`, `image`,
+`table`, `divider`
 
 ### Callouts and toggles
 
@@ -552,6 +555,101 @@ The grid operations are exported and pure, if you would rather drive them
 yourself: `createTableRows`, `tableInsertRow`, `tableDeleteRow`,
 `tableInsertColumn`, `tableDeleteColumn`, `tableSetCell`, `tableSize`,
 `tableStep`.
+
+## Math
+
+Math is TeX, and the document stores TeX and nothing else. There are two kinds:
+
+- An **inline formula** is one run inside any block's text:
+  `{ text: '\uFFFC', math: 'x^2' }`. It is an atom -- one character of offset,
+  whatever it draws as -- so the caret steps over it, `Backspace` deletes it
+  whole, and no formatting, link or split can land inside it. Formulas carry
+  no marks and never merge, even with an identical neighbour.
+- A **display equation** is a `math` block whose `content` is its TeX, as plain
+  text, like a code block's.
+
+`@neditor/core` has no dependencies, so it ships no typesetter. Pass one as
+`renderMath` -- with [KaTeX](https://katex.org):
+
+```js
+import katex from 'katex';
+import 'katex/dist/katex.min.css';
+
+const editor = createEditor({
+  element: '#editor',
+  renderMath: (tex, { displayMode }) =>
+    katex.renderToString(tex, { displayMode, throwOnError: false }),
+});
+```
+
+It may return an HTML string or a node. Without one, everything still works --
+formulas are typed, stored, copied and exported -- and each is shown as its TeX
+source in monospace. A renderer that throws is caught, and the TeX is shown
+instead; in an equation the preview also says `labels.mathError`.
+
+**Entering math.**
+
+- Type `$x^2$`: the closing `$` makes the formula. As in Pandoc, the opening
+  `$` needs a non-space after it and the closing one a non-space before it, so
+  `costs $5 and $6` stays prose; `$$` is never an inline delimiter, and `\$`
+  inside TeX is TeX's literal dollar.
+- Type `$$` at the start of a paragraph, or pick **Equation** in the `/` menu,
+  for a display equation. `Enter` inside one adds a line of TeX.
+- `⌘`/`Ctrl` + `Shift` + `E` (or `editor.openMathEditor()`) opens the
+  equation popover: it edits the formula beside the caret, turns selected text
+  into a formula, or inserts a new one. Clicking a formula opens it too.
+
+**Editing.** A formula's TeX is edited in its popover, with a live preview;
+`Enter` applies, `Escape` cancels, and **Remove** (or an empty field) deletes
+it. A display equation is edited in place: its TeX is an ordinary editable
+host, shown above the picture while the caret is in it. Elsewhere only the
+picture shows, and clicking it -- or arrowing into the block -- puts the caret
+back in the TeX. Every edit is one undo step, like any other.
+
+**Accessibility.** The TeX is the editable text and what assistive technology
+reads in an equation; the picture beside it is `aria-hidden`, so an equation is
+not announced twice. An inline formula is whatever your renderer draws -- KaTeX
+includes MathML for screen readers. Nothing here adds a role. Read-only, the
+popover does not open and a click on a formula does nothing.
+
+**Serialization.**
+
+|                | Inline formula                               | Display equation                                   |
+| -------------- | -------------------------------------------- | -------------------------------------------------- |
+| `toMarkdown`   | `$TeX$`                                      | `$$` line, the TeX, `$$` line                      |
+| `blocksToHtml` | `<span data-neditor-math="TeX">$TeX$</span>` | `<div data-neditor-math-block="TeX">$$TeX$$</div>` |
+
+The TeX between the dollars is written exactly as it stands, and read back from
+the source between them -- so `\_`, `\|` and `*` inside a formula survive. A
+`$` in ordinary text is written escaped, `\$`. In a table cell a `|` in TeX
+is written `\|`, as GFM requires. Pasted HTML is recognised when it names its
+TeX: KaTeX output and MathML carrying an `<annotation encoding="application/x-tex">`,
+a MathML `alttext`, and MediaWiki's math; a KaTeX display equation that is the
+whole of its paragraph becomes a `math` block.
+
+**What the renderer returns is never read back.** Every reader takes a formula's
+TeX from its attribute or annotation and skips the markup that draws it, so no
+renderer output -- and no math markup pasted from another page -- can persist in
+the document as anything but TeX. The hook is called with TeX from the document,
+which is untrusted, and a string it returns is inserted as HTML: it must produce
+safe markup for any input. KaTeX does unless you enable its `trust` option.
+
+**Limits.**
+
+- Some TeX has no Markdown spelling, and does not round-trip through
+  `toMarkdown` (HTML keeps it): a bare `$` inside a formula, a formula ending in
+  an unpaired backslash, and an equation with a line that is exactly `$$`. All
+  three are invalid TeX. So is an inline formula longer than 2,000 characters,
+  the furthest the inline reader looks back for an opening `$`.
+- Inline TeX is one line with no edge whitespace: a line break becomes a space.
+- Safari strips the `<annotation>` from HTML on the clipboard, so KaTeX copied
+  from another page there arrives as the text it drew, not as a formula.
+- Typing `$…$` is matched as the closing `$` arrives, like every inline rule:
+  another rule that fires on the way -- `*b*` in `$a*b*c$` -- has already
+  taken its delimiters out of the text when the formula closes. Pasted or loaded
+  Markdown reads the TeX from its source and keeps them.
+- One-line `$$TeX$$` from other writers is read as an equation; `$$` with TeX
+  after it that ends on a later line is not.
 
 ## Document format
 

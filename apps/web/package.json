@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "@neditor/core": "workspace:*",
-    "astro": "catalog:"
+    "astro": "catalog:",
+    "katex": "catalog:"
   },
   "devDependencies": {
     "@astrojs/check": "catalog:",

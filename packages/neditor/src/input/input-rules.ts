@@ -23,6 +23,8 @@ export const INPUT_RULES: readonly InputRule[] = [
   { pattern: /^> $/, type: 'quote' },
   { pattern: /^\[[ xX]?\] $/, type: 'todo' },
   { pattern: /^```$/, type: 'code' },
+  // The fence a display equation is written between, as a code block's is.
+  { pattern: /^\$\$$/, type: 'math' },
   { pattern: /^(?:---|\*\*\*)$/, type: 'divider' },
 ];
 

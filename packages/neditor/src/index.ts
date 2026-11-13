@@ -52,6 +52,7 @@ export {
   duplicateBlocks,
   hiddenBlockIds,
   indentBlocks,
+  isLiteralType,
   isTableType,
   moveBlocks,
   moveVisibleBlocks,
@@ -82,6 +83,8 @@ export {
 export type { Mark, RichText, TextRun } from './model/rich-text.ts';
 export {
   MARKS,
+  MATH_ATOM,
+  isMathRun,
   isRichEmpty,
   normalizeRuns,
   richActiveLink,
@@ -92,11 +95,13 @@ export {
   richFromPlainText,
   richInsert,
   richLength,
+  richMath,
   richSetLink,
   richSetMark,
   richSlice,
   richSplit,
   richToPlainText,
+  richToSourceText,
   richToggleMark,
 } from './model/rich-text.ts';
 
@@ -110,6 +115,9 @@ export type { InlineRuleMatch } from './input/inline-rules.ts';
 export { SLASH_COMMANDS, filterCommands } from './ui/slash-menu.ts';
 export type { SlashCommand } from './ui/slash-menu.ts';
 
+// Reachable through NEditorOptions.renderMath and renderRichText's options.
+export type { MathRenderOptions, MathRenderer } from './view/math.ts';
+export type { RenderOptions } from './view/rich-dom.ts';
 export {
   blocksFromHtml,
   blocksToHtml,

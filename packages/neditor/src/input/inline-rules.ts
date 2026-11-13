@@ -256,6 +256,97 @@ export interface InlineRuleMatch {
   readonly closeLength: number;
   readonly mark?: Mark;
   readonly link?: string;
+  /**
+   * An inline formula: the TeX between the dollars, as the text holds it.
+   *
+   * The span becomes one formula rather than marked text, so its delimiters
+   * are not stripped from the inner text -- the whole of `[start, end)` is
+   * replaced. The Markdown reader takes the TeX from its source instead, where
+   * an escape is still the backslash TeX needs (`$a\_b$`).
+   */
+  readonly math?: string;
+}
+
+/** `$`, by character code. */
+const DOLLAR = 36;
+/** U+FFFC, the character a finished formula occupies (see `MATH_ATOM`). */
+const ATOM = 0xfffc;
+
+/** Whether the character at `index` is escaped by an odd run of backslashes. */
+function escapedAt(text: string, index: number): boolean {
+  let slashes = 0;
+
+  while (text.charCodeAt(index - 1 - slashes) === 92) {
+    slashes += 1;
+  }
+
+  return slashes % 2 === 1;
+}
+
+/**
+ * An inline formula, `$TeX$`, that the `$` at the end of the window closes.
+ *
+ * Pandoc's rule, which GitHub and KaTeX's auto-render share in the part that
+ * matters: the opening `$` has a non-space character after it and the closing
+ * one a non-space character before it, so `costs $5 and $6` is prose. A `$`
+ * doubled is display math (`$$`), never an inline delimiter, and one escaped
+ * by a backslash is TeX's literal dollar -- `$a\$b$` is one formula.
+ *
+ * The opener is the nearest unescaped `$` behind the closer: TeX cannot hold a
+ * bare `$` (it ends math mode), so a formula can never contain one, and a
+ * nearer `$` that fails as an opener means there is no formula here at all.
+ * Walked back one character at a time and stopped at the first line break,
+ * which no inline formula crosses, so this costs the distance to that `$`.
+ *
+ * Not inside an open code span: `` `$x$` `` is code, the same precedence the
+ * autolink and tag rules give a code span. Not around a finished formula
+ * either: a formula holds TeX, not other formulas.
+ */
+function matchMath(window: string, offset: number): InlineRuleMatch | null {
+  const close = window.length - 1;
+
+  if (close < 2 || escapedAt(window, close)) {
+    return null;
+  }
+
+  const last = window.charCodeAt(close - 1);
+
+  if (last === DOLLAR || isSpace(last)) {
+    return null;
+  }
+
+  for (let at = close - 1; at >= 0; at -= 1) {
+    const code = window.charCodeAt(at);
+
+    if (code === 10 || code === 13 || code === ATOM) {
+      return null;
+    }
+
+    if (code !== DOLLAR || escapedAt(window, at)) {
+      continue;
+    }
+
+    // The cut is the one place there is nothing to look behind, so a formula
+    // opening there is not trusted -- as for every other rule.
+    if (
+      (at === 0 && offset > 0) ||
+      window.charCodeAt(at - 1) === DOLLAR ||
+      isSpace(window.charCodeAt(at + 1)) ||
+      openCodeRun(window.slice(0, at)) !== 0
+    ) {
+      return null;
+    }
+
+    return {
+      start: offset + at,
+      end: offset + window.length,
+      openLength: 1,
+      closeLength: 1,
+      math: window.slice(at + 1, close),
+    };
+  }
+
+  return null;
 }
 
 /**
@@ -402,6 +493,13 @@ export function matchInlineRule(
   // span cannot close inside a destination we wrote.
   const inDestination = inOpenDestination(window);
   const inAutolink = inOpenAutolink(window);
+
+  // A `$` closes nothing but a formula, and nothing closes inside a link
+  // destination or an autolink but the link itself or a code span: a URL may
+  // hold dollars (`?price=$5$`), and they are its characters.
+  if (closer === '$') {
+    return inDestination || inAutolink ? null : matchMath(window, offset);
+  }
 
   for (const rule of INLINE_RULES) {
     if (inDestination && !rule.isLink && rule.mark !== 'code') {

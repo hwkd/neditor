@@ -39,6 +39,7 @@ export {
   duplicateBlocks,
   hiddenBlockIds,
   indentBlocks,
+  isLiteralType,
   isTableType,
   moveBlocks,
   moveVisibleBlocks,
@@ -70,6 +71,8 @@ export {
 export type { Mark, RichText, TextRun } from './model/rich-text.ts';
 export {
   MARKS,
+  MATH_ATOM,
+  isMathRun,
   isRichEmpty,
   normalizeRuns,
   richActiveLink,
@@ -80,11 +83,13 @@ export {
   richFromPlainText,
   richInsert,
   richLength,
+  richMath,
   richSetLink,
   richSetMark,
   richSlice,
   richSplit,
   richToPlainText,
+  richToSourceText,
   richToggleMark,
 } from './model/rich-text.ts';
 

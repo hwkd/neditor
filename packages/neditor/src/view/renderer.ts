@@ -1,11 +1,20 @@
 import type { Block, BlockType } from '../model/document.ts';
-import { DEFAULT_CALLOUT_ICON, computeListNumbers, isVoidType } from '../model/document.ts';
+import {
+  DEFAULT_CALLOUT_ICON,
+  computeListNumbers,
+  isLiteralType,
+  isVoidType,
+} from '../model/document.ts';
 import type { NEditorLabels } from '../labels.ts';
 import { asElement } from '../util/dom.ts';
 import type { TableRows } from '../model/table.ts';
 import { tableSize } from '../model/table.ts';
 import type { RichText } from '../model/rich-text.ts';
+import { richToPlainText } from '../model/rich-text.ts';
+import type { RenderOptions } from './rich-dom.ts';
 import { renderRichText } from './rich-dom.ts';
+import type { MathRenderer } from './math.ts';
+import { drawMath } from './math.ts';
 
 /**
  * The view layer.
@@ -128,13 +137,27 @@ export class Renderer {
 
   readonly #labels: NEditorLabels;
 
+  /** How rich text is drawn here: for editing, with the host's math renderer. */
+  readonly #richOptions: RenderOptions;
+  readonly #renderMath: MathRenderer | undefined;
+
+  /** The TeX each display equation's preview was last drawn from. */
+  readonly #previews = new WeakMap<HTMLElement, string>();
+
   /** This renderer's slot in `instances`, fixed for its lifetime. */
   readonly #instance: number;
 
-  constructor(root: HTMLElement, hooks: RendererHooks, labels: NEditorLabels) {
+  constructor(
+    root: HTMLElement,
+    hooks: RendererHooks,
+    labels: NEditorLabels,
+    options: { readonly renderMath?: MathRenderer } = {},
+  ) {
     this.#root = root;
     this.#hooks = hooks;
     this.#labels = labels;
+    this.#renderMath = options.renderMath;
+    this.#richOptions = { editing: true, renderMath: options.renderMath };
     instances += 1;
     this.#instance = instances;
   }
@@ -328,7 +351,8 @@ export class Renderer {
     content.className = 'neditor-block__content';
     content.contentEditable = 'true';
     // A code block is literal text; autocorrect would rewrite it into the model.
-    content.spellcheck = block.type !== 'code';
+    // So is a display equation's TeX.
+    content.spellcheck = !isLiteralType(block.type);
     // Deliberately no role="textbox": it would win over the host-language role
     // and erase the h1/h2/h3/blockquote semantics the tag was chosen for, so
     // heading navigation would report nothing. contenteditable already exposes
@@ -349,6 +373,8 @@ export class Renderer {
       pre.dataset.neditorCodeLabel = this.#labels.codeBlockLabel;
       pre.append(content);
       root.append(pre);
+    } else if (block.type === 'math') {
+      root.append(this.#createMathBox(doc, content));
     } else if (block.type === 'callout') {
       // The tint wraps icon and text together, and must not extend into the
       // gutter reservation on the block itself.
@@ -370,6 +396,71 @@ export class Renderer {
     }
 
     return { ...emptyView(root, content, block), key: viewKey(block) };
+  }
+
+  /**
+   * A display equation: its TeX in an editable host, and what the TeX draws.
+   *
+   * The host is the block's content like any other -- the caret, input,
+   * history and serializers all work on the TeX in it, and nothing else.
+   * The preview beside it is the host's renderer's picture of that TeX, kept
+   * outside the editing host so typing can never reach it and parsing never
+   * reads it. While the equation is being edited both show; otherwise the
+   * stylesheet hides the source visually -- never from focus, so arrowing into
+   * the block still lands in it and reveals it -- and the preview stands in.
+   *
+   * The preview is `aria-hidden`: the TeX in the host is what assistive
+   * technology reads and edits, and reading the picture as well would say
+   * every equation twice.
+   */
+  #createMathBox(doc: Document, content: HTMLElement): HTMLElement {
+    const box = doc.createElement('div');
+    box.className = 'neditor-math-block';
+    box.dataset.neditorMathLabel = this.#labels.mathBlockLabel;
+
+    const preview = doc.createElement('div');
+    preview.className = 'neditor-math-block__preview';
+    preview.contentEditable = 'false';
+    preview.setAttribute('aria-hidden', 'true');
+
+    box.append(content, preview);
+    return box;
+  }
+
+  /** Redraws a display equation's preview, when its TeX has changed. */
+  #updateMathPreview(view: BlockView, content: RichText): void {
+    const box = view.root.querySelector<HTMLElement>('.neditor-math-block');
+    const preview = box?.querySelector<HTMLElement>('.neditor-math-block__preview');
+
+    if (!box || !preview) {
+      return;
+    }
+
+    const tex = richToPlainText(content);
+
+    if (this.#previews.get(preview) === tex) {
+      return;
+    }
+
+    this.#previews.set(preview, tex);
+
+    // Drawn only when there is something to draw it with: without a
+    // renderer the source is the only view, and a second copy of it beside
+    // itself would say nothing new.
+    const drawn = tex.trim().length > 0 && drawMath(preview, tex, true, this.#renderMath);
+
+    if (!drawn) {
+      preview.replaceChildren();
+    }
+
+    box.dataset.rendered = String(drawn);
+
+    if (!drawn && this.#renderMath && tex.trim().length > 0) {
+      preview.textContent = this.#labels.mathError;
+      box.dataset.error = 'true';
+    } else {
+      delete box.dataset.error;
+    }
   }
 
   /** An editable host, styled and resolved exactly like a block's own content. */
@@ -640,9 +731,15 @@ export class Renderer {
       const key = contentKey(block.content);
 
       if (view.contentKey !== key) {
-        content.replaceChildren(renderRichText(content.ownerDocument, block.content));
+        content.replaceChildren(
+          renderRichText(content.ownerDocument, block.content, this.#richOptions),
+        );
         view.contentKey = key;
       }
+    }
+
+    if (block.type === 'math') {
+      this.#updateMathPreview(view, block.content);
     }
   }
 
@@ -669,7 +766,7 @@ export class Renderer {
           return;
         }
 
-        element.replaceChildren(renderRichText(element.ownerDocument, cell));
+        element.replaceChildren(renderRichText(element.ownerDocument, cell, this.#richOptions));
         keys[columnIndex] = key;
       });
     });
@@ -696,6 +793,13 @@ export class Renderer {
 
     if (view) {
       view.contentKey = contentKey(content);
+
+      // Typing does not re-render, but a display equation's picture lives
+      // outside the host the browser edited, so it is redrawn here: the
+      // preview follows the TeX as it is typed.
+      if (view.type === 'math') {
+        this.#updateMathPreview(view, content);
+      }
     }
   }
 }

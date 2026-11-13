@@ -3954,3 +3954,43 @@ describe('audit 53', () => {
     ).toEqual(['paragraph:a\u200bb']);
   });
 });
+
+describe('math on the clipboard', () => {
+  const m = (tex: string) => ({ text: '￼', math: tex });
+  const roundTripBlocks = (blocks: Block[]): Block[] =>
+    blocksFromHtml(document, blocksToHtml(document, blocks));
+
+  test('an equation and the formulas around it come back at their depths', () => {
+    const blocks = [
+      { id: 'a', type: 'bulleted_list', depth: 0, content: [{ text: 'take ' }, m('n')] },
+      { id: 'b', type: 'math', depth: 1, content: [{ text: 'a\n| b |' }] },
+      { id: 'c', type: 'paragraph', depth: 1, content: [m('x'), { text: ' after' }] },
+      { id: 'd', type: 'math', depth: 0, content: [] },
+    ] as Block[];
+
+    expect(roundTripBlocks(blocks).map((b) => [b.type, b.depth, b.content])).toEqual(
+      blocks.map((b) => [b.type, b.depth, b.content]),
+    );
+  });
+
+  test('the TeX travels in an attribute, with a spelling any application can show', () => {
+    const html = blocksToHtml(document, [
+      { id: 'a', type: 'paragraph', depth: 0, content: [m('x^2')] },
+      { id: 'b', type: 'math', depth: 2, content: [{ text: 'y' }] },
+    ] as Block[]);
+
+    expect(html).toBe(
+      '<p><span data-neditor-math="x^2">$x^2$</span></p>' +
+        '<div data-neditor-depth="2" style="margin-left: 3em;" data-neditor-math-block="y">$$y$$</div>',
+    );
+  });
+
+  test('a formula in a table cell keeps its TeX', () => {
+    const rows = [[[m('|x|')], [{ text: 'h' }]]];
+    const [table] = roundTripBlocks([
+      { id: 't', type: 'table', depth: 0, content: [], rows },
+    ] as Block[]);
+
+    expect(table?.rows).toEqual(rows);
+  });
+});

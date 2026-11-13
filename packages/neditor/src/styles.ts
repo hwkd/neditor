@@ -323,6 +323,91 @@ export const NEDITOR_STYLES: string = `
   tab-size: 2;
 }
 
+/* ----------------------------------------------------------------- math -- */
+
+/* A display equation. Its TeX is the editable host and its picture the
+   preview beside it; while it is being edited, or when nothing could draw
+   it, the box looks like a code block and both show. */
+.neditor-math-block {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0.25rem 0;
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  position: relative;
+}
+
+.neditor-math-block:focus-within,
+.neditor-math-block:not([data-rendered='true']) {
+  padding-top: 2rem;
+  background: var(--neditor-code-bg);
+}
+
+.neditor-math-block:focus-within::before,
+.neditor-math-block:not([data-rendered='true'])::before {
+  content: attr(data-neditor-math-label);
+  position: absolute;
+  top: 0.5rem;
+  inset-inline-start: 1rem;
+  font-family: var(--neditor-font);
+  font-size: 0.75em;
+  color: var(--neditor-text-muted);
+}
+
+.neditor-math-block > .neditor-block__content {
+  font-family: var(--neditor-font-mono);
+  font-size: 0.85em;
+  line-height: 1.5;
+}
+
+/* Out of sight, never out of reach: a hidden host could not take focus, and
+   focusing it -- an arrow key, a click on the preview -- is what reveals it. */
+.neditor-math-block[data-rendered='true']:not(:focus-within) > .neditor-block__content {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.neditor-math-block__preview {
+  overflow-x: auto;
+  text-align: center;
+  cursor: text;
+}
+
+.neditor-math-block__preview:empty {
+  display: none;
+}
+
+.neditor-math-block:focus-within .neditor-math-block__preview {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--neditor-border);
+}
+
+.neditor-math-block[data-error='true'] .neditor-math-block__preview {
+  font-size: 0.75em;
+  text-align: start;
+  color: var(--neditor-danger);
+}
+
+/* An inline formula: one atom in the line, edited in its popover. */
+.neditor-math {
+  border-radius: 3px;
+}
+
+.neditor-block__content[contenteditable='true'] .neditor-math {
+  cursor: pointer;
+}
+
+.neditor-block__content[contenteditable='true'] .neditor-math:hover {
+  background: var(--neditor-hover);
+}
+
 /* -------------------------------------------------------------- callout -- */
 
 .neditor-callout {
@@ -998,6 +1083,36 @@ export const NEDITOR_STYLES: string = `
 }
 
 .neditor-link-editor__button[hidden] {
+  display: none;
+}
+
+/* ------------------------------------------------------- math editor -- */
+
+.neditor-math-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem;
+  width: 24rem;
+  max-width: calc(100vw - 2rem);
+  padding: 0.375rem;
+}
+
+.neditor-math-editor__input {
+  font-family: var(--neditor-font-mono);
+}
+
+/* The picture of the TeX being typed, on a line of its own under the field. */
+.neditor-math-editor__preview {
+  order: 1;
+  flex-basis: 100%;
+  min-width: 0;
+  padding: 0.25rem 0.5rem;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.neditor-math-editor__preview[hidden] {
   display: none;
 }
 

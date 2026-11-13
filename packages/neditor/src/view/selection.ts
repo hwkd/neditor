@@ -101,40 +101,133 @@ export function readSelection(node: Node): SelectionReading | null {
   };
 }
 
-/** Character offset of a DOM position within `element`. */
-function offsetOf(element: HTMLElement, container: Node, offset: number): number {
+/**
+ * An inline formula's element: one character of offset, whatever it draws.
+ *
+ * The model holds a formula as a single atom character (`MATH_ATOM`), while
+ * the renderer may draw it as a whole tree of KaTeX glyphs -- so a plain text
+ * count put every caret after a formula hundreds of characters too far, and
+ * Enter split the block somewhere else entirely. Every conversion here counts
+ * the atom as one and never looks inside it.
+ */
+const ATOM_SELECTOR = '[data-neditor-math]';
+
+const SHOW_ELEMENT = 0x1;
+const SHOW_TEXT = 0x4;
+const FILTER_ACCEPT = 1;
+const FILTER_REJECT = 2;
+const FILTER_SKIP = 3;
+
+function isAtom(node: Node | null): node is Element {
+  return node?.nodeType === 1 && (node as Element).hasAttribute('data-neditor-math');
+}
+
+function indexIn(parent: Node, child: Node): number {
+  return Array.prototype.indexOf.call(parent.childNodes, child);
+}
+
+/** The formula `node` is inside, below `element`, if it is in one. */
+function atomAround(element: HTMLElement, node: Node): Element | null {
+  for (let at: Node | null = node; at && at !== element; at = at.parentNode) {
+    if (isAtom(at)) {
+      return at;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Character offset of a DOM position within `element`.
+ *
+ * A position inside a formula -- a browser can put one there on a double
+ * click, uneditable or not -- is no position the model has, so it snaps to
+ * the formula's start, or for the end of a range to its end, so that the
+ * range still covers it.
+ */
+function offsetOf(
+  element: HTMLElement,
+  container: Node,
+  offset: number,
+  bias: 'start' | 'end' = 'start',
+): number {
+  const atom = atomAround(element, container);
+
+  if (atom?.parentNode) {
+    offset = indexIn(atom.parentNode, atom) + (bias === 'end' ? 1 : 0);
+    container = atom.parentNode;
+  }
+
   const probe = element.ownerDocument.createRange();
   probe.selectNodeContents(element);
   probe.setEnd(container, offset);
 
-  return probe.toString().length;
-}
+  let length = probe.toString().length;
 
-/** Resolves a character offset to the text node and offset that hold it. */
-function locate(element: HTMLElement, offset: number): { node: Node; offset: number } {
-  const walker = element.ownerDocument.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-  let node = walker.nextNode() as Text | null;
+  for (const found of element.querySelectorAll(ATOM_SELECTOR)) {
+    const parent = found.parentNode;
 
-  if (!node) {
-    return { node: element, offset: 0 };
+    // Wholly before the position: its drawn text was counted, and one
+    // character stands for it instead.
+    if (parent && probe.isPointInRange(parent, indexIn(parent, found) + 1)) {
+      length += 1 - rangeAround(found).toString().length;
+    }
   }
 
-  let remaining = Math.max(0, offset);
+  return length;
+}
 
-  for (;;) {
-    if (remaining <= node.length) {
+function rangeAround(node: Node): Range {
+  const range = node.ownerDocument!.createRange();
+  range.selectNodeContents(node);
+  return range;
+}
+
+/** Resolves a character offset to the DOM position that holds it. */
+function locate(element: HTMLElement, offset: number): { node: Node; offset: number } {
+  const walker = element.ownerDocument.createTreeWalker(element, SHOW_TEXT | SHOW_ELEMENT, {
+    acceptNode: (node) =>
+      isAtom(node)
+        ? FILTER_ACCEPT
+        : isAtom(node.parentNode)
+          ? FILTER_REJECT
+          : node.nodeType === 3
+            ? FILTER_ACCEPT
+            : FILTER_SKIP,
+  });
+  let remaining = Math.max(0, offset);
+  let last: { node: Node; offset: number } = { node: element, offset: 0 };
+
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    if (isAtom(node)) {
+      const parent = node.parentNode!;
+      const index = indexIn(parent, node);
+
+      if (remaining === 0) {
+        return { node: parent, offset: index };
+      }
+
+      remaining -= 1;
+      last = { node: parent, offset: index + 1 };
+      continue;
+    }
+
+    const length = (node as Text).length;
+
+    if (remaining <= length) {
       return { node, offset: remaining };
     }
 
-    remaining -= node.length;
-    const next = walker.nextNode() as Text | null;
-
-    if (!next) {
-      return { node, offset: node.length };
-    }
-
-    node = next;
+    remaining -= length;
+    last = { node, offset: length };
   }
+
+  return last;
+}
+
+/** The length of `element`'s text, a formula counting as one character. */
+function hostLength(element: HTMLElement): number {
+  return offsetOf(element, element, element.childNodes.length);
 }
 
 /** The current selection as offsets into `element`, or null when it is elsewhere. */
@@ -150,7 +243,7 @@ export function getSelectionRange(element: HTMLElement): OffsetRange | null {
   }
 
   const start = offsetOf(element, range.startContainer, range.startOffset);
-  const end = offsetOf(element, range.endContainer, range.endOffset);
+  const end = offsetOf(element, range.endContainer, range.endOffset, 'end');
 
   return start <= end ? { start, end } : { start: end, end: start };
 }
@@ -203,12 +296,18 @@ export function offsetsOfNode(element: HTMLElement, node: Node): OffsetRange | n
     return null;
   }
 
-  const probe = element.ownerDocument.createRange();
-  probe.selectNodeContents(element);
-  probe.setEndBefore(node);
-  const start = probe.toString().length;
+  const parent = node.parentNode;
 
-  return { start, end: start + (node.textContent ?? '').length };
+  if (!parent) {
+    return null;
+  }
+
+  const index = indexIn(parent, node);
+
+  return {
+    start: offsetOf(element, parent, index),
+    end: offsetOf(element, parent, index + 1, 'end'),
+  };
 }
 
 /** True when the caret sits at the very start and nothing is selected. */
@@ -221,7 +320,5 @@ export function isCaretAtStart(element: HTMLElement): boolean {
 export function isCaretAtEnd(element: HTMLElement): boolean {
   const range = getSelectionRange(element);
 
-  return (
-    range !== null && range.start === range.end && range.end === (element.textContent ?? '').length
-  );
+  return range !== null && range.start === range.end && range.end === hostLength(element);
 }

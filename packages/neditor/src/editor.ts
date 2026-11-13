@@ -8,6 +8,7 @@ import {
   blockIdRange,
   canMergeText,
   blockText,
+  contentForType,
   cloneBlock,
   cloneDocument,
   createBlock,
@@ -21,6 +22,7 @@ import {
   insertBlockAt,
   isBlockType,
   isContinuingType,
+  isLiteralType,
   isRichEmpty,
   isVoidType,
   moveBlocks,
@@ -52,6 +54,7 @@ import {
 import { History } from './model/history.ts';
 import type { Mark, RichText } from './model/rich-text.ts';
 import {
+  isMathRun,
   richActiveLink,
   richActiveMarks,
   richConcat,
@@ -61,11 +64,13 @@ import {
   richInsert,
   richLength,
   richMarksAt,
+  richMath,
   richSetLink,
   richSetMark,
   richSlice,
   richSplit,
   richToPlainText,
+  richToSourceText,
   richToggleMark,
   sortMarks,
 } from './model/rich-text.ts';
@@ -77,11 +82,13 @@ import { Gutter } from './ui/gutter.ts';
 import { IconPicker } from './ui/icon-picker.ts';
 import { ImageEditor } from './ui/image-editor.ts';
 import { LinkEditor } from './ui/link-editor.ts';
+import { MathEditor } from './ui/math-editor.ts';
 import type { PortalTheme } from './ui/portal.ts';
 import type { SlashCommand } from './ui/slash-menu.ts';
 import { SlashMenu } from './ui/slash-menu.ts';
 import type { TableCommand } from './ui/table-toolbar.ts';
 import { TableToolbar } from './ui/table-toolbar.ts';
+import type { MathRenderer } from './view/math.ts';
 import { Renderer } from './view/renderer.ts';
 import { blocksFromHtml, blocksToHtml, parseRichText } from './view/rich-dom.ts';
 import type { OffsetRange } from './view/selection.ts';
@@ -145,6 +152,21 @@ export interface NEditorOptions {
   portalContainer?: HTMLElement | ShadowRoot;
   /** `nonce` for the injected `<style>`, for a strict `style-src` policy. */
   styleNonce?: string;
+  /**
+   * Draws TeX for inline formulas and display equations.
+   *
+   * `@neditor/core` has no dependencies, so it ships no math typesetter: pass
+   * one in. With KaTeX that is
+   * `(tex, { displayMode }) => katex.renderToString(tex, { displayMode, throwOnError: false })`.
+   * Without one, formulas still work -- they are typed, stored, copied and
+   * exported as TeX -- and are shown as their TeX source.
+   *
+   * What it returns is drawn and never read back: the document stores TeX
+   * alone. It is called with TeX from the document, which is untrusted, and a
+   * string it returns is inserted as HTML, so it must produce safe markup for
+   * any input (KaTeX does unless its `trust` option is enabled).
+   */
+  renderMath?: MathRenderer;
 }
 
 /** Where a table cell sits, row-major, as `data-cell="row:column"` carries it. */
@@ -426,6 +448,10 @@ function richFromBlocks(blocks: readonly Block[]): RichText {
       if (label.length > 0) {
         parts.push(richFromPlainText(label, undefined, block.src));
       }
+    } else if (block.type === 'math') {
+      // A cell holds one line of text, and a display equation is a formula
+      // on a line of its own: in a cell it becomes that formula, inline.
+      parts.push(richMath(richToPlainText(block.content)));
     } else {
       parts.push(block.content);
     }
@@ -580,6 +606,7 @@ export class NEditor {
   readonly #slashMenu: SlashMenu;
   readonly #toolbar: FormatToolbar;
   readonly #linkEditor: LinkEditor;
+  readonly #mathEditor: MathEditor;
   readonly #emitter = new Emitter<NEditorEvents>();
   readonly #useToolbar: boolean;
   readonly #history: History;
@@ -630,6 +657,19 @@ export class NEditor {
     start: number;
     end: number;
     cell?: CellCoords;
+  } | null = null;
+
+  /**
+   * The range the inline equation popover will replace, held while focus is in
+   * its input: one formula's atom when editing one, the selected text when
+   * turning it into a formula, or a collapsed caret for a new one.
+   */
+  #mathContext: {
+    blockId: string;
+    start: number;
+    end: number;
+    cell?: CellCoords;
+    existing: boolean;
   } | null = null;
 
   /**
@@ -827,6 +867,7 @@ export class NEditor {
         },
       },
       this.#labels,
+      { renderMath: options.renderMath },
     );
 
     this.#imageEditor = new ImageEditor(
@@ -965,10 +1006,28 @@ export class NEditor {
       this.#labels,
     );
 
+    this.#mathEditor = new MathEditor(
+      this.#document,
+      {
+        onApply: (tex) => {
+          this.#applyMath(tex);
+        },
+        onRemove: () => {
+          this.#applyMath('');
+        },
+        onCancel: () => {
+          this.#closeMathEditor();
+        },
+      },
+      this.#labels,
+      options.renderMath,
+    );
+
     for (const portal of [
       this.#slashMenu,
       this.#toolbar,
       this.#linkEditor,
+      this.#mathEditor,
       this.#iconPicker,
       this.#imageEditor,
       this.#tableToolbar,
@@ -1058,6 +1117,8 @@ export class NEditor {
     this.#closeSlashMenu();
     this.#linkContext = null;
     this.#linkEditor.close();
+    this.#mathContext = null;
+    this.#mathEditor.close();
     this.#closeImageEditor();
     this.#closeIconPicker();
     this.#toolbar.hide();
@@ -1139,6 +1200,7 @@ export class NEditor {
       this.#toolbar.hide();
       this.#hideTableToolbar();
       this.#closeLinkEditor();
+      this.#closeMathEditor();
       this.#closeImageEditor();
       this.#closeIconPicker();
       this.#gutter.hide();
@@ -1270,6 +1332,79 @@ export class NEditor {
       this.#selectionRect() ?? content.getBoundingClientRect(),
       richActiveLink(this.#contentOf(target), range.start, range.end),
     );
+  }
+
+  /**
+   * Opens the inline equation popover at the selection.
+   *
+   * With a formula beside a collapsed caret -- the one before it first -- or a
+   * selection that is exactly one formula, that formula is edited. A selection
+   * of text becomes a formula whose TeX is that text. Otherwise a new formula
+   * is inserted at the caret. Bound to Mod+Shift+E, and to a click on a
+   * formula.
+   *
+   * Does nothing outside a text block's host or where the editor cannot edit:
+   * a code block or a display equation is TeX already.
+   */
+  openMathEditor(): void {
+    const target = this.#selectionTarget();
+
+    if (!target || !this.#canEdit() || isLiteralType(target.block.type)) {
+      return;
+    }
+
+    const content = this.#contentOf(target);
+    let { start, end } = target.range;
+    let existing = false;
+
+    if (start === end) {
+      const before = richSlice(content, start - 1, start)[0];
+      const after = richSlice(content, start, start + 1)[0];
+
+      if (start > 0 && isMathRun(before)) {
+        start -= 1;
+        existing = true;
+      } else if (isMathRun(after)) {
+        end += 1;
+        existing = true;
+      }
+    } else if (end - start === 1 && isMathRun(richSlice(content, start, end)[0])) {
+      existing = true;
+    }
+
+    const selected = richSlice(content, start, end);
+    const tex = existing ? (selected[0]?.math ?? '') : richToSourceText(selected);
+
+    this.#mathContext = {
+      blockId: target.block.id,
+      start,
+      end,
+      existing,
+      ...(target.cell ? { cell: target.cell } : {}),
+    };
+    this.#toolbar.hide();
+    this.#mathEditor.open(
+      this.#mathAnchor(target.content, start, existing) ??
+        this.#selectionRect() ??
+        target.content.getBoundingClientRect(),
+      tex,
+      existing,
+    );
+  }
+
+  /** The formula element at `start`, measured, when there is one to point at. */
+  #mathAnchor(host: HTMLElement, start: number, existing: boolean): DOMRect | null {
+    if (!existing) {
+      return null;
+    }
+
+    for (const atom of host.querySelectorAll('[data-neditor-math]')) {
+      if (offsetsOfNode(host, atom)?.start === start) {
+        return atom.getBoundingClientRect();
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -1511,6 +1646,7 @@ export class NEditor {
     this.#slashMenu.destroy();
     this.#toolbar.destroy();
     this.#linkEditor.destroy();
+    this.#mathEditor.destroy();
     this.#gutter.destroy();
     this.#liveRegion.remove();
     this.#slashLabel.remove();
@@ -1772,6 +1908,8 @@ export class NEditor {
     this.#closeSlashMenu();
     this.#linkContext = null;
     this.#linkEditor.close();
+    this.#mathContext = null;
+    this.#mathEditor.close();
     this.#closeImageEditor();
     this.#toolbar.hide();
     this.#hideTableToolbar();
@@ -1928,7 +2066,10 @@ export class NEditor {
       const block = id === undefined ? undefined : findBlock(this.#blocks, id);
 
       if (block) {
-        const text = blockText(block).trim().slice(0, NEditor.#SELECTION_TEXT_LIMIT);
+        // A formula is announced as its TeX, not as an object character.
+        const text = (block.type === 'table' ? blockText(block) : richToSourceText(block.content))
+          .trim()
+          .slice(0, NEditor.#SELECTION_TEXT_LIMIT);
         const type = this.#typeName(block.type);
 
         this.#announce(
@@ -2850,6 +2991,18 @@ export class NEditor {
       });
     }
 
+    if (this.#mathEditor.isOpen) {
+      const context = this.#mathContext;
+
+      popovers.push({
+        ownedBy: (blockId, cell) => context?.blockId === blockId && sameCell(context.cell, cell),
+        contains: (node) => this.#mathEditor.contains(node),
+        close: (restoreFocus) => {
+          this.#closeMathEditor(restoreFocus);
+        },
+      });
+    }
+
     if (this.#iconPicker.isOpen) {
       const id = this.#iconContext;
 
@@ -3357,7 +3510,7 @@ export class NEditor {
   }
 
   #syncToolbar(): void {
-    if (this.#linkEditor.isOpen) {
+    if (this.#linkEditor.isOpen || this.#mathEditor.isOpen) {
       return;
     }
 
@@ -3553,6 +3706,7 @@ export class NEditor {
 
     this.#closeSlashMenu();
     this.#closeLinkEditor();
+    this.#closeMathEditor();
     this.#closeImageEditor();
     this.#closeIconPicker();
     this.#toolbar.hide();
@@ -3858,8 +4012,9 @@ export class NEditor {
 
   /** Inline Markdown shortcuts: `**bold**`, `*italic*`, `` `code` ``, `[text](url)`. */
   #tryInlineRule(target: ResolvedTarget, beforeCaret: string): boolean {
-    // A code block is literal; its text must not be reinterpreted.
-    if (target.block.type === 'code') {
+    // A code block is literal; its text must not be reinterpreted. Nor is a
+    // display equation's TeX, where `$` and `*` mean what TeX says.
+    if (isLiteralType(target.block.type)) {
       return false;
     }
 
@@ -3867,6 +4022,32 @@ export class NEditor {
 
     if (!match) {
       return false;
+    }
+
+    // A formula replaces its whole span, dollars and all, with one atom.
+    if (match.math !== undefined) {
+      const formula = richMath(match.math);
+
+      if (formula.length === 0) {
+        return false;
+      }
+
+      this.#commitResolved(
+        target,
+        richInsert(
+          richDelete(this.#contentOf(target), match.start, match.end),
+          match.start,
+          formula,
+        ),
+      );
+      this.#focusResolved(target, match.start + 1);
+      this.#pending = {
+        blockId: target.block.id,
+        offset: match.start + 1,
+        marks: [],
+        ...(target.cell ? { cell: target.cell } : {}),
+      };
+      return true;
     }
 
     const innerStart = match.start + match.openLength;
@@ -4126,6 +4307,63 @@ export class NEditor {
     this.#syncToolbar();
   }
 
+  /* -------------------------------------------------------------- math -- */
+
+  /**
+   * Writes the popover's TeX over the range it was opened for, as one edit.
+   *
+   * Empty TeX removes a formula that was there and inserts nothing where none
+   * was: an empty formula is no formula (`normalizeRuns` drops one).
+   */
+  #applyMath(tex: string): void {
+    const context = this.#mathContext;
+
+    this.#mathEditor.close();
+    this.#mathContext = null;
+
+    if (!context || !this.#canEdit()) {
+      return;
+    }
+
+    const target = this.#targetFor(context.blockId, context.cell);
+
+    if (!target) {
+      return;
+    }
+
+    const formula = richMath(tex);
+
+    // Nothing written over nothing: a new formula left empty is a cancel.
+    if (formula.length === 0 && !context.existing) {
+      this.#focusResolved(target, context.start, context.end);
+      return;
+    }
+
+    const content = richInsert(
+      richDelete(this.#contentOf(target), context.start, context.end),
+      context.start,
+      formula,
+    );
+
+    this.#commitResolved(target, content);
+    this.#focusResolved(target, context.start + formula.length);
+    this.#syncToolbar();
+  }
+
+  #closeMathEditor(restoreFocus = true): void {
+    const context = this.#mathContext;
+
+    this.#mathEditor.close();
+    this.#mathContext = null;
+
+    // As for the link popover: back where it was opened from, unless a pointer
+    // dismissed it by placing the caret somewhere else itself.
+    if (context && restoreFocus) {
+      this.focusRange(context.blockId, context.start, context.end, context.cell);
+      this.#syncToolbar();
+    }
+  }
+
   #closeLinkEditor(restoreFocus = true): void {
     const context = this.#linkContext;
 
@@ -4147,6 +4385,36 @@ export class NEditor {
   /** Clicking a link edits it; ⌘/Ctrl-click and read-only mode follow it. */
   #handleClick = (event: MouseEvent): void => {
     const node = asElement(event.target);
+
+    // A formula is edited in its popover: nothing can be typed inside it.
+    // Read-only, it is only something to look at.
+    const formula = node?.closest<HTMLElement>('.neditor-math');
+
+    if (formula && this.#root.contains(formula)) {
+      event.preventDefault();
+
+      const target = this.#resolve(formula);
+      const offsets = target ? offsetsOfNode(target.content, formula) : null;
+
+      if (target && offsets && this.#canEdit()) {
+        this.#focusResolved(target, offsets.start, offsets.end);
+        this.openMathEditor();
+      }
+
+      return;
+    }
+
+    // A display equation's picture stands in for its source until the source
+    // is being edited; a click on it is a click into the equation.
+    const preview = node?.closest<HTMLElement>('.neditor-math-block__preview');
+    const previewBlock = preview ? this.#renderer.blockIdFromNode(preview) : undefined;
+
+    if (previewBlock && this.#canEdit()) {
+      event.preventDefault();
+      this.focus(previewBlock, CARET_END);
+      return;
+    }
+
     const anchor = node?.closest<HTMLAnchorElement>('a.neditor-link');
 
     if (!anchor) {
@@ -4360,8 +4628,9 @@ export class NEditor {
     // which is not empty, parses to nothing, and still threw the selection away.
     const inline = resolved.cell
       ? richFromBlocks(pasted)
-      : resolved.block.type === 'code'
+      : isLiteralType(resolved.block.type)
         ? // A code block is literal: pasted structure becomes text, never blocks.
+          // So is a display equation, and pasted formulas arrive as their TeX.
           //
           // Whose clipboard it is decides which half to read. Ours pairs the
           // HTML with `toMarkdown` output, so `text/plain` there carries a code
@@ -4373,8 +4642,9 @@ export class NEditor {
           // took the second case away to fix the first.
           richFromPlainText(
             own || this.#plainIsOurMarkdown(html, pasted, plain)
-              ? pasted.map(blockText).join('\n')
-              : plain || pasted.map(blockText).join('\n'),
+              ? pasted.map((block) => this.#literalText(resolved.block.type, block)).join('\n')
+              : plain ||
+                  pasted.map((block) => this.#literalText(resolved.block.type, block)).join('\n'),
           )
         : // A lone paragraph is a phrase, not a document: keep it in this block
           // so pasting mid-sentence still works.
@@ -4396,6 +4666,17 @@ export class NEditor {
     }
 
     this.#pasteBlocks(resolved.block, resolved.content, pasted);
+  }
+
+  /**
+   * A pasted block's text as a literal block of `type` takes it: a table's
+   * cells as tab-separated text, and a formula as its TeX -- between dollars
+   * in a code block, bare in a display equation, which is TeX already.
+   */
+  #literalText(type: BlockType, block: Block): string {
+    return block.type === 'table'
+      ? blockText(block)
+      : richToPlainText(contentForType(type, block.content));
   }
 
   /** HTML first, since it carries structure; Markdown is the fallback. */
@@ -4656,6 +4937,14 @@ export class NEditor {
         return;
       }
 
+      // Not swallowed where it does nothing: in a code block or an equation
+      // the browser keeps it.
+      if (event.shiftKey && key === 'e' && !isLiteralType(block.type)) {
+        event.preventDefault();
+        this.openMathEditor();
+        return;
+      }
+
       if (key === 'a' && !event.shiftKey) {
         // First press takes the block's text; a second one takes the blocks.
         const range = getSelectionRange(content);
@@ -4712,7 +5001,7 @@ export class NEditor {
 
         event.preventDefault();
 
-        if (event.shiftKey || block.type === 'code') {
+        if (event.shiftKey || isLiteralType(block.type)) {
           this.#insertSoftBreak(block, content);
         } else {
           this.#splitBlock(block, content);
@@ -4893,8 +5182,10 @@ export class NEditor {
     }
 
     const joinAt = richLength(previous.content);
+    // Into what the receiving block can hold: a code block or an equation
+    // takes the text and not its formatting, as every other way in does.
     let blocks = updateBlock(this.#blocks, previous.id, {
-      content: richConcat(previous.content, block.content),
+      content: contentForType(previous.type, richConcat(previous.content, block.content)),
     });
     // No re-clamp here, unlike `#deleteAtEnd`: this path is only ever reached
     // at depth 0 — anything deeper outdents above rather than merging — and
@@ -4930,7 +5221,7 @@ export class NEditor {
 
     const joinAt = richLength(block.content);
     let blocks = updateBlock(this.#blocks, block.id, {
-      content: richConcat(block.content, next.content),
+      content: contentForType(block.type, richConcat(block.content, next.content)),
     });
     // Deleting the neighbour takes its depth step with it: anything nested
     // under it is left more than one level below this block, which is exactly
@@ -5010,8 +5301,9 @@ export class NEditor {
   };
 
   #handleSelectionChange = (): void => {
-    // Focus is in the link input; the block selection is intentionally stale.
-    if (this.#linkEditor.isOpen) {
+    // Focus is in the link or equation input; the block selection is
+    // intentionally stale.
+    if (this.#linkEditor.isOpen || this.#mathEditor.isOpen) {
       return;
     }
 

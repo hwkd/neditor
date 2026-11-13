@@ -8,6 +8,8 @@
  */
 import * as lib from '@neditor/core';
 import type { NEditor, NEditorDocument, NEditorLabels, NEditorOptions } from '@neditor/core';
+import katex from 'katex';
+import 'katex/dist/katex.min.css';
 import { DOCS } from './docs.ts';
 
 type Mount = 'plain' | 'shadow' | 'iframe' | 'dialog' | 'two';
@@ -68,6 +70,11 @@ function optionsFromQuery(): Partial<NEditorOptions> {
   if (params.get('labels') === 'fr') options.labels = FRENCH;
   // Popovers in the page while the editor may be in a shadow root: another tree.
   if (params.get('portal') === 'body') options.portalContainer = document.body;
+  // A real typesetter, so the atoms the specs drive hold KaTeX's own markup.
+  if (params.get('math') === 'katex') {
+    options.renderMath = (tex, { displayMode }) =>
+      katex.renderToString(tex, { displayMode, throwOnError: false });
+  }
 
   return options;
 }

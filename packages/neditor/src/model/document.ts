@@ -12,6 +12,7 @@ import {
 } from './table.ts';
 import {
   cloneRichText,
+  isMathRun,
   isRichEmpty,
   normalizeRuns,
   richFromPlainText,
@@ -39,6 +40,7 @@ export type BlockType =
   | 'todo'
   | 'quote'
   | 'code'
+  | 'math'
   | 'callout'
   | 'toggle'
   | 'image'
@@ -125,6 +127,7 @@ const BLOCK_TYPES = new Set<BlockType>([
   'todo',
   'quote',
   'code',
+  'math',
   'callout',
   'toggle',
   'image',
@@ -136,8 +139,44 @@ export function isBlockType(value: unknown): value is BlockType {
   return typeof value === 'string' && BLOCK_TYPES.has(value as BlockType);
 }
 
-/** Marks that a code block ignores, since its text is already monospace. */
-const CODE_BLOCK_STRIPS_MARKS = true;
+/**
+ * Block types whose text is source, not prose: a code block's code, and a
+ * display equation's TeX.
+ *
+ * Their text is literal in both serializers -- a fence in Markdown, a `<pre>`
+ * or an attribute in HTML -- so it carries no marks, no links and no inline
+ * formulas, none of which either serializer could write back. No inline rule
+ * reinterprets it, Enter adds a line rather than a block, and spellcheck stays
+ * out of it.
+ */
+const LITERAL_TYPES = new Set<BlockType>(['code', 'math']);
+
+export function isLiteralType(type: BlockType): boolean {
+  return LITERAL_TYPES.has(type);
+}
+
+/**
+ * Content as a block of `type` can hold it.
+ *
+ * Literal text has no formatting, so marks and links go; an inline formula
+ * becomes its TeX -- written `$…$` in a code block, where the source of the
+ * prose it came from is what reads true, and bare in a display equation, which
+ * is TeX already and where a `$` would end math mode. Every other type holds
+ * runs as they are.
+ */
+export function contentForType(type: BlockType, content: readonly TextRun[]): RichText {
+  if (!isLiteralType(type)) {
+    return normalizeRuns(content);
+  }
+
+  const delimiter = type === 'code' ? '$' : '';
+
+  return normalizeRuns(
+    content.map((run) =>
+      isMathRun(run) ? { text: `${delimiter}${run.math}${delimiter}` } : { text: run.text },
+    ),
+  );
+}
 
 export function isContinuingType(type: BlockType): boolean {
   return CONTINUING_TYPES.has(type);
@@ -480,8 +519,10 @@ export function normalizeDocument(doc: Partial<NEditorDocument> | undefined): NE
       // <a> inside the <pre> that reading the same clipboard back discarded --
       // so it is dropped at the boundary rather than kept until a round trip
       // silently loses it.
-      if (normalized.type === 'code') {
-        normalized.content = normalizeRuns(normalized.content.map((run) => ({ text: run.text })));
+      // A display equation's TeX is literal the same way, written between
+      // `$$` fences and carried in an attribute.
+      if (isLiteralType(normalized.type)) {
+        normalized.content = contentForType(normalized.type, normalized.content);
       }
 
       if (normalized.type === 'todo') {
@@ -636,11 +677,13 @@ export function setBlockType(blocks: readonly Block[], id: string, type: BlockTy
     // divider's: leaving text there is how it goes missing.
     if (isVoidType(type) || isTableType(type)) {
       next.content = [];
-    } else if (type === 'code' && CODE_BLOCK_STRIPS_MARKS) {
+    } else if (isLiteralType(type)) {
       // A code block is uniformly monospace, so inline marks would be noise --
       // and a link fares no better: neither serializer can carry one through a
-      // fence or a <pre>, so keeping it here only defers losing it.
-      next.content = normalizeRuns(next.content.map((run) => ({ text: run.text })));
+      // fence or a <pre>, so keeping it here only defers losing it. A display
+      // equation is TeX, the same way. An inline formula keeps its TeX as text
+      // rather than leaving an atom neither block can draw.
+      next.content = contentForType(type, next.content);
     }
 
     // Converting a block to the type it already is changes nothing, and the
@@ -915,7 +958,17 @@ export function sliceDocument(blocks: readonly Block[], ids: ReadonlySet<string>
  * as the marker and destroyed. Escaping there keeps the marker a marker;
  * escaping here would put a stray backslash into every other reader's prose.
  */
-const INLINE_ESCAPE = /[\\`*_[\]~|<>]/g;
+const INLINE_ESCAPE = /[\\`*_[\]~|<>$]/g;
+
+/**
+ * What a backtick code span cannot hold bare: {@link INLINE_ESCAPE} less `$`.
+ *
+ * A `$` in prose is escaped because `$…$` is a formula, but no formula opens
+ * inside an open code span -- the reader refuses one there, as it refuses an
+ * autolink -- so `` `echo $HOME` `` stays a backtick span rather than turning
+ * into `<code>` markup for the sake of a character that was never ambiguous.
+ */
+const CODE_SPAN_UNSAFE = /[\\`*_[\]~|<>]/;
 
 /**
  * A line-leading construct, which only matters for the first run of a block.
@@ -1382,6 +1435,34 @@ interface RunContext {
   tagged?: boolean;
   /** The run is a piece already cut to length, or one that cannot be cut: do not split it. */
   whole?: boolean;
+  /** The run is in a table cell, where an unescaped `|` ends the cell. */
+  inTable?: boolean;
+}
+
+/**
+ * An inline formula as Markdown: `$TeX$`, the TeX exactly as it stands.
+ *
+ * Nothing inside is escaped. Every reader that knows the syntax -- this one,
+ * Pandoc, GitHub, KaTeX's auto-render -- takes the text between the dollars
+ * literally, so an escape written here would be a backslash in the TeX, and
+ * TeX is full of characters this writer escapes elsewhere (`\`, `_`, `*`,
+ * `|`). The reader recovers the TeX from the source between the delimiters for
+ * the same reason, not from what its rules made of it.
+ *
+ * Two shapes cannot be written, and both are invalid TeX: a bare `$` inside
+ * the formula, which ends math mode in TeX as it ends the span here, and an
+ * unpaired backslash at its end, which escapes the closing `$`. Edge
+ * whitespace and line breaks never reach this point: the model normalizes
+ * them away (`normalizeInlineTex`), since `$` cannot open or close against
+ * whitespace.
+ *
+ * In a table cell a `|` is the one escape: GFM splits the row on unescaped
+ * pipes before any inline parsing, and `\|` is how it spells a literal pipe --
+ * in code spans and formulas alike -- turning it back into `|` before the cell
+ * is read. A TeX `\|` therefore goes out as `\\|`.
+ */
+function mathToMarkdown(tex: string, inTable: boolean): string {
+  return `$${inTable ? tex.replaceAll('|', '\\|') : tex}$`;
 }
 
 const PUNCTUATION = /[\p{P}\p{S}]/u;
@@ -1424,6 +1505,10 @@ function flanks(text: string, before: string, after: string): boolean {
  * not right-flanking.) A link's text holds the whitespace as it is.
  */
 function runToMarkdown(run: TextRun, context: RunContext = {}): string {
+  if (isMathRun(run)) {
+    return mathToMarkdown(run.math ?? '', context.inTable === true);
+  }
+
   const marks = new Set(run.marks ?? []);
   // Link text is not a bare URL: GFM autolinks nothing inside a link. A code
   // run's text is not either, in a backtick span -- but one written as
@@ -1445,7 +1530,7 @@ function runToMarkdown(run: TextRun, context: RunContext = {}): string {
   const edged = /^\s|\s$/.test(run.text);
   // A reference is not one of those escapes: nothing decodes `&nbsp;` inside a
   // backtick span, here or in CommonMark, so code about HTML stays a span.
-  const bare = marks.has('code') && !/[\n`]/.test(run.text) && !run.text.match(INLINE_ESCAPE);
+  const bare = marks.has('code') && !/[\n`]/.test(run.text) && !CODE_SPAN_UNSAFE.test(run.text);
   const literalCode = !marks.has('code') || bare;
   // Inside a link the delimiters sit against `[` and `]`, which always flank.
   const emphasis = marks.has('bold') || marks.has('italic') || marks.has('strikethrough');
@@ -1537,7 +1622,7 @@ function tableToMarkdown(block: Block, indent: string): string {
   // reader. The one backslash before a newline is always the break's own (a
   // literal one is doubled), so it is that backslash that goes.
   const cellToMarkdown = (cell: readonly TextRun[]): string =>
-    oneLineBreaks(protectEdgeWhitespace(richToMarkdown(cell)));
+    oneLineBreaks(protectEdgeWhitespace(richToMarkdown(cell, { inTable: true })));
   const line = (cells: readonly RichText[]): string =>
     `${indent}| ${cells.map(cellToMarkdown).join(' | ')} |`;
 
@@ -1600,25 +1685,38 @@ function innerEdge(run: TextRun | undefined, side: 'first' | 'last'): string {
     return '';
   }
 
+  if (isMathRun(run)) {
+    return '$';
+  }
+
   return run.marks?.includes('code')
     ? '`'
     : ((side === 'first' ? run.text[0] : run.text.at(-1)) ?? '');
 }
 
-export function richToMarkdown(content: readonly TextRun[]): string {
+export function richToMarkdown(
+  content: readonly TextRun[],
+  options: { readonly inTable?: boolean } = {},
+): string {
   // A carriage return is a line break to every reader, this one included:
   // written raw it split the block in two, and took a table apart row by row.
   // It is written as the break it is read as.
   if (content.some((run) => run.text.includes('\r'))) {
     return richToMarkdown(
       content.map((run) => ({ ...run, text: run.text.replace(/\r\n?/g, '\n') })),
+      options,
     );
   }
 
   let previous = '';
+  // A formula's neighbours stand against its `$`, which is what flanking
+  // has to judge -- not the atom character the model holds in its place.
+  const edge = (run: TextRun | undefined, side: 'first' | 'last'): string =>
+    isMathRun(run) ? '$' : ((side === 'first' ? run?.text[0] : run?.text.at(-1)) ?? '');
   const contextAt = (index: number): RunContext => ({
-    before: content[index - 1]?.text.at(-1) ?? '',
-    after: content[index + 1]?.text[0] ?? '',
+    before: edge(content[index - 1], 'last'),
+    after: edge(content[index + 1], 'first'),
+    inTable: options.inTable === true,
   });
   // Each run is written once here and looked at twice: as the run after the
   // one being decided, and then as that run itself.
@@ -1702,12 +1800,12 @@ export function toMarkdown(doc: NEditorDocument): string {
 
       const indent = ' '.repeat(column);
       // A code block is literal: its text must not be re-escaped as Markdown.
-      const text =
-        block.type === 'code'
-          ? // Its carriage returns are line breaks too. One left at the end
-            // joined the newline before the closing fence into a single CRLF.
-            blockText(block).replace(/\r\n?/g, '\n')
-          : protectEdgeWhitespace(escapeContinuations(richToMarkdown(block.content)));
+      // Nor is a display equation's TeX.
+      const text = isLiteralType(block.type)
+        ? // Its carriage returns are line breaks too. One left at the end
+          // joined the newline before the closing fence into a single CRLF.
+          blockText(block).replace(/\r\n?/g, '\n')
+        : protectEdgeWhitespace(escapeContinuations(richToMarkdown(block.content)));
       // An empty block is a bare marker. The space after it is what makes the
       // marker readable, not what makes it a marker, and trailing whitespace
       // does not survive the trip back — ours trims it, and so does every other
@@ -1778,6 +1876,22 @@ export function toMarkdown(doc: NEditorDocument): string {
             : text;
 
           return `${indent}${fence}\n${body}\n${indent}${fence}`;
+        }
+        // A display equation is fenced by `$$` lines, which Pandoc, GitHub and
+        // KaTeX's auto-render all read, and indented under a list item for the
+        // reason a code block's body is. Its TeX goes between them as it
+        // stands; the reader takes the lines back verbatim, as it does a code
+        // fence's. A line of the TeX that is itself `$$` would close the fence
+        // early -- in TeX it would end display math there too.
+        case 'math': {
+          const body = indent
+            ? text
+                .split('\n')
+                .map((line) => (line === '' ? line : `${indent}${line}`))
+                .join('\n')
+            : text;
+
+          return `${indent}$$\n${body}\n${indent}$$`;
         }
         // The caption follows after a hard break: every other reader shows the
         // picture with the caption beneath it, and this one reads it back.

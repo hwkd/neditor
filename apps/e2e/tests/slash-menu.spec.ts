@@ -72,7 +72,7 @@ test.describe('05 · slash menu', () => {
     await expect(active(editor)).toHaveText(/Divider/);
     await page.keyboard.press('ArrowDown'); // wraps to the first
     await expect(active(editor)).toHaveText(/Text/);
-    expect(count).toBe(14);
+    expect(count).toBe(15);
 
     await page.keyboard.press('ArrowDown');
     await page.keyboard.press('Enter');
@@ -172,6 +172,7 @@ test.describe('05 · slash menu', () => {
     ['To-do list', 'todo', 'button.neditor-block__checkbox[role=checkbox]'],
     ['Quote', 'quote', 'blockquote.neditor-block__content'],
     ['Code', 'code', 'pre.neditor-block__pre > code.neditor-block__content'],
+    ['Equation', 'math', '.neditor-math-block > div.neditor-block__content[spellcheck=false]'],
     ['Callout', 'callout', 'button.neditor-block__icon'],
     ['Toggle list', 'toggle', 'button.neditor-block__chevron[aria-expanded]'],
     ['Image', 'image', 'button.neditor-image__placeholder'],
