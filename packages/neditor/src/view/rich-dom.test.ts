@@ -6046,9 +6046,12 @@ describe('a list item hands on its images in document order', () => {
   });
 
   test('images on either side of a nested list keep their sides', () => {
-    expect(
-      read(`<ul><li>a${inline('1')}<ul><li>c</li></ul>${inline('2')}</li></ul>`),
-    ).toEqual(['bulleted_list@0:a', 'image@1:1.png', 'bulleted_list@1:c', 'image@1:2.png']);
+    expect(read(`<ul><li>a${inline('1')}<ul><li>c</li></ul>${inline('2')}</li></ul>`)).toEqual([
+      'bulleted_list@0:a',
+      'image@1:1.png',
+      'bulleted_list@1:c',
+      'image@1:2.png',
+    ]);
   });
 
   test('an image in text after a block follows the block', () => {
@@ -6117,6 +6120,95 @@ describe('a list item hands on its images in document order', () => {
       (n: number) => `<ul><li>a${`<pre>p</pre>${inline('i')}`.repeat(n)}</li></ul>`,
       (n: number) => `<ul><li>a${`<hr><b>b${img('i')}</b>`.repeat(n)}</li></ul>`,
       (n: number) => `<ul><li>a${`<ul><li>c</li></ul>${inline('i')}`.repeat(n)}</li></ul>`,
+    ];
+
+    for (const shape of shapes) {
+      expect(
+        growth((n) => {
+          blocksFromHtml(document, shape(n));
+        }, 25),
+      ).toBeLessThan(LINEAR);
+    }
+  }, 60_000);
+});
+
+describe('a styled display block keeps its marks beside an image', () => {
+  const img = '<img src="https://x.test/k.png">';
+  const read = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image'
+        ? `image@${block.depth}:${block.src?.replace('https://x.test/', '')}`
+        : `${block.type}@${block.depth}:${JSON.stringify(block.content)}`,
+    );
+  const bold = (text: string) => `paragraph@0:${JSON.stringify([{ text, marks: ['bold'] }])}`;
+
+  // `<aside>`, `<center>` and `<address>` are laid out as blocks but are not
+  // structure this reader knows, so their style is formatting, read where it
+  // stands -- as it already was without the image.
+  test.each(['aside', 'center', 'address'])('<%s> reads bold with an image in it', (tag) => {
+    expect(read(`<${tag} style="font-weight:bold">q z</${tag}>`)).toEqual([bold('q z')]);
+    expect(read(`<${tag} style="font-weight:bold">q z${img}</${tag}>`)).toEqual([
+      bold('q z'),
+      'image@0:k.png',
+    ]);
+  });
+
+  test('text on both sides of the image keeps the mark, and its blocks', () => {
+    expect(read(`<aside style="font-weight:bold">q${img}z</aside>`)).toEqual([
+      bold('q'),
+      'image@0:k.png',
+      bold('z'),
+    ]);
+  });
+
+  // It still ends the lines around it, as it did when its marks were lost.
+  test('it still stands apart from the text around it', () => {
+    expect(read(`before<aside style="font-weight:bold">q z${img}</aside>after`)).toEqual([
+      `paragraph@0:${JSON.stringify([{ text: 'before' }])}`,
+      bold('q z'),
+      'image@0:k.png',
+      `paragraph@0:${JSON.stringify([{ text: 'after' }])}`,
+    ]);
+  });
+
+  // The nearest formatting wins, exactly as the image-free read has it.
+  test('an inner wrapper still overrides it', () => {
+    const html = `<aside style="font-weight:bold"><span style="font-weight:normal">q</span> z</aside>`;
+    const withImage = html.replace('</aside>', `${img}</aside>`);
+
+    expect(read(withImage)).toEqual([...read(html), 'image@0:k.png']);
+  });
+
+  test('a link inside keeps both the link and the mark', () => {
+    expect(
+      read(`<center style="font-style:italic"><a href="https://l.test/">q z${img}</a></center>`),
+    ).toEqual([
+      `paragraph@0:${JSON.stringify([{ text: 'q z', marks: ['italic'], link: 'https://l.test/' }])}`,
+      'image@0:k.png',
+    ]);
+  });
+
+  test('its white-space still governs the text', () => {
+    expect(read(`<aside style="white-space:pre-wrap;font-weight:bold">q  z${img}</aside>`)).toEqual(
+      [bold('q  z'), 'image@0:k.png'],
+    );
+  });
+
+  // A block tag's style is not a mark, with or without the image: that is the
+  // reader's rule for `<div>` and `<p>`, not this defect.
+  test.each(['div', 'p'])('<%s> is unchanged', (tag) => {
+    expect(read(`<${tag} style="font-weight:bold">q z${img}</${tag}>`)).toEqual([
+      `paragraph@0:${JSON.stringify([{ text: 'q z' }])}`,
+      'image@0:k.png',
+    ]);
+  });
+
+  test('reading them is linear', () => {
+    const shapes = [
+      (n: number) => `<aside style="font-weight:bold">${`q ${img}`.repeat(n)}</aside>`,
+      (n: number) =>
+        `<center style="font-weight:bold">${'<span>'.repeat(n)}q${img}${'</span>'.repeat(n)}</center>`,
+      (n: number) => `<aside style="font-weight:bold">q${img}</aside>`.repeat(n),
     ];
 
     for (const shape of shapes) {

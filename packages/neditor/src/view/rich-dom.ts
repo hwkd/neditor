@@ -4560,13 +4560,29 @@ function visitBlocksInner(
     // bare lost.
     // Not one holding a display block either: that block's line breaks are
     // read from it where it stands, and copying its text out lost them.
+    // A display block the reader has no structure for -- `<aside>`, `<center>`,
+    // `<address>` -- is the same wrapper when it carries a style, and ends the
+    // lines on either side of it. Its marks are its own, read where it stands
+    // as they are without the image; walked bare, the image cost the text
+    // them, since `contentsOf` pushes formatting inward only into blocks.
     if (
       containsImage(element) &&
-      !DISPLAY_BLOCK_TAGS.has(tag) &&
+      (!DISPLAY_BLOCK_TAGS.has(tag) || isInlineWrapper(element)) &&
       !containsBlockLevel(element) &&
       !holdsDisplayBlock(element)
     ) {
+      const display = DISPLAY_BLOCK_TAGS.has(tag);
+
+      if (display) {
+        flushInline();
+      }
+
       splitAroundImages(element);
+
+      if (display) {
+        flushInline();
+      }
+
       continue;
     }
 
