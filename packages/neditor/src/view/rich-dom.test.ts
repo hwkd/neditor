@@ -2160,8 +2160,11 @@ describe('audit 32', () => {
       '<ol><li><p><a href="https://a.test/a.png"><img src="https://a.test/a.png"></a></p><p>Click the <a href="https://a.test/g.png"><img src="https://a.test/g.png"></a> icon.</p></li></ol>',
       [
         { type: 'numbered_list', depth: 0, text: 'Click the  icon.' },
-        { type: 'image', depth: 1, text: '', src: 'https://a.test/g.png' },
+        // In document order: the screenshot's paragraph comes first, and the
+        // icon is in the text after it (the text is read ahead; the picture
+        // in it is not).
         { type: 'image', depth: 1, text: '', src: 'https://a.test/a.png' },
+        { type: 'image', depth: 1, text: '', src: 'https://a.test/g.png' },
       ],
     ],
     [
@@ -6008,6 +6011,112 @@ describe('math audit round 6: a display equation in a list item changes no order
         `<ul><li>Text<br>${`${eq}${'<b> </b>'.repeat(4)}${linked}`.repeat(n)}tail</li></ul>`,
       (n: number) => `<ul><li>${eq.repeat(n)}<p>More</p></li></ul>`,
       (n: number) => `<ul><li>Text<br>${eq}<span>${'<video></video>'.repeat(n)}</span></li></ul>`,
+    ];
+
+    for (const shape of shapes) {
+      expect(
+        growth((n) => {
+          blocksFromHtml(document, shape(n));
+        }, 25),
+      ).toBeLessThan(LINEAR);
+    }
+  }, 60_000);
+});
+
+describe('a list item hands on its images in document order', () => {
+  const img = (name: string) => `<img src="https://x.test/${name}.png">`;
+  // In a wrapper the image is part of the item's text; bare, it is a block.
+  const inline = (name: string) => `<span>${img(name)}</span>`;
+  const read = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image'
+        ? `image@${block.depth}:${block.src?.replace('https://x.test/', '')}`
+        : `${block.type}@${block.depth}:${richToPlainText(block.content)}`,
+    );
+
+  // An item's text is still read before its blocks (round 6 accepted that);
+  // what moves is each image in that text, which is handed on among the
+  // item's blocks where the browser draws it rather than ahead of all of them.
+  test('an image after a nested list stays after it', () => {
+    expect(read(`<ul><li>a<ul><li>c</li></ul>${inline('1')}</li></ul>`)).toEqual([
+      'bulleted_list@0:a',
+      'bulleted_list@1:c',
+      'image@1:1.png',
+    ]);
+  });
+
+  test('images on either side of a nested list keep their sides', () => {
+    expect(
+      read(`<ul><li>a${inline('1')}<ul><li>c</li></ul>${inline('2')}</li></ul>`),
+    ).toEqual(['bulleted_list@0:a', 'image@1:1.png', 'bulleted_list@1:c', 'image@1:2.png']);
+  });
+
+  test('an image in text after a block follows the block', () => {
+    expect(read(`<ul><li>a<pre>p</pre><b>b${img('1')}</b></li></ul>`)).toEqual([
+      'bulleted_list@0:a\nb',
+      'code@1:p',
+      'image@1:1.png',
+    ]);
+  });
+
+  test('images between several blocks land between them', () => {
+    expect(
+      read(
+        `<ul><li>a${inline('0')}<pre>p</pre>${inline('1')}<ul><li>c</li></ul>${inline('2')}<hr>${inline('3')}</li></ul>`,
+      ),
+    ).toEqual([
+      'bulleted_list@0:a',
+      'image@1:0.png',
+      'code@1:p',
+      'image@1:1.png',
+      'bulleted_list@1:c',
+      'image@1:2.png',
+      'divider@1:',
+      'image@1:3.png',
+    ]);
+  });
+
+  // The paragraph an item takes as its text is read ahead of the block before
+  // it, by design; its picture is not text and stays where it stood.
+  test('a promoted paragraph keeps its picture after the block before it', () => {
+    expect(read(`<ul><li><pre>p</pre><p>Click ${img('1')}</p></li></ul>`)).toEqual([
+      'bulleted_list@0:Click ',
+      'code@1:p',
+      'image@1:1.png',
+    ]);
+  });
+
+  // A bare image is a block of the item's already, and was always in order.
+  test('bare and inline images interleave in document order', () => {
+    expect(
+      read(`<ul><li>a<ul><li>c</li></ul>${inline('1')}${img('2')}${inline('3')}</li></ul>`),
+    ).toEqual([
+      'bulleted_list@0:a',
+      'bulleted_list@1:c',
+      'image@1:1.png',
+      'image@1:2.png',
+      'image@1:3.png',
+    ]);
+  });
+
+  // Blocks with nothing between them are still visited together, so an item
+  // without images reads exactly as it did.
+  test('an item with no images is unchanged', () => {
+    expect(read('<ul><li>a<pre>p</pre><ul><li>c</li></ul><p>d</p></li></ul>')).toEqual([
+      'bulleted_list@0:a',
+      'code@1:p',
+      'bulleted_list@1:c',
+      'paragraph@1:d',
+    ]);
+  });
+
+  // One walk places every image: neither images nor blocks are looked for
+  // again per block.
+  test('placing them is linear in the item', () => {
+    const shapes = [
+      (n: number) => `<ul><li>a${`<pre>p</pre>${inline('i')}`.repeat(n)}</li></ul>`,
+      (n: number) => `<ul><li>a${`<hr><b>b${img('i')}</b>`.repeat(n)}</li></ul>`,
+      (n: number) => `<ul><li>a${`<ul><li>c</li></ul>${inline('i')}`.repeat(n)}</li></ul>`,
     ];
 
     for (const shape of shapes) {

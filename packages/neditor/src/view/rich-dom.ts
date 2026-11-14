@@ -3114,19 +3114,34 @@ function opensLine(element: Element, handedOn: (child: Element) => boolean): boo
 /**
  * The images in an element's own text, past whatever `skip` hides. `pushImage`
  * refuses any whose source is unusable.
+ *
+ * @param passed Told, for each element `skip` hides, how many of the images
+ * come before it: a list item uses it to hand each image on among its blocks
+ * where it stands, in the same walk that finds them.
  */
-function textImages(root: Element, skip: SkipPredicate): Element[] {
+function textImages(
+  root: Element,
+  skip: SkipPredicate,
+  passed?: (skipped: Element, images: number) => void,
+): Element[] {
   const images: Element[] = [];
   const walker = root.ownerDocument.createTreeWalker(root, SHOW_ELEMENT, {
     acceptNode: (candidate) => {
       const tag = tagNameOf(candidate);
 
+      if (SKIP_TAGS.has(tag)) {
+        return FILTER_REJECT;
+      }
+
+      // The walk reaches what it skips in document order, so this is how
+      // many of the images come before it.
+      if (skip(candidate as Element, tag)) {
+        passed?.(candidate as Element, images.length);
+        return FILTER_REJECT;
+      }
+
       // Nor a picture inside a copy the reader skips.
-      return SKIP_TAGS.has(tag) ||
-        skip(candidate as Element, tag) ||
-        isAssistiveMathCopy(candidate as Element)
-        ? FILTER_REJECT
-        : FILTER_ACCEPT;
+      return isAssistiveMathCopy(candidate as Element) ? FILTER_REJECT : FILTER_ACCEPT;
     },
   });
 
@@ -3454,17 +3469,48 @@ function visitListItemInner(
   // An image in the item's text -- its own paragraph, a wrapper, a promoted
   // paragraph, a loose to-do's line -- is handed on as a child image, as a
   // bare one is. Read as text it was dropped: the text has no image.
-  for (const image of textImages(item, skip)) {
-    pushImage(out, image, itemDepth + 1);
+  //
+  // A list nested inside the item continues one level deeper, and so does
+  // every other block it holds, in the order the item holds them -- and the
+  // images go among them where the browser draws them. The text is read
+  // ahead of the blocks, but a picture is no part of the text: handed on
+  // ahead of every block, one after a nested list landed above it. Blocks
+  // with no image between them are still visited as one run.
+  const before = new Map<Element, number>();
+  const isOwnBlock = (child: Node): boolean => blocks.has(child as Element);
+  const images = textImages(item, skip, (block, count) => before.set(block, count));
+  let next = 0;
+  let run: Element[] = [];
+
+  const visitRun = (): void => {
+    if (run.length > 0) {
+      visitBlocks(item.ownerDocument, item, itemDepth + 1, out, undefined, isOwnBlock, run);
+      run = [];
+    }
+  };
+
+  const imagesUntil = (until: number): void => {
+    if (until > next) {
+      visitRun();
+    }
+
+    for (; next < until; next += 1) {
+      pushImage(out, images[next]!, itemDepth + 1);
+    }
+  };
+
+  if (blocks.size > 0) {
+    for (const child of item.children) {
+      if (blocks.has(child)) {
+        imagesUntil(before.get(child) ?? next);
+        run.push(child);
+      }
+    }
   }
 
-  // A list nested inside the item continues one level deeper, and so does
-  // every other block it holds, in the order the item holds them.
-  if (blocks.size > 0) {
-    visitBlocks(item.ownerDocument, item, itemDepth + 1, out, undefined, (child) =>
-      blocks.has(child as Element),
-    );
-  }
+  // What is left comes after the last block.
+  imagesUntil(images.length);
+  visitRun();
 }
 
 function visitList(list: Element, depth: number, out: Block[]): void {
@@ -4067,7 +4113,8 @@ function collapseWhitespace(
  * so stray text at the top level is not silently dropped.
  *
  * @param include Which children to visit, where only some are blocks: a list
- * item's, whose text the item has already read in place.
+ * item's, whose text the item has already read in place. Given with
+ * `children`, it picks from that run alone.
  * @param children The children to visit, where they are a run of `node`'s:
  * loose content in a list, read where it stands rather than copied out.
  */
@@ -4083,10 +4130,12 @@ function visitBlocks(
   if (blockNesting >= MAX_BLOCK_NESTING) {
     // What the reader skips stays out here too: an excluded summary was read
     // into the body as well as the title.
-    for (const rest of children
-      ? [children]
-      : include
-        ? [...node.childNodes].filter(include)
+    // Picked by `include`, each child is a remainder of its own, whether or
+    // not the run it is picked from is given.
+    for (const rest of include
+      ? (children ?? [...node.childNodes]).filter(include)
+      : children
+        ? [children]
         : exclude
           ? [[...node.childNodes].filter((child) => child !== exclude)]
           : [node]) {
