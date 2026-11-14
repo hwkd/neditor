@@ -89,6 +89,41 @@ describe('normalizeDepths', () => {
 
     expect(Math.max(...depths(normalizeDepths(blocks)))).toBe(MAX_DEPTH);
   });
+
+  /**
+   * The re-clamp keeps the tree it was given: a block's parent is the nearest
+   * shallower block above it, before and after. Clamping each block against
+   * only its predecessor moved the toggle up and left its sibling behind, one
+   * level deeper than the toggle -- inside it, and hidden when it is collapsed.
+   */
+  test('a block clamped shallower takes its siblings with it, not just its children', () => {
+    // `parent` was removed from between `root` and the toggle.
+    const blocks = [
+      createBlock('paragraph', 'root', 0),
+      { ...createBlock('toggle', 'toggle', 2), collapsed: true },
+      createBlock('paragraph', 'hidden', 3),
+      createBlock('paragraph', 'sibling', 2),
+    ];
+    const result = normalizeDepths(blocks);
+
+    expect(depths(result)).toEqual([0, 1, 2, 1]);
+    expect(texts(visibleBlocks(result))).toEqual(['root', 'toggle', 'sibling']);
+    expect(descendantsOf(result, blocks[1]!.id)).toEqual([blocks[2]!.id]);
+  });
+
+  test('a block shallower than one clamped above it is never put under it', () => {
+    // `b` and `c` both sit outside `x` (neither is deeper than 3), so neither
+    // may end up as its child, wherever `x` lands.
+    const { blocks } = build(['a', 0], ['x', 3], ['b', 2], ['c', 1]);
+
+    expect(depths(normalizeDepths(blocks))).toEqual([0, 1, 1, 1]);
+  });
+
+  test('a first block deeper than the next does not adopt it', () => {
+    const { blocks } = build(['a', 2], ['b', 1]);
+
+    expect(depths(normalizeDepths(blocks))).toEqual([0, 0]);
+  });
 });
 
 /**

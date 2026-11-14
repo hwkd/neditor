@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, test } from 'vitest';
 
 import type { Block, NEditorDocument } from './index.ts';
-import { blockText, createEditor, normalizeDocument, toMarkdown } from './index.ts';
+import { blockText, createEditor, normalizeDocument, toMarkdown, visibleBlocks } from './index.ts';
 import type { NEditor } from './editor.ts';
 
 /**
@@ -134,10 +134,21 @@ describe('a malformed stored document cannot break the editor', () => {
 
   test('imported depths are pulled back to the indent invariant', () => {
     const doc = normalizeDocument({
-      blocks: [block({ depth: 9 }), block({ depth: 9 })],
+      blocks: [block({ depth: 9 }), block({ depth: 9 }), block({ depth: 10 })],
     });
 
-    expect(doc.blocks.map((b) => b.depth)).toEqual([0, 1]);
+    // Two blocks at the same depth are siblings, and stay siblings: this used
+    // to come back as [0, 1, 2], the second block adopted by the first.
+    expect(doc.blocks.map((b) => b.depth)).toEqual([0, 0, 1]);
+  });
+
+  test('a stored sibling of a collapsed toggle is not hidden inside it on load', () => {
+    const doc = normalizeDocument({
+      blocks: [block({ type: 'toggle', collapsed: true, depth: 9 }), block({ depth: 9 })],
+    });
+
+    expect(doc.blocks.map((b) => b.depth)).toEqual([0, 0]);
+    expect(visibleBlocks(doc.blocks)).toHaveLength(2);
   });
 });
 

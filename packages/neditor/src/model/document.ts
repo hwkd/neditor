@@ -804,16 +804,35 @@ export function computeListNumbers(blocks: readonly Block[]): Map<string, number
  * cheap but means a move can leave an orphan indented under nothing. Re-running
  * this after any structural change restores the invariant.
  *
+ * It repairs depths without changing the tree they describe. A block's parent
+ * is the nearest block above it that is shallower, and that is the same block
+ * before and after: each block lands one level below its parent's *new* depth.
+ * Clamping against the predecessor alone did not keep that. Delete the parent
+ * of `toggle (2) > hidden (3)` followed by `sibling (2)` and the toggle and its
+ * child came up a level while the sibling stayed at 2 -- now deeper than the
+ * toggle, so inside it, and hidden outright when the toggle was collapsed. On a
+ * document that already satisfies the invariant this is the identity, and every
+ * block is reused, which `sameBlocks` relies on to see a no-op.
+ *
  * The ceiling belongs here rather than only in `normalizeDocument`, because
  * this is the one function every structural edit ends in: a limit applied on
  * load alone is not a limit, it is a document that changes shape when reloaded.
  */
 export function normalizeDepths(blocks: readonly Block[]): Block[] {
-  let previousDepth = -1;
+  // The open ancestors of the current block: their depths as given, and the
+  // depths they were given here. Both strictly increase from the bottom.
+  const givenDepths: number[] = [];
+  const newDepths: number[] = [];
 
   return blocks.map((block) => {
-    const depth = Math.max(0, Math.min(block.depth, previousDepth + 1, MAX_DEPTH));
-    previousDepth = depth;
+    while (givenDepths.length > 0 && givenDepths.at(-1)! >= block.depth) {
+      givenDepths.pop();
+      newDepths.pop();
+    }
+
+    const depth = Math.max(0, Math.min((newDepths.at(-1) ?? -1) + 1, MAX_DEPTH));
+    givenDepths.push(block.depth);
+    newDepths.push(depth);
 
     return depth === block.depth ? block : { ...block, depth };
   });
