@@ -75,7 +75,6 @@ export class ImageEditor {
     this.#error.id = `neditor-image-error-${(imageErrorIds += 1)}`;
     this.#error.textContent = labels.invalidUrl;
     this.#error.hidden = true;
-    this.#src.setAttribute('aria-describedby', this.#error.id);
 
     this.#element.append(this.#src, this.#alt, this.#error, actions);
   }
@@ -119,6 +118,10 @@ export class ImageEditor {
     this.#src.dataset.invalid = 'true';
     this.#src.setAttribute('aria-invalid', 'true');
     this.#error.hidden = false;
+    // Named as the field's description only while it is shown: a hidden
+    // element a field names directly is still read as its description, and
+    // every open announced the error over a value that had none.
+    this.#src.setAttribute('aria-describedby', this.#error.id);
     this.#src.focus();
     this.#src.select();
   }
@@ -127,6 +130,7 @@ export class ImageEditor {
   #clearInvalid(): void {
     delete this.#src.dataset.invalid;
     this.#src.removeAttribute('aria-invalid');
+    this.#src.removeAttribute('aria-describedby');
     this.#error.hidden = true;
   }
 

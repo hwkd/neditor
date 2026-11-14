@@ -959,3 +959,55 @@ describe('a span is split only when it is really too long to read back', () => {
     expect(back).toEqual([{ text, marks: ['bold'] }]);
   });
 });
+
+describe('a URL holding a dollar', () => {
+  const para = (content: TextRun[]): Block => ({ ...createBlock('paragraph', ''), content });
+  const atom = (tex: string): TextRun => ({ text: '\uFFFC', math: tex });
+
+  // Audit round 2: `$` was made unsafe in every autolink, so an OData query
+  // went out as `?\$filter=` -- a link with a backslash in it to GFM.
+  test('is an autolink when nothing after it holds a bare dollar', () => {
+    expect(toMarkdown({ blocks: [para([{ text: 'see https://h.test/?$filter=a&$top=2' }])] })).toBe(
+      'see <https://h.test/?$filter=a&$top=2>',
+    );
+    expect(
+      toMarkdown({
+        blocks: [para([atom('y'), { text: ' https://h.test/?$top=2' }])],
+      }),
+    ).toBe('$y$ <https://h.test/?$top=2>');
+    expect(
+      toMarkdown({
+        blocks: [para([{ text: 'https://h.test/?$top=2', marks: ['strikethrough'] }])],
+      }),
+    ).toBe('~~<https://h.test/?$top=2>~~');
+  });
+
+  // The URL's `$` is plain text once the autolink closes, and the reader
+  // pairs it with the next bare `$` in the block: a formula's, or one in a
+  // code span (`<https://a.test/a$b> c$y$` made a formula of `b> c`).
+  test('keeps the escaped spelling when a bare dollar follows it in the block', () => {
+    expect(toMarkdown({ blocks: [para([{ text: 'https://a.test/a$b c' }, atom('y')])] })).toBe(
+      'https://a.test/a\\$b c$y$',
+    );
+    expect(
+      toMarkdown({
+        blocks: [para([{ text: 'https://a.test/a$b ' }, { text: 'c$', marks: ['code'] }])],
+      }),
+    ).toBe('https://a.test/a\\$b `c$`');
+  });
+
+  test('round-trips either way', () => {
+    for (const content of [
+      [{ text: 'see https://h.test/?$filter=a and more' }],
+      [{ text: 'https://a.test/a$b c' }, atom('y')],
+      [{ text: 'https://a.test/a$b ' }, { text: 'c$', marks: ['code'] }],
+      [{ text: 'https://a.test/a$b ' }, { text: 'c$', marks: ['code'] }, { text: 'x$' }],
+    ] satisfies TextRun[][]) {
+      const [read] = blocksFromMarkdown(toMarkdown({ blocks: [para(content)] }));
+
+      expect(read?.content).toEqual(
+        normalizeDocument({ blocks: [para(content)] }).blocks[0]?.content,
+      );
+    }
+  });
+});

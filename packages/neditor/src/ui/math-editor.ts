@@ -14,6 +14,9 @@ import { createPortal, positionPortal } from './portal.ts';
  * for so that it can put the caret back when it closes.
  */
 
+/** Distinguishes the error-message ids when several dialogs share a page. */
+let errorIds = 0;
+
 export interface MathEditorHooks {
   onApply(tex: string): void;
   onRemove(): void;
@@ -24,6 +27,7 @@ export class MathEditor {
   readonly #element: HTMLElement;
   readonly #input: HTMLInputElement;
   readonly #preview: HTMLElement;
+  readonly #error: HTMLElement;
   readonly #removeButton: HTMLButtonElement;
   readonly #hooks: MathEditorHooks;
   readonly #renderMath: MathRenderer | undefined;
@@ -74,9 +78,21 @@ export class MathEditor {
 
     // The picture of what is being typed. Hidden from assistive technology:
     // the field holds the same formula as TeX, which is what is being edited.
+    // Out of the tab order too, though a wide one scrolls: a scroller is a tab
+    // stop in Chrome and Firefox, and this one would be announced as nothing.
     this.#preview = doc.createElement('div');
     this.#preview.className = 'neditor-math-editor__preview';
     this.#preview.setAttribute('aria-hidden', 'true');
+    this.#preview.tabIndex = -1;
+
+    // What the picture cannot say: that the renderer refused the TeX. Wired to
+    // the field the way the link popover wires a rejected URL, so it is read
+    // with it, and said in words rather than in the picture's red.
+    this.#error = doc.createElement('p');
+    this.#error.className = 'neditor-link-editor__error neditor-math-editor__error';
+    this.#error.id = `neditor-math-error-${(errorIds += 1)}`;
+    this.#error.textContent = labels.mathError;
+    this.#error.hidden = true;
 
     const apply = doc.createElement('button');
     apply.type = 'button';
@@ -95,7 +111,7 @@ export class MathEditor {
       this.#hooks.onRemove();
     });
 
-    this.#element.append(this.#input, this.#preview, apply, this.#removeButton);
+    this.#element.append(this.#input, apply, this.#removeButton, this.#preview, this.#error);
   }
 
   get element(): HTMLElement {
@@ -151,8 +167,22 @@ export class MathEditor {
     // Nothing to show without a renderer: the field already shows the TeX.
     this.#preview.hidden = !this.#renderMath || tex.trim().length === 0;
 
-    if (!this.#preview.hidden) {
-      drawMath(this.#preview, tex, false, this.#renderMath);
+    const failed = !this.#preview.hidden && !drawMath(this.#preview, tex, false, this.#renderMath);
+
+    this.#preview.hidden ||= failed;
+    this.#error.hidden = !failed;
+
+    // Named as the field's description only while it is shown: a hidden
+    // element a field names directly is still read as its description, and
+    // every open announced the error over TeX that drew.
+    if (failed) {
+      this.#input.dataset.invalid = 'true';
+      this.#input.setAttribute('aria-invalid', 'true');
+      this.#input.setAttribute('aria-describedby', this.#error.id);
+    } else {
+      delete this.#input.dataset.invalid;
+      this.#input.removeAttribute('aria-invalid');
+      this.#input.removeAttribute('aria-describedby');
     }
   }
 }

@@ -1,9 +1,10 @@
-import { matchInlineRule } from './input/inline-rules.ts';
+import { matchInlineRuleInRuns } from './input/inline-rules.ts';
 import { matchInputRule } from './input/input-rules.ts';
 import { blocksFromMarkdown } from './input/markdown.ts';
 import type { Block, BlockType, NEditorDocument } from './model/document.ts';
 import {
   DEFAULT_CALLOUT_ICON,
+  MAX_DEPTH,
   acceptsChildren,
   blockIdRange,
   canMergeText,
@@ -55,6 +56,7 @@ import { History } from './model/history.ts';
 import type { Mark, RichText } from './model/rich-text.ts';
 import {
   isMathRun,
+  normalizeRuns,
   richActiveLink,
   richActiveMarks,
   richConcat,
@@ -63,6 +65,7 @@ import {
   richFromPlainText,
   richInsert,
   richLength,
+  richLinkAt,
   richMarksAt,
   richMath,
   richSetLink,
@@ -90,7 +93,7 @@ import type { TableCommand } from './ui/table-toolbar.ts';
 import { TableToolbar } from './ui/table-toolbar.ts';
 import type { MathRenderer } from './view/math.ts';
 import { Renderer } from './view/renderer.ts';
-import { blocksFromHtml, blocksToHtml, parseRichText } from './view/rich-dom.ts';
+import { blocksFromHtml, blocksToHtml, parseRichText, renderRichText } from './view/rich-dom.ts';
 import type { OffsetRange } from './view/selection.ts';
 import {
   getCaretOffset,
@@ -98,12 +101,13 @@ import {
   readSelection,
   isCaretAtEnd,
   isCaretAtStart,
+  offsetAt,
   offsetsOfNode,
   setCaretOffset,
   setSelectionRange,
 } from './view/selection.ts';
 import { Emitter } from './util/emitter.ts';
-import { asElement, hasInputType, isNode } from './util/dom.ts';
+import { asElement, hasInputType, isElement, isNode } from './util/dom.ts';
 import { firstGrapheme } from './util/grapheme.ts';
 import { sanitizeImageUrl, sanitizeUrl } from './util/url.ts';
 
@@ -157,7 +161,10 @@ export interface NEditorOptions {
    *
    * `@neditor/core` has no dependencies, so it ships no math typesetter: pass
    * one in. With KaTeX that is
-   * `(tex, { displayMode }) => katex.renderToString(tex, { displayMode, throwOnError: false })`.
+   * `(tex, { displayMode }) => katex.renderToString(tex, { displayMode, throwOnError: true })`:
+   * a throw is how the editor learns the TeX is invalid and says so in words,
+   * where KaTeX's own red error under `throwOnError: false` reaches no screen
+   * reader.
    * Without one, formulas still work -- they are typed, stored, copied and
    * exported as TeX -- and are shown as their TeX source.
    *
@@ -435,19 +442,34 @@ function richFromBlocks(blocks: readonly Block[]): RichText {
     }
 
     if (block.type === 'table') {
-      // A table keeps its text in `rows`, so it has no runs of its own.
-      parts.push(richFromPlainText(blockText(block)));
+      // A table keeps its text in `rows`, so it has no runs of its own. Its
+      // cells' runs are joined, not their plain text: that is each formula as
+      // an atom character with its TeX gone.
+      (block.rows ?? []).forEach((row, rowIndex) => {
+        if (rowIndex > 0) {
+          parts.push(richFromPlainText('\n'));
+        }
+
+        row.forEach((cell, column) => {
+          if (column > 0) {
+            parts.push(richFromPlainText('\t'));
+          }
+
+          parts.push(cell);
+        });
+      });
     } else if (block.type === 'image') {
       // Nor does an image, and a cell cannot hold one -- but dropping it left
       // the paste doing nothing at all, with no change event and no sign that
       // anything had been refused. Its caption, then its alt text, then its
       // source, linked to itself: the information survives in the form a cell
-      // can take, and in the order that describes the image best.
-      const label = blockText(block) || block.alt || block.src || '';
+      // can take, and in the order that describes the image best. The caption
+      // as runs, so its formulas and formatting come too.
+      const caption = isRichEmpty(block.content)
+        ? richFromPlainText(block.alt || block.src || '')
+        : block.content;
 
-      if (label.length > 0) {
-        parts.push(richFromPlainText(label, undefined, block.src));
-      }
+      parts.push(block.src ? richSetLink(caption, 0, richLength(caption), block.src) : caption);
     } else if (block.type === 'math') {
       // A cell holds one line of text, and a display equation is a formula
       // on a line of its own: in a cell it becomes that formula, inline.
@@ -457,7 +479,18 @@ function richFromBlocks(blocks: readonly Block[]): RichText {
     }
   }
 
-  return richConcat(...parts);
+  // `richConcat(...parts)` spreads every block into one call, which the
+  // engine caps; this is what it does, without the cap.
+  return normalizeRuns(parts.flat());
+}
+
+/** Whether a block carries math: a display equation, or a formula in its runs or cells. */
+function holdsMath(block: Block): boolean {
+  return (
+    block.type === 'math' ||
+    block.content.some(isMathRun) ||
+    (block.rows ?? []).some((row) => row.some((cell) => cell.some(isMathRun)))
+  );
 }
 
 /** Formatting that applies to the current selection. */
@@ -508,6 +541,79 @@ const POINTER_FOCUS_GRACE_MS = 300;
 
 /** How far a touch may drift and still count as a press rather than a drag. */
 const LONG_PRESS_TOLERANCE_PX = 10;
+
+/** The depth of the shallowest of some blocks: a fold, never a spread. */
+export function shallowest(blocks: readonly Block[]): number {
+  // Spread into `Math.min`, a paste of 140,000 list items overflowed the
+  // call stack and pasted nothing.
+  return blocks.reduce((least, block) => Math.min(least, block.depth), Infinity);
+}
+
+/**
+ * The depths pasted blocks go in at, below a block at `base`: the paste's own
+ * shape, each block measured from the shallowest one so far, with the first at
+ * `base` and none more than one level below the one before it.
+ *
+ * Every way a paste lands uses this. Each had its own sum before, and each
+ * was wrong somewhere: `base + depth` put a paste that starts nested
+ * (`<ul><ul><li>`, a drag begun in a sub-item) inside the block before it --
+ * a collapsed toggle there, where nobody saw it; rebasing on the first block
+ * alone flattened everything after a shallower one; and measuring from the
+ * shallowest block of the whole paste put a block that climbs back up (`a`
+ * at 2, `b` at 1, `c` at 0) under the one before it -- `b` became `a`'s child,
+ * and a block after a pasted collapsed toggle went inside it.
+ */
+export function pastedDepths(pasted: readonly Block[], base: number): number[] {
+  const depths: number[] = [];
+  let least = Infinity;
+
+  for (const block of pasted) {
+    least = Math.min(least, block.depth);
+    const previous = depths.at(-1);
+    depths.push(previous === undefined ? base : Math.min(base + block.depth - least, previous + 1));
+  }
+
+  return depths;
+}
+
+/**
+ * Opens each collapsed toggle the paste brought that would hide one of
+ * `shown`: the reader's own blocks after the paste, and the pasted block the
+ * reader's text after the caret went into. Ending in a closed `<details>`, a
+ * paste took the list item's sub-items under its fold, or the selected
+ * toggle's visible child, and they were gone from view.
+ */
+function openPastedFolds(
+  blocks: Block[],
+  pasted: ReadonlySet<string>,
+  shown: ReadonlyArray<string | undefined>,
+): Block[] {
+  const open = new Set<string>();
+
+  for (const id of shown) {
+    const at = id === undefined ? -1 : findBlockIndex(blocks, id);
+    let depth = blocks[at]?.depth ?? 0;
+
+    for (let index = at - 1; index >= 0 && depth > 0; index -= 1) {
+      const block = blocks[index]!;
+
+      if (block.depth < depth) {
+        if (block.collapsed && pasted.has(block.id)) {
+          open.add(block.id);
+        }
+
+        depth = block.depth;
+      }
+    }
+  }
+
+  return open.size === 0
+    ? blocks
+    : blocks.map((block) => (open.has(block.id) ? { ...block, collapsed: false } : block));
+}
+
+/** Keys pressed on their own only to change what the next key types. */
+const MODIFIER_KEYS = new Set(['Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'CapsLock']);
 
 /** Keys that deliberately reposition the caret, ending a typing run. */
 const CARET_KEYS = new Set([
@@ -670,6 +776,28 @@ export class NEditor {
     end: number;
     cell?: CellCoords;
     existing: boolean;
+    /**
+     * The selection the popover was opened from, which is not always the
+     * range it replaces: a caret beside a formula opens that formula. Escape
+     * puts back this, not the formula's range -- restoring the range left
+     * the formula selected, and the next keystroke replaced it.
+     */
+    selection: SelectionSnapshot;
+  } | null = null;
+
+  /**
+   * A formula the `$` rule just made, until the next keystroke says whether it
+   * was one: a digit straight after it means the dollars were a price
+   * (`$5-$10`), which is Pandoc's third condition and the one typing cannot
+   * ask in advance. See `#takeBackFormula`.
+   */
+  #ruleFormula: {
+    blockId: string;
+    cell?: CellCoords;
+    offset: number;
+    source: string;
+    /** The document the rule replaced, which history recorded before it. */
+    before: Block[];
   } | null = null;
 
   /**
@@ -986,6 +1114,9 @@ export class NEditor {
         onEditLink: () => {
           this.openLinkEditor();
         },
+        onEditMath: () => {
+          this.openMathEditor();
+        },
       },
       this.#labels,
     );
@@ -1259,7 +1390,9 @@ export class NEditor {
   toggleMark(mark: Mark): void {
     const target = this.#selectionTarget();
 
-    if (!target || !this.#editable) {
+    // Literal text has no formatting: in a code block or an equation a mark
+    // was stored, shown, and dropped by the next save.
+    if (!target || !this.#editable || isLiteralType(target.block.type)) {
       return;
     }
 
@@ -1294,7 +1427,12 @@ export class NEditor {
   setLink(href: string | null): boolean {
     const target = this.#selectionTarget();
 
-    if (!target || !this.#editable || target.range.start === target.range.end) {
+    if (
+      !target ||
+      !this.#editable ||
+      target.range.start === target.range.end ||
+      isLiteralType(target.block.type)
+    ) {
       return false;
     }
 
@@ -1315,7 +1453,12 @@ export class NEditor {
   openLinkEditor(): void {
     const target = this.#selectionTarget();
 
-    if (!target || !this.#editable || target.range.start === target.range.end) {
+    if (
+      !target ||
+      !this.#editable ||
+      target.range.start === target.range.end ||
+      isLiteralType(target.block.type)
+    ) {
       return;
     }
 
@@ -1373,18 +1516,29 @@ export class NEditor {
     }
 
     const selected = richSlice(content, start, end);
-    const tex = existing ? (selected[0]?.math ?? '') : richToSourceText(selected);
+    // A selection becomes TeX the way an equation takes text: a formula in it
+    // is its bare TeX, never `$…$` -- a bare `$` inside a formula ends it.
+    const tex = existing
+      ? (selected[0]?.math ?? '')
+      : richToPlainText(contentForType('math', selected));
+    const cell = target.cell ? { cell: target.cell } : {};
 
     this.#mathContext = {
       blockId: target.block.id,
       start,
       end,
       existing,
-      ...(target.cell ? { cell: target.cell } : {}),
+      selection: {
+        blockId: target.block.id,
+        start: target.range.start,
+        end: target.range.end,
+        ...cell,
+      },
+      ...cell,
     };
     this.#toolbar.hide();
     this.#mathEditor.open(
-      this.#mathAnchor(target.content, start, existing) ??
+      this.#mathAnchor(target.content, content, start, existing) ??
         this.#selectionRect() ??
         target.content.getBoundingClientRect(),
       tex,
@@ -1392,19 +1546,27 @@ export class NEditor {
     );
   }
 
-  /** The formula element at `start`, measured, when there is one to point at. */
-  #mathAnchor(host: HTMLElement, start: number, existing: boolean): DOMRect | null {
+  /**
+   * The formula element at `start`, measured, when there is one to point at.
+   *
+   * Found by counting: the formulas before `start` in the model are the
+   * elements before it in the host, one each. Measuring every element's offset
+   * to find the one at `start` cost the square of the formulas in the block
+   * on every click.
+   */
+  #mathAnchor(
+    host: HTMLElement,
+    content: RichText,
+    start: number,
+    existing: boolean,
+  ): DOMRect | null {
     if (!existing) {
       return null;
     }
 
-    for (const atom of host.querySelectorAll('[data-neditor-math]')) {
-      if (offsetsOfNode(host, atom)?.start === start) {
-        return atom.getBoundingClientRect();
-      }
-    }
+    const index = richSlice(content, 0, start).filter(isMathRun).length;
 
-    return null;
+    return host.querySelectorAll('[data-neditor-math]')[index]?.getBoundingClientRect() ?? null;
   }
 
   /**
@@ -2067,7 +2229,11 @@ export class NEditor {
 
       if (block) {
         // A formula is announced as its TeX, not as an object character.
-        const text = (block.type === 'table' ? blockText(block) : richToSourceText(block.content))
+        const text = (
+          block.type === 'table'
+            ? (block.rows ?? []).map((row) => row.map(richToSourceText).join('\t')).join('\n')
+            : richToSourceText(block.content)
+        )
           .trim()
           .slice(0, NEditor.#SELECTION_TEXT_LIMIT);
         const type = this.#typeName(block.type);
@@ -2743,6 +2909,11 @@ export class NEditor {
   /* ------------------------------------------------------------ clipboard -- */
 
   #handleCopy = (event: ClipboardEvent): void => {
+    if (this.#selected.size === 0 && event.clipboardData) {
+      this.#copyFormulas(event);
+      return;
+    }
+
     if (this.#selected.size === 0 || !event.clipboardData) {
       return;
     }
@@ -2764,6 +2935,52 @@ export class NEditor {
       this.#deleteSelectedBlocks();
     }
   };
+
+  /**
+   * Copies a text range that holds a formula as its TeX.
+   *
+   * Everywhere else a text range is the browser's to copy, but the browser
+   * serializes what is on screen, and a formula on screen is the renderer's
+   * picture: KaTeX's spans as HTML, and its glyphs twice over as plain text
+   * (`x^2` copied as `x2x2`). Only a range holding a formula is taken over,
+   * and written as a block copy writes it: `blocksToHtml`'s spelling, which
+   * carries the TeX, and the TeX between dollars as the plain text.
+   */
+  #copyFormulas(event: ClipboardEvent): void {
+    const target = this.#selectionTarget();
+
+    if (!target || target.range.start === target.range.end) {
+      return;
+    }
+
+    const slice = richSlice(this.#contentOf(target), target.range.start, target.range.end);
+
+    if (!slice.some(isMathRun)) {
+      return;
+    }
+
+    event.preventDefault();
+
+    // Marked `pre-wrap` as every block the clipboard writer writes is, and as
+    // the browser's own copy of the block was: unmarked, the reader collapses
+    // it as a browser draws it, and a Shift+Enter line or a run of spaces
+    // beside a formula was lost on paste.
+    const host = this.#document.createElement('div');
+    const phrase = this.#document.createElement('span');
+    phrase.style.whiteSpace = 'pre-wrap';
+    phrase.append(renderRichText(this.#document, slice));
+    host.append(phrase);
+    event.clipboardData?.setData('text/html', host.innerHTML);
+    event.clipboardData?.setData('text/plain', richToSourceText(slice));
+
+    if (event.type === 'cut' && this.#canEdit()) {
+      this.#commitResolved(
+        target,
+        richDelete(this.#contentOf(target), target.range.start, target.range.end),
+      );
+      this.#focusResolved(target, target.range.start);
+    }
+  }
 
   /**
    * A clipboard event in block mode that never reached the root.
@@ -3078,6 +3295,9 @@ export class NEditor {
 
   /** Remembers which block a text drag started in. */
   #handleRootPointerDown = (event: PointerEvent): void => {
+    // A press puts the caret somewhere, if only where it was.
+    this.#ruleFormula = null;
+
     if (this.#drag || event.button !== 0) {
       return;
     }
@@ -3432,6 +3652,15 @@ export class NEditor {
     runKey: string | null = null,
     selection?: SelectionSnapshot | null,
   ): void {
+    // Every rich-text op hands back a fresh array, and `updateBlock` compares
+    // fields by identity, so an edit that changed nothing -- the same TeX
+    // applied again, bold toggled over a lone formula, which takes no marks --
+    // reached `#commit` looking like one: an undo step and a `change` for a
+    // document nobody touched. Compared here, as `#syncFromDom` compares.
+    if (richEquals(this.#contentOf(target), content)) {
+      return;
+    }
+
     if (!target.cell) {
       this.#commitContent(target.block.id, content, runKey, selection);
       return;
@@ -3450,6 +3679,21 @@ export class NEditor {
   /** Places the caret in a table cell. */
   #focusCell(id: string, row: number, column: number, start: number, end = start): void {
     this.focusRange(id, start, end, { row, column });
+  }
+
+  /**
+   * Puts the caret back in the host the reader is typing in, without
+   * revealing the host: a key that deletes or retypes a character in place
+   * leaves the page where it was, as the browser's own edit there did. The
+   * host already holds focus; `focusRange` would scroll a block taller than
+   * the window to line it up.
+   */
+  #caretInPlace(target: ResolvedTarget, offset: number): void {
+    const host = this.#hostFor(target.block.id, target.cell);
+
+    if (host) {
+      setSelectionRange(host, offset, offset);
+    }
   }
 
   /** Restores a selection to whichever host it came from. */
@@ -3546,6 +3790,18 @@ export class NEditor {
     const { range } = target;
 
     const content = this.#contentOf(target);
+
+    // Nothing on it applies to a code block or an equation, whose text is
+    // literal, nor to a selection of formulas alone, which take no marks or
+    // links: every button would be a no-op.
+    if (
+      isLiteralType(target.block.type) ||
+      richSlice(content, range.start, range.end).every(isMathRun)
+    ) {
+      this.#toolbar.hide();
+      this.#syncTableToolbar();
+      return;
+    }
 
     this.#toolbar.show(rect, {
       marks: richActiveMarks(content, range.start, range.end),
@@ -3700,7 +3956,10 @@ export class NEditor {
     // `document.body` -- so testing it swallowed every scroll on the page.
     const target = event.target;
 
-    if (target instanceof Element && target.closest('.neditor-portal')) {
+    // Duck-typed: in an iframe mount the target is from another realm, and
+    // `instanceof Element` there was false -- so scrolling a wide formula in
+    // the equation popover's preview closed the popover.
+    if (isElement(target) && target.closest('.neditor-portal')) {
       return;
     }
 
@@ -3864,6 +4123,10 @@ export class NEditor {
       return;
     }
 
+    if (this.#takeBackFormula(event) || this.#deleteFormula(event)) {
+      return;
+    }
+
     const pending = this.#pending;
 
     if (!pending) {
@@ -3909,6 +4172,177 @@ export class NEditor {
     );
     this.#focusResolved(resolved, caret);
   };
+
+  /**
+   * Backspace or Delete beside a formula, which goes as one character -- and
+   * so does a word deletion there, the formula being the word.
+   *
+   * Left to the browser, it did -- except after a formula that ends its block,
+   * where the caret sits past the separator image (WebKit's click, Chromium's
+   * End): the first Backspace deleted the separator, which is no text, so the
+   * model did not change, nothing redrew it, and the formula stayed. Firefox's
+   * word deletion there deleted nothing at all; Chromium's and WebKit's took
+   * the formula alone, which is what this does in every engine. A deletion
+   * whose target reaches past the formula -- an IME taking back a suggestion
+   * -- is the browser's.
+   */
+  #deleteFormula(event: InputEvent): boolean {
+    const forward =
+      event.inputType === 'deleteContentForward' || event.inputType === 'deleteWordForward';
+    const backward =
+      event.inputType === 'deleteContentBackward' || event.inputType === 'deleteWordBackward';
+
+    if ((!forward && !backward) || this.#composing) {
+      return false;
+    }
+
+    const resolved = this.#resolve(event.target);
+    const range = resolved ? getSelectionRange(resolved.content) : null;
+
+    if (!resolved || !range || range.start !== range.end) {
+      return false;
+    }
+
+    const start = forward ? range.start : range.start - 1;
+    const content = this.#contentOf(resolved);
+
+    if (
+      start < 0 ||
+      !isMathRun(richSlice(content, start, start + 1)[0]) ||
+      this.#targetsPastFormula(event, resolved.content, start)
+    ) {
+      return false;
+    }
+
+    event.preventDefault();
+    // In the run the browser's own deletions around it are in, so a held
+    // Backspace through text and a formula is still one undo step.
+    this.#commitResolved(
+      resolved,
+      richDelete(content, start, start + 1),
+      inputRunKey(event, hostScope(resolved.block.id, resolved.cell)),
+      this.#selectionBeforeInput,
+    );
+    this.#caretInPlace(resolved, start);
+    return true;
+  }
+
+  /**
+   * True when the input's own target ranges reach past the formula at
+   * `start`: the browser was asked to delete more than the formula, and knows
+   * what. Compared in the model's offsets, not as DOM boundary points: the
+   * same characters can be named from the text before the formula or from
+   * the host, the separator after it is no offset, and a position inside the
+   * formula is its edge.
+   */
+  #targetsPastFormula(event: InputEvent, host: HTMLElement, start: number): boolean {
+    const targets = typeof event.getTargetRanges === 'function' ? event.getTargetRanges() : [];
+
+    return targets.some((target) => {
+      if (target.collapsed) {
+        return false;
+      }
+
+      // Somewhere this host cannot read -- a wrapper's boundary, a range a
+      // shadow mount retargeted -- says nothing about this formula, so it is
+      // read like no target at all: handed to the browser, the first
+      // Backspace past the separator deleted only the separator again.
+      if (!host.contains(target.startContainer) || !host.contains(target.endContainer)) {
+        return false;
+      }
+
+      return (
+        offsetAt(host, target.startContainer, target.startOffset, 'start') < start ||
+        offsetAt(host, target.endContainer, target.endOffset, 'end') > start + 1
+      );
+    });
+  }
+
+  /**
+   * Takes back the formula the `$` rule made a keystroke ago, when that
+   * keystroke is a digit: `$5-$` then `1` is a price range, and the reader
+   * of the same text never makes a formula of it.
+   *
+   * Taken back, not edited: history drops the entry the rule recorded, and
+   * the text as typed comes back with the digit after it -- so undo never
+   * steps through a formula that, as far as the reader is concerned, was never
+   * there. Anything at all between the two keystrokes and the formula stays.
+   */
+  #takeBackFormula(event: InputEvent): boolean {
+    const made = this.#ruleFormula;
+    this.#ruleFormula = null;
+
+    if (
+      !made ||
+      this.#composing ||
+      event.inputType !== 'insertText' ||
+      typeof event.data !== 'string' ||
+      !/^[0-9]$/.test(event.data)
+    ) {
+      return false;
+    }
+
+    const resolved = this.#resolve(event.target);
+    const range = resolved ? getSelectionRange(resolved.content) : null;
+
+    if (
+      !resolved ||
+      !range ||
+      resolved.block.id !== made.blockId ||
+      !sameCell(resolved.cell, made.cell) ||
+      range.start !== made.offset + 1 ||
+      range.end !== range.start ||
+      !isMathRun(richSlice(this.#contentOf(resolved), made.offset, made.offset + 1)[0]) ||
+      !this.#history.withdraw(made.before)
+    ) {
+      return false;
+    }
+
+    event.preventDefault();
+    this.#pending = null;
+
+    // The dollars come back as they were typed, formatting and all, and the
+    // digit takes the formatting of the `$` before it, as typing it there
+    // would have: in a bold run, `$5-$1` stays bold.
+    const typed = made.before.find((block) => block.id === made.blockId);
+    const was = typed
+      ? made.cell
+        ? (typed.rows?.[made.cell.row]?.[made.cell.column] ?? [])
+        : typed.content
+      : [];
+    const end = made.offset + made.source.length;
+    const source = richSlice(was, made.offset, end);
+    // A link only where it goes on past the caret: at a link's end every
+    // engine types outside the anchor, and so does this.
+    const linkAfter = end < richLength(was) ? richLinkAt(was, end) : null;
+    const link =
+      linkAfter !== null && linkAfter === richLinkAt(was, end - 1) ? linkAfter : undefined;
+    const text = richEquals(
+      richFromPlainText(richToPlainText(source)),
+      richFromPlainText(made.source),
+    )
+      ? richInsert(
+          source,
+          made.source.length,
+          richFromPlainText(event.data, richMarksAt(was, end), link),
+        )
+      : richFromPlainText(made.source + event.data);
+    const content = richInsert(
+      richDelete(this.#contentOf(resolved), made.offset, made.offset + 1),
+      made.offset,
+      text,
+    );
+    const rows = resolved.cell
+      ? tableSetCell(resolved.block.rows ?? [], resolved.cell.row, resolved.cell.column, content)
+      : null;
+
+    // Applied without recording: the entry this edit replaces is the one just
+    // withdrawn, and the document before it is still the one undo returns to.
+    this.#applyBlocks(updateBlock(this.#blocks, resolved.block.id, rows ? { rows } : { content }));
+    this.#emitHistory();
+    this.#caretInPlace(resolved, made.offset + richLength(text));
+    return true;
+  }
 
   #handleInput = (event: Event): void => {
     const resolved = this.#resolve(event.target);
@@ -4018,7 +4452,11 @@ export class NEditor {
       return false;
     }
 
-    const match = matchInlineRule(beforeCaret);
+    // Read from the runs, not the plain text: a `$` in a code run is code, and
+    // only the runs can tell it from one typed after it -- the Markdown reader
+    // projects it away as the span closes, and typing must agree, or `` `$a` ``
+    // then `,$` swallowed the span, and `$y$` typed after `` `x$` `` read `$$`.
+    const match = matchInlineRuleInRuns(this.#contentOf(target), beforeCaret.length);
 
     if (!match) {
       return false;
@@ -4027,10 +4465,18 @@ export class NEditor {
     // A formula replaces its whole span, dollars and all, with one atom.
     if (match.math !== undefined) {
       const formula = richMath(match.math);
+      const current = this.#contentOf(target);
 
-      if (formula.length === 0) {
+      // A closer with a digit after it is no closer, there for the reader too:
+      // a `$` typed into `$5-|2` is a price range, not a formula and a 2.
+      if (
+        formula.length === 0 ||
+        /^[0-9]$/.test(richToPlainText(richSlice(current, match.end, match.end + 1)))
+      ) {
         return false;
       }
+
+      const before = this.#blocks;
 
       this.#commitResolved(
         target,
@@ -4045,6 +4491,13 @@ export class NEditor {
         blockId: target.block.id,
         offset: match.start + 1,
         marks: [],
+        ...(target.cell ? { cell: target.cell } : {}),
+      };
+      this.#ruleFormula = {
+        blockId: target.block.id,
+        offset: match.start,
+        source: beforeCaret.slice(match.start, match.end),
+        before,
         ...(target.cell ? { cell: target.cell } : {}),
       };
       return true;
@@ -4299,9 +4752,19 @@ export class NEditor {
       return;
     }
 
+    // Snapshotted from the range the popover was opened for: focus is in its
+    // input, so the page's selection is nowhere in this editor, and undo put
+    // the caret at the top of the document.
     this.#commitResolved(
       target,
       richSetLink(this.#contentOf(target), context.start, context.end, url),
+      null,
+      {
+        blockId: context.blockId,
+        start: context.start,
+        end: context.end,
+        ...(context.cell ? { cell: context.cell } : {}),
+      },
     );
     this.#focusResolved(target, context.start, context.end);
     this.#syncToolbar();
@@ -4332,10 +4795,11 @@ export class NEditor {
     }
 
     const formula = richMath(tex);
+    const { selection } = context;
 
     // Nothing written over nothing: a new formula left empty is a cancel.
     if (formula.length === 0 && !context.existing) {
-      this.#focusResolved(target, context.start, context.end);
+      this.#focusResolved(target, selection.start, selection.end);
       return;
     }
 
@@ -4345,8 +4809,19 @@ export class NEditor {
       formula,
     );
 
-    this.#commitResolved(target, content);
-    this.#focusResolved(target, context.start + formula.length);
+    // The snapshot is the selection the popover was opened from. Read from the
+    // page instead, it was whatever the popover's own input held -- nowhere in
+    // this editor -- so undo put the caret at the top of the document.
+    this.#commitResolved(target, content, null, selection);
+
+    // A caret that stood before the formula stays before it; anything else
+    // lands after what was written.
+    const caret =
+      context.existing && selection.start === selection.end && selection.start === context.start
+        ? context.start
+        : context.start + formula.length;
+
+    this.#focusResolved(target, caret);
     this.#syncToolbar();
   }
 
@@ -4359,7 +4834,9 @@ export class NEditor {
     // As for the link popover: back where it was opened from, unless a pointer
     // dismissed it by placing the caret somewhere else itself.
     if (context && restoreFocus) {
-      this.focusRange(context.blockId, context.start, context.end, context.cell);
+      const { selection } = context;
+
+      this.focusRange(selection.blockId, selection.start, selection.end, selection.cell);
       this.#syncToolbar();
     }
   }
@@ -4396,8 +4873,11 @@ export class NEditor {
       const target = this.#resolve(formula);
       const offsets = target ? offsetsOfNode(target.content, formula) : null;
 
+      // The caret goes after the formula, not over it: `openMathEditor` keeps
+      // the selection it opened from for Escape to give back, and a selected
+      // formula given back was replaced by the next key.
       if (target && offsets && this.#canEdit()) {
-        this.#focusResolved(target, offsets.start, offsets.end);
+        this.#focusResolved(target, offsets.end);
         this.openMathEditor();
       }
 
@@ -4614,7 +5094,7 @@ export class NEditor {
     prepare?: () => void,
     own = false,
   ): void {
-    const pasted = this.#parseClipboard(html, plain);
+    const { blocks: pasted, fromHtml } = this.#parseClipboard(html, plain);
 
     if (pasted.length === 0) {
       return;
@@ -4640,8 +5120,16 @@ export class NEditor {
           // anything recoverable from their HTML. Preferring the parsed text
           // for *all* HTML, which is what the first version of this fix did,
           // took the second case away to fix the first.
+          //
+          // Math is the exception to that: rendered math's plain text is its
+          // glyphs (`\frac{1}{2}` copies as `1212`), and HTML that names its
+          // TeX is the faithful half then. Only HTML: with none, the blocks
+          // were read from the plain text as Markdown, and a shell line's
+          // `"$HOME/$USER"` pair made every `#`, `- ` and `*` in it go.
           richFromPlainText(
-            own || this.#plainIsOurMarkdown(html, pasted, plain)
+            own ||
+              this.#plainIsOurMarkdown(fromHtml, pasted, plain) ||
+              (fromHtml && pasted.some(holdsMath))
               ? pasted.map((block) => this.#literalText(resolved.block.type, block)).join('\n')
               : plain ||
                   pasted.map((block) => this.#literalText(resolved.block.type, block)).join('\n'),
@@ -4674,9 +5162,13 @@ export class NEditor {
    * in a code block, bare in a display equation, which is TeX already.
    */
   #literalText(type: BlockType, block: Block): string {
+    const literal = (content: RichText): string => richToPlainText(contentForType(type, content));
+
+    // Cell by cell: the table's own plain text holds each formula as an atom
+    // character with its TeX gone.
     return block.type === 'table'
-      ? blockText(block)
-      : richToPlainText(contentForType(type, block.content));
+      ? (block.rows ?? []).map((row) => row.map(literal).join('\t')).join('\n')
+      : literal(block.content);
   }
 
   /** HTML first, since it carries structure; Markdown is the fallback. */
@@ -4691,24 +5183,28 @@ export class NEditor {
    * blocks back out reproduces the plain text byte for byte, the plain text is
    * that Markdown. Another application's pairing does not survive that.
    */
-  #plainIsOurMarkdown(html: string, pasted: readonly Block[], plain: string): boolean {
-    // Only when the blocks came from the HTML. Without HTML `#parseClipboard`
+  #plainIsOurMarkdown(fromHtml: boolean, pasted: readonly Block[], plain: string): boolean {
+    // Only when the blocks came from the HTML. Without HTML -- or with HTML
+    // that parses to nothing, `<meta charset>` alone -- `#parseClipboard`
     // parses the *plain text* into them, so the comparison below becomes a
     // Markdown round trip against itself -- true for anything Markdown-shaped,
     // which made this vacuous in exactly the case where it is the only signal.
     // `# TODO: fix` pasted from a terminal lost its `#`, and `---` inserted
     // nothing at all.
-    if (html.length === 0 || plain.length === 0) {
+    if (!fromHtml || plain.length === 0) {
       return false;
     }
 
     return toMarkdown({ blocks: pasted as Block[] }).trim() === plain.trim();
   }
 
-  #parseClipboard(html: string, plain: string): Block[] {
+  /** The clipboard's blocks, and whether they came from its HTML or its plain text. */
+  #parseClipboard(html: string, plain: string): { blocks: Block[]; fromHtml: boolean } {
     const fromHtml = html.length > 0 ? blocksFromHtml(this.#document, html) : [];
 
-    return fromHtml.length > 0 ? fromHtml : blocksFromMarkdown(plain);
+    return fromHtml.length > 0
+      ? { blocks: fromHtml, fromHtml: true }
+      : { blocks: blocksFromMarkdown(plain), fromHtml: false };
   }
 
   #pasteInline(target: ResolvedTarget, runs: RichText): void {
@@ -4729,7 +5225,11 @@ export class NEditor {
    *
    * The first pasted block merges into the block being typed in and the last
    * one absorbs whatever followed the caret, so pasting into the middle of a
-   * paragraph splits it rather than leaving an empty remnant.
+   * paragraph splits it rather than leaving an empty remnant. At the very
+   * start of a block with text (or with children), several blocks -- or one
+   * that cannot merge -- go in front of it instead, and it takes the last one's
+   * text when that is prose at the paste's top level: the block the reader is
+   * in stays itself.
    *
    * Both of those moves carry text and nothing else, which is only the whole of
    * a block when the block is text. A table, an image or a divider keeps its
@@ -4751,17 +5251,84 @@ export class NEditor {
     // blanks a pasted table's rows and an image's src. A table or an image is
     // never empty here whatever its cells or caption say: its payload is not
     // text, so there is nothing for a paste to take the place of.
-    const replaceable = isRichEmpty(trimmed) && canMergeText(target.type);
+    //
+    // Not a block with children, though: a toggle or a callout (or a list
+    // item with items under it) is still their parent when its text is empty,
+    // and replaced, the children passed to whatever replaced it -- an
+    // equation, shown open, or a collapsed one hiding nothing of its own.
+    const index = findBlockIndex(this.#blocks, target.id);
+    const parents = (this.#blocks[index + 1]?.depth ?? -1) > target.depth;
+    const replaceable = isRichEmpty(trimmed) && canMergeText(target.type) && !parents;
 
     // Only text merges into text. Merging a pasted table would keep its
     // (always empty) content and drop every row — for a lone table pasted into
-    // a paragraph, a paste that changed nothing at all.
-    const merges = replaceable || canMergeText(first.type);
+    // a paragraph, a paste that changed nothing at all. Nor does literal text
+    // merge into prose: an equation pasted mid-sentence became part of the
+    // sentence, its TeX read as words. The target is never literal here --
+    // a paste into one takes the inline path -- so a literal block pasted
+    // stands as a block of its own.
+    const merges = replaceable || (canMergeText(first.type) && !isLiteralType(first.type));
 
-    let created = pasted.slice(merges ? 1 : 0).map((block) => ({
-      ...cloneBlock(block),
-      depth: target.depth + block.depth,
-    }));
+    // Pasted at the very start of a block -- several blocks, or one that cannot
+    // merge -- what is pasted goes in front of it, and the block stays itself:
+    // its type, id, check, icon and children. Split around the caret instead,
+    // its text was rebuilt as a new block -- a heading lost its level, a
+    // checked to-do its check, a toggle or callout its children -- whichever
+    // pasted block came first. A paste that ends in prose still ends in the
+    // block's text, as anywhere else: that last block's text joins the start
+    // of the block, as a first block's text joins the end of the text before a
+    // caret mid-block. One block of prose merges as it does anywhere.
+    // Only a last block at the paste's own top level joins: one nested in what
+    // was pasted (the body of a closed `<details>`, a list's last sub-item)
+    // belongs to that, and joined, a toggle lost its body to the heading.
+    const top = shallowest(pasted);
+    const depths = pastedDepths(pasted, target.depth);
+    const lastPasted = pasted[pasted.length - 1] ?? first;
+    const lastJoins =
+      canMergeText(lastPasted.type) && !isLiteralType(lastPasted.type) && lastPasted.depth === top;
+
+    if (isRichEmpty(before) && !replaceable && (!merges || pasted.length > 1)) {
+      const front = lastJoins ? pasted.slice(0, -1) : pasted;
+      const joined = lastJoins ? richConcat(lastPasted.content, after) : after;
+      let blocks = richEquals(joined, target.content)
+        ? this.#blocks
+        : updateBlock(this.#blocks, target.id, { content: joined });
+      let at = findBlockIndex(blocks, target.id);
+
+      front.forEach((block, index) => {
+        blocks = insertBlockAt(blocks, at, { ...cloneBlock(block), depth: depths[index]! });
+        at += 1;
+      });
+
+      this.#commit(normalizeDepths(blocks));
+      this.focus(target.id, lastJoins ? richLength(lastPasted.content) : 0);
+      return;
+    }
+
+    // Lines pasted into a toggle's or a callout's own text become its
+    // children, as Enter there makes them, and open it: a sibling put between
+    // it and its children took them over, and one put inside it collapsed was
+    // never seen -- nor was the reader's own text after the caret, carried into
+    // it. A block the paste replaces has the pasted block's type instead.
+    //
+    // Only what stands at the paste's own level and below it: blocks nested
+    // under a first block that merged into the toggle's text are under the
+    // toggle already, and a level more put a sibling of theirs under them.
+    // Not past the deepest level a document holds, as Enter is not.
+    const into =
+      !replaceable &&
+      (target.type === 'toggle' || target.type === 'callout') &&
+      target.depth < MAX_DEPTH
+        ? 1
+        : 0;
+    const skip = merges ? 1 : 0;
+    let underFirst = skip === 1;
+    let created = pasted.slice(skip).map((block, index) => {
+      const depth = depths[index + skip]!;
+      underFirst &&= depth > depths[0]!;
+
+      return { ...cloneBlock(block), depth: depth + (underFirst ? 0 : into) };
+    });
 
     // Where the text that followed the caret lands, and the type it lands in.
     const tail = created.at(-1);
@@ -4771,10 +5338,14 @@ export class NEditor {
     // renders and `normalizeDocument` erases on the next load, so it gets a
     // block of its own — the rehousing `/divider` already does. A divider holds
     // no caret either, so it earns one even with no text to carry.
+    // The same goes for the prose after the caret when the last pasted block
+    // is literal: appended there it became TeX, marks, links and formulas and
+    // all, inside an equation.
     const rehoused =
-      canMergeText(tailType) || (isRichEmpty(after) && !isVoidType(tailType))
+      (canMergeText(tailType) && (!isLiteralType(tailType) || tailType === target.type)) ||
+      (isRichEmpty(after) && !isVoidType(tailType))
         ? null
-        : createBlock(typeAfterSplit(target.type), after, target.depth);
+        : createBlock(typeAfterSplit(target.type), after, target.depth + into);
 
     let targetContent = merges ? richConcat(before, first.content) : before;
 
@@ -4789,16 +5360,24 @@ export class NEditor {
     let blocks: Block[];
 
     if (replaceable) {
-      // The id is the target's and stays put; only the payload is replaced.
+      // The id is the target's and stays put; the rest is the pasted block's
+      // alone. Merged over the target, the old type's fields stayed -- an
+      // equation `collapsed`, an image `checked`, back again when the block
+      // was turned into a to-do.
       const { id: _pastedId, ...payload } = cloneBlock(first);
-
-      blocks = updateBlock(this.#blocks, target.id, {
+      const replacement: Block = {
         ...payload,
+        id: target.id,
         depth: target.depth,
         content: targetContent,
-      });
+      };
+
+      blocks = this.#blocks.map((block) => (block.id === target.id ? replacement : block));
     } else {
-      blocks = updateBlock(this.#blocks, target.id, { content: targetContent });
+      blocks = updateBlock(this.#blocks, target.id, {
+        content: targetContent,
+        ...(into && target.collapsed && created.length > 0 ? { collapsed: false } : {}),
+      });
     }
 
     let at = findBlockIndex(blocks, target.id);
@@ -4808,27 +5387,38 @@ export class NEditor {
       blocks = insertBlockAt(blocks, at, block);
     }
 
-    // Pasting a block that could not merge leaves the target holding only the
-    // text before the caret. At offset 0 there is none, and keeping the husk
-    // would put an empty line above every table pasted at the start of one.
-    if (!merges && isRichEmpty(targetContent) && canMergeText(target.type)) {
-      blocks = removeBlock(blocks, target.id);
-    }
+    // On the depths that are drawn: opened against depths before clamping,
+    // a fold that clamping made an ancestor stayed shut over the reader's text.
+    blocks = openPastedFolds(normalizeDepths(blocks), new Set(created.map((block) => block.id)), [
+      blocks[at + 1]?.id,
+      isRichEmpty(after) ? undefined : created.at(-1)?.id,
+    ]);
 
-    this.#commit(normalizeDepths(blocks));
+    this.#commit(blocks);
 
     const last = created.at(-1);
 
-    if (last) {
-      this.focus(last.id, richLength(last.content) - richLength(after));
-    } else {
-      this.focus(target.id, richLength(before) + richLength(first.content));
+    // The caret goes where the paste ends -- or, when that block is hidden (a
+    // closed `<details>` pasted last, its body collapsed), to the end of the
+    // nearest pasted block still on screen. Aimed at the hidden one, focus
+    // failed and nothing else took it: the editor was left in neither mode,
+    // with focus on the page.
+    if (last && this.focus(last.id, richLength(last.content) - richLength(after))) {
+      return;
     }
+
+    for (const block of [...created].reverse()) {
+      if (block !== last && this.focus(block.id, richLength(block.content))) {
+        return;
+      }
+    }
+
+    this.focus(target.id, richLength(before) + richLength(first.content));
   }
 
   /** Replaces the selected blocks with the clipboard's blocks. */
   #pasteOverBlockSelection(html: string, plain: string): void {
-    const pasted = this.#parseClipboard(html, plain);
+    const pasted = this.#parseClipboard(html, plain).blocks;
     const firstId = this.#orderedSelection()[0];
 
     if (pasted.length === 0 || !firstId) {
@@ -4836,8 +5426,8 @@ export class NEditor {
     }
 
     const index = findBlockIndex(this.#blocks, firstId);
-    const depth = this.#blocks[index]?.depth ?? 0;
-    const created = pasted.map((block) => ({ ...block, depth: depth + block.depth }));
+    const depths = pastedDepths(pasted, this.#blocks[index]?.depth ?? 0);
+    const created = pasted.map((block, at) => ({ ...block, depth: depths[at]! }));
 
     const removing = this.#selectionForEdit();
     let blocks = this.#blocks.filter((block) => !removing.has(block.id));
@@ -4848,7 +5438,13 @@ export class NEditor {
       at += 1;
     }
 
-    this.#commit(normalizeDepths(blocks));
+    blocks = openPastedFolds(normalizeDepths(blocks), new Set(created.map((block) => block.id)), [
+      blocks[at]?.id,
+    ]);
+
+    this.#commit(blocks);
+    // Hidden ones (inside a pasted collapsed toggle) are dropped there: a block
+    // selection holds only what the reader can see.
     this.#setBlockSelection(created.map((block) => block.id));
   }
 
@@ -4895,6 +5491,18 @@ export class NEditor {
 
     const { block, content } = resolved;
     const modifier = this.#shortcutModifier(event);
+
+    // Anything but a typed character between the formula and the digit means
+    // the caret went somewhere: the formula stands. A modifier pressed alone
+    // is part of typing the digit, not something between: on AZERTY the top
+    // row's digits need Shift.
+    if (
+      (event.key.length !== 1 && !MODIFIER_KEYS.has(event.key)) ||
+      event.ctrlKey ||
+      event.metaKey
+    ) {
+      this.#ruleFormula = null;
+    }
 
     if (modifier && !event.altKey) {
       const key = event.key.toLowerCase();
@@ -5111,9 +5719,12 @@ export class NEditor {
     const trimmed = richDelete(block.content, range.start, range.end);
     const [before, after] = richSplit(trimmed, range.start);
 
-    // A callout or toggle owns what follows it, so Enter opens a child. It is
-    // the only way to put the first block inside an empty one.
-    const nested = acceptsChildren(block.type);
+    // A callout or toggle owns what follows it, so Enter opens a child -- one
+    // way to put the first block inside an empty one (Tab is another, and so
+    // is pasting several blocks after the start of its title). Not
+    // past the deepest level a document holds: born at 33, the child was a
+    // sibling once `normalizeDocument` clamped it on the next load.
+    const nested = acceptsChildren(block.type) && block.depth < MAX_DEPTH;
     const created = createBlock(
       typeAfterSplit(block.type),
       after,
@@ -5318,6 +5929,21 @@ export class NEditor {
     }
 
     const target = this.#selectionTarget();
+
+    // So does a formula's take-back: a caret that went anywhere else, even
+    // back again, put something between the formula and the next key.
+    const made = this.#ruleFormula;
+
+    if (
+      made &&
+      (!target ||
+        target.block.id !== made.blockId ||
+        !sameCell(target.cell, made.cell) ||
+        target.range.start !== made.offset + 1 ||
+        target.range.start !== target.range.end)
+    ) {
+      this.#ruleFormula = null;
+    }
 
     // Armed formatting belongs to one exact caret position.
     if (

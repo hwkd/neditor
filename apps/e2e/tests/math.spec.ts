@@ -14,6 +14,17 @@ async function axe(page: Page): Promise<string[]> {
   );
 }
 
+/**
+ * What WebKit's sanitized clipboard leaves of M10's paste: the formulas as
+ * KaTeX drew them, each read once (its MathML copy skipped), not their TeX.
+ */
+const WEBKIT_FALLBACK: unknown[] = [
+  // KaTeX draws a fraction's denominator first, and a zero-width space after
+  // it; WebKit's serializer writes the space before the formula as a no-break.
+  ['paragraph', [{ text: 'Half is\u00A021\u200B.' }]],
+  ['paragraph', [{ text: 'i=1\u2211n\u200Bi' }]],
+];
+
 /** The atom an inline formula occupies in the model. */
 const ATOM = '￼';
 
@@ -96,6 +107,8 @@ test.describe('30 · math', () => {
       await page.keyboard.press('Escape');
       await expect(dialog).toBeHidden();
       expect(await editor.focusedBlock()).toBe('m1');
+      // The caret it was opened from, collapsed -- not the formula, selected.
+      expect((await editor.selection())?.range).toEqual({ start: 12, end: 12 });
       expect(await editor.canUndo()).toBe(false);
     });
 
@@ -143,6 +156,223 @@ test.describe('30 · math', () => {
 
       await page.keyboard.press(`${MOD}+z`);
       expect((await editor.blockData('m1'))?.content[1]).toEqual({ text: ATOM, math: '\\pi r^2' });
+    });
+
+    test('M1c a typed price range is prose: the digit after the second $ takes the formula back', async ({
+      editor,
+    }) => {
+      await editor.load({ doc: 'empty', math: 'katex' });
+      await editor.placeCaret('p1', 0);
+      await editor.type('Prices run $5-$10 a seat');
+
+      expect((await editor.blockData('p1'))?.content).toEqual([
+        { text: 'Prices run $5-$10 a seat' },
+      ]);
+      expect(await editor.markdown()).toBe('Prices run \\$5-\\$10 a seat');
+    });
+
+    test('M5b after a formula that ends a block, a click and End both put the caret after it, and typing lands there', async ({
+      editor,
+      page,
+    }) => {
+      await editor.load({ doc: 'math', math: 'katex' });
+      const box = (await editor.content('m2').boundingBox())!;
+
+      await page.mouse.click(box.x + box.width - 2, box.y + box.height / 2);
+      expect((await editor.selection())?.range).toEqual({ start: 11, end: 11 });
+      await editor.press('End');
+      expect((await editor.selection())?.range).toEqual({ start: 11, end: 11 });
+      await editor.type('z');
+
+      expect((await editor.blockData('m2'))?.content).toEqual([
+        { text: 'Ends with ' },
+        { text: ATOM, math: 'y' },
+        { text: 'z' },
+      ]);
+    });
+
+    test('M5e the toolbar offers ∑ for text, and nothing over a lone formula or in an equation', async ({
+      editor,
+    }) => {
+      await editor.load({ doc: 'math', math: 'katex' });
+      const toolbar = editor.portal('toolbar');
+
+      await editor.placeCaret('m1', 0, 4);
+      await expect(toolbar).toBeVisible();
+      await toolbar.locator('.neditor-toolbar__button--math').click();
+      await expect(editor.portal('math-editor').getByRole('textbox')).toHaveValue('Area');
+      await editor.press('Escape');
+
+      await editor.placeCaret('m1', 0, 4);
+      await expect(toolbar).toBeVisible();
+      await editor.placeCaret('m1', 5, 6);
+      await expect(toolbar).toBeHidden();
+
+      await editor.placeCaret('m1', 0, 4);
+      await expect(toolbar).toBeVisible();
+      await editor.placeCaret('eq', 0, 3);
+      await expect(toolbar).toBeHidden();
+    });
+
+    test('M5d after a formula that ends a block, one Backspace deletes it', async ({
+      editor,
+      page,
+    }) => {
+      await editor.load({ doc: 'math', math: 'katex' });
+      const box = (await editor.content('m2').boundingBox())!;
+
+      // Past the formula: WebKit settles this after the separator, Chromium's
+      // End does the same; a caret there is still at the formula's end.
+      await page.mouse.click(box.x + box.width - 2, box.y + box.height / 2);
+      await editor.press('End');
+      expect((await editor.selection())?.range).toEqual({ start: 11, end: 11 });
+      await page.keyboard.press('Backspace');
+
+      expect((await editor.blockData('m2'))?.content).toEqual([{ text: 'Ends with ' }]);
+    });
+
+    for (const [name, chord] of [
+      ['a word', process.platform === 'darwin' ? 'Alt+Backspace' : 'Control+Backspace'],
+      ['to the line start', process.platform === 'darwin' ? 'Meta+Backspace' : 'Shift+Home'],
+    ] as const) {
+      test(`M5f after a formula that ends a block, deleting ${name} takes the formula with it`, async ({
+        editor,
+        page,
+        browserName,
+      }) => {
+        await editor.load({ doc: 'math', math: 'katex' });
+        await editor.placeCaret('m2', 11);
+        await editor.press('End');
+
+        if (chord === 'Shift+Home') {
+          await page.keyboard.press(chord);
+          await page.keyboard.press('Backspace');
+        } else {
+          await page.keyboard.press(chord);
+        }
+
+        // A line deletion takes the line. A word deletion takes the formula:
+        // alone in Chromium and WebKit, and from past the separator in every
+        // engine (Firefox deleted nothing there; M5g). From just after the formula Firefox's own word
+        // rule asks for the word before it too, and the editor leaves a
+        // deletion wider than the formula to the browser.
+        expect((await editor.blockData('m2'))?.content).toEqual(
+          name === 'a word' ? [{ text: browserName === 'firefox' ? 'Ends ' : 'Ends with ' }] : [],
+        );
+      });
+    }
+
+    test('M5g from past the separator, a word deletion takes the formula alone, in every engine', async ({
+      editor,
+      page,
+    }) => {
+      await editor.load({ doc: 'math', math: 'katex' });
+      await editor.placeCaret('m2', 11);
+      // The caret after the separator image, where WebKit's click and
+      // Chromium's End put it, and where Firefox's own word deletion did
+      // nothing.
+      await editor.content('m2').evaluate((host) => {
+        const separator = host.querySelector('.neditor-math__separator')!;
+        const index = [...host.childNodes].indexOf(separator) + 1;
+        host.ownerDocument.getSelection()!.setBaseAndExtent(host, index, host, index);
+      });
+      await page.keyboard.press(
+        process.platform === 'darwin' ? 'Alt+Backspace' : 'Control+Backspace',
+      );
+
+      expect((await editor.blockData('m2'))?.content).toEqual([{ text: 'Ends with ' }]);
+    });
+
+    test('M5c the caret before a formula that starts a block, and between two formulas, takes typing', async ({
+      editor,
+      page,
+    }) => {
+      await editor.load({ doc: 'empty', math: 'katex' });
+      await page.evaluate(() =>
+        window.__e2e.editor.setDocument({
+          blocks: [
+            {
+              id: 'p1',
+              type: 'paragraph',
+              depth: 0,
+              content: [
+                { text: '\uFFFC', math: 'a' },
+                { text: '\uFFFC', math: 'b' },
+              ],
+            },
+          ],
+        }),
+      );
+
+      await editor.placeCaret('p1', 0);
+      await editor.type('x');
+      await editor.placeCaret('p1', 2);
+      await editor.type('y');
+
+      expect((await editor.blockData('p1'))?.content).toEqual([
+        { text: 'x' },
+        { text: ATOM, math: 'a' },
+        { text: 'y' },
+        { text: ATOM, math: 'b' },
+      ]);
+    });
+
+    test('M2b undo after a popover edit puts the caret back in the block it was made in', async ({
+      editor,
+      page,
+    }) => {
+      await editor.load({ doc: 'math', math: 'katex' });
+      await editor.content('m2').locator('.neditor-math').click();
+      const field = editor.portal('math-editor').getByRole('textbox');
+      await field.fill('y^2');
+      await field.press('Enter');
+
+      await page.keyboard.press(`${MOD}+z`);
+      expect((await editor.blockData('m2'))?.content[1]?.math).toBe('y');
+      expect(await editor.focusedBlock()).toBe('m2');
+    });
+
+    test('M2c copying text that holds a formula copies its TeX, not its picture', async ({
+      editor,
+      page,
+    }) => {
+      await editor.load({ doc: 'math', math: 'katex' });
+      await editor.placeCaret('m1', 0, 11);
+      await page.keyboard.press(`${MOD}+c`);
+      await page.locator('#paste-target').click();
+      await page.keyboard.press(`${MOD}+v`);
+
+      await expect(page.locator('#paste-target')).toHaveValue('Area $\\pi r^2$ and ');
+    });
+
+    test('M6b under dir="rtl" a formula still reads left to right', async ({ editor }) => {
+      await editor.load({ doc: 'math', math: 'katex', dir: 'rtl' });
+
+      for (const selector of ['.neditor-math', '.neditor-math-block__preview']) {
+        expect(
+          await editor.root
+            .locator(selector)
+            .first()
+            .evaluate((element) => getComputedStyle(element).direction),
+        ).toBe('ltr');
+      }
+    });
+
+    test('M6c invalid TeX in the popover is said in words, and the field is marked invalid', async ({
+      editor,
+    }) => {
+      await editor.load({ doc: 'math', math: 'katex' });
+      await editor.content('m1').locator('.neditor-math').first().click();
+      const field = editor.portal('math-editor').getByRole('textbox');
+
+      // TeX that draws has nothing to be told about: a hidden error the field
+      // named was still read as its description.
+      await expect(field).not.toHaveAttribute('aria-invalid', 'true');
+      await expect(field).toHaveAccessibleDescription('');
+
+      await field.fill('\\frac{');
+      await expect(field).toHaveAttribute('aria-invalid', 'true');
+      await expect(field).toHaveAccessibleDescription('This TeX could not be rendered');
     });
 
     test('M6 read-only, a formula is only something to look at', async ({ editor }) => {
@@ -229,7 +459,10 @@ test.describe('30 · math', () => {
       await second.content('p1').click();
       await page.keyboard.press(`${MOD}+v`);
 
-      expect(shape(await second.doc())).toEqual(shape(await editor.doc()));
+      const copied = (await editor.doc()).blocks.filter((block) =>
+        ['m1', 'eq', 'p2'].includes(block.id),
+      );
+      expect(shape(await second.doc())).toEqual(shape({ blocks: copied }));
       await expect(second.root.locator('.neditor-math .katex')).toHaveCount(2);
     });
 
@@ -257,9 +490,7 @@ test.describe('30 · math', () => {
       // there is the fallback: the formula as drawn, once -- not its MathML
       // copy and its HTML copy run together ("1221").
       if (browserName === 'webkit') {
-        expect(blocks.every((block) => block.type === 'paragraph')).toBe(true);
-        expect(blocks[0]?.content.some((run) => run.math !== undefined)).toBe(false);
-        expect(blocks[0]?.content.map((run) => run.text).join('')).not.toContain('1221');
+        expect(blocks.map((block) => [block.type, block.content])).toEqual(WEBKIT_FALLBACK);
         return;
       }
 

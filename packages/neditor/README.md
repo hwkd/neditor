@@ -158,9 +158,9 @@ editor.setDocument(doc): void           // replace the content
 editor.getMarkdown(): string            // serialize to Markdown
 
 editor.toggleMark(mark): void           // 'bold' | 'italic' | 'underline' | …
-editor.setLink(href | null): boolean    // false if the URL is unsafe
+editor.setLink(href | null): boolean    // false if refused: unsafe URL, no range, code or an equation, read-only
 editor.openLinkEditor(): void
-editor.openMathEditor(): void           // edit or insert an inline formula
+editor.openMathEditor(): void           // edit or insert an inline formula (Mod+Shift+E)
 editor.getSelectionState(): SelectionState | null
 
 editor.undo(): boolean                  // false when there is nothing to undo
@@ -499,7 +499,8 @@ a `syncFromDom`, the clipboard — treats a trailing `<br>` as nothing.
 ### Callouts and toggles
 
 Both own the blocks nested under them, so `Enter` inside one opens a **child**
-rather than a sibling — the only way to put the first block inside an empty one.
+rather than a sibling — one way to put the first block inside an empty one (Tab
+is another, and so is pasting several blocks after the start of its title).
 
 A **callout** carries an `icon`, any single emoji. Clicking it opens a small
 picker with common choices and an input that takes anything else. Only the first
@@ -578,39 +579,66 @@ import 'katex/dist/katex.min.css';
 const editor = createEditor({
   element: '#editor',
   renderMath: (tex, { displayMode }) =>
-    katex.renderToString(tex, { displayMode, throwOnError: false }),
+    katex.renderToString(tex, { displayMode, throwOnError: true }),
 });
 ```
 
 It may return an HTML string or a node. Without one, everything still works --
 formulas are typed, stored, copied and exported -- and each is shown as its TeX
-source in monospace. A renderer that throws is caught, and the TeX is shown
-instead; in an equation the preview also says `labels.mathError`.
+source in monospace.
+
+A renderer that throws is how the editor learns the TeX is invalid, so pass
+KaTeX `throwOnError: true`. The throw is caught: the TeX is shown as source,
+and `labels.mathError` is said in words -- under an equation, named as the
+TeX field's description, and in the equation popover beside its field, which
+is marked invalid. With `throwOnError: false` KaTeX draws the error itself, in
+red, and nothing tells a screen reader.
+
+In a shadow root the page's stylesheets do not apply, so KaTeX's CSS has to be
+added to the shadow root as well (a `<link>` or an adopted stylesheet there);
+without it KaTeX's MathML half is not hidden and every formula is drawn twice.
 
 **Entering math.**
 
 - Type `$x^2$`: the closing `$` makes the formula. As in Pandoc, the opening
-  `$` needs a non-space after it and the closing one a non-space before it, so
-  `costs $5 and $6` stays prose; `$$` is never an inline delimiter, and `\$`
-  inside TeX is TeX's literal dollar.
+  `$` needs a non-space after it, the closing one a non-space before it, and no
+  digit may follow the closing one -- so `costs $5 and $6` and `$5-$10` stay
+  prose. While typing, a `$` typed before a digit already there closes
+  nothing; otherwise the next character has not arrived when the `$` does:
+  the formula is made, and a digit typed straight after it takes it back, as if
+  it had never been there (undo does not step through it). `$$` is never an
+  inline delimiter, a `$` inside a code span is code -- it never opens a
+  formula, and one may follow it directly (`` `x$`$y$ ``) -- and `\$` inside
+  TeX is TeX's literal dollar.
 - Type `$$` at the start of a paragraph, or pick **Equation** in the `/` menu,
   for a display equation. `Enter` inside one adds a line of TeX.
 - `⌘`/`Ctrl` + `Shift` + `E` (or `editor.openMathEditor()`) opens the
   equation popover: it edits the formula beside the caret, turns selected text
-  into a formula, or inserts a new one. Clicking a formula opens it too.
+  into a formula, or inserts a new one. Clicking a formula opens it too, and
+  so does the **∑** button on the selection toolbar -- the way in on a touch
+  screen.
 
 **Editing.** A formula's TeX is edited in its popover, with a live preview;
 `Enter` applies, `Escape` cancels, and **Remove** (or an empty field) deletes
-it. A display equation is edited in place: its TeX is an ordinary editable
-host, shown above the picture while the caret is in it. Elsewhere only the
-picture shows, and clicking it -- or arrowing into the block -- puts the caret
-back in the TeX. Every edit is one undo step, like any other.
+it; `Escape` gives back the caret it was opened from (after the formula, when
+it was opened by a click). A display equation is
+edited in place: its TeX is an ordinary editable host, shown above the picture
+while the caret is in it. Elsewhere only the picture shows, and clicking it --
+or arrowing into the block -- puts the caret back in the TeX. Every edit is one
+undo step, like any other, and applying a formula unchanged is no edit at all.
+Formatting and links do not apply to an equation's TeX (or a code block's): the
+toolbar does not offer them there, `toggleMark` and `openLinkEditor` do
+nothing, and `setLink` returns `false`.
 
-**Accessibility.** The TeX is the editable text and what assistive technology
-reads in an equation; the picture beside it is `aria-hidden`, so an equation is
-not announced twice. An inline formula is whatever your renderer draws -- KaTeX
-includes MathML for screen readers. Nothing here adds a role. Read-only, the
-popover does not open and a click on a formula does nothing.
+**Accessibility.** In an editable equation the TeX is the text assistive
+technology reads and edits, and the picture beside it is `aria-hidden` and out
+of the tab order, so an equation is not announced twice. Read-only there is
+nothing to edit, so when there is a picture the picture is what is read (KaTeX
+includes MathML for screen readers) and the visually hidden source is hidden
+from assistive technology too. An inline formula is whatever your renderer
+draws. Nothing here adds a role. Formulas read left to right whatever the
+page's direction. Read-only, the popover does not open and a click on a
+formula does nothing.
 
 **Serialization.**
 
@@ -620,12 +648,35 @@ popover does not open and a click on a formula does nothing.
 | `blocksToHtml` | `<span data-neditor-math="TeX">$TeX$</span>` | `<div data-neditor-math-block="TeX">$$TeX$$</div>` |
 
 The TeX between the dollars is written exactly as it stands, and read back from
-the source between them -- so `\_`, `\|` and `*` inside a formula survive. A
-`$` in ordinary text is written escaped, `\$`. In a table cell a `|` in TeX
-is written `\|`, as GFM requires. Pasted HTML is recognised when it names its
-TeX: KaTeX output and MathML carrying an `<annotation encoding="application/x-tex">`,
-a MathML `alttext`, and MediaWiki's math; a KaTeX display equation that is the
-whole of its paragraph becomes a `math` block.
+the source between them -- so `\_`, `\|` and `*` inside a formula survive in
+this reader. A `$` in ordinary text is written escaped, `\$` (inside a backtick
+code span it stays bare), and a digit straight after a formula as a numeric
+reference (`$x$&#50;`), because a bare one would stop the formula closing. In a
+table cell a `|` in TeX is written `\|`, as GFM requires. Pasted HTML is
+recognised when it names its TeX: KaTeX output and MathML carrying an
+`<annotation encoding="application/x-tex">`, a MathML `alttext`, MediaWiki's
+math, and MathJax 2's `<script type="math/tex">` after what any of its output modes
+drew (HTML-CSS, CommonHTML, SVG, NativeMML, PreviewHTML, PlainSource; displayed or
+not),
+or, with no script, the TeX annotation on the assistive MathML of a frame that
+draws one formula (with no annotation either, a formula drawn as SVG reads as
+that copy's text, the only text it has). A
+display equation that is the whole of its paragraph becomes a `math` block. In a
+list item it becomes one nested under the item only where that changes no order:
+nothing the item keeps as its text stands before it on its line or follows it
+anywhere in the item, since an item's text is read before the blocks under it (a
+picture, which goes after the item's text, ends the line before it).
+Anywhere else -- inside a line of text in a paragraph, a cell or a quote, or in a
+list item with text after it (a `<div>` of it, a line after a picture, the
+paragraph an item with no text of its own takes as its text) -- it becomes a
+formula on a line of its own.
+
+Copying a text range that holds a formula writes it the same way -- the TeX, not
+the renderer's picture -- and pasting rendered math into a code block or an
+equation takes the TeX the HTML names rather than the glyphs in its plain text.
+A formula turned into an equation's text, or a code block's, keeps its TeX:
+bare in an equation (spaced from its neighbours, so `\alpha` and `b` do not run
+together), between dollars in code.
 
 **What the renderer returns is never read back.** Every reader takes a formula's
 TeX from its attribute or annotation and skips the markup that draws it, so no
@@ -637,13 +688,21 @@ safe markup for any input. KaTeX does unless you enable its `trust` option.
 **Limits.**
 
 - Some TeX has no Markdown spelling, and does not round-trip through
-  `toMarkdown` (HTML keeps it): a bare `$` inside a formula, a formula ending in
-  an unpaired backslash, and an equation with a line that is exactly `$$`. All
-  three are invalid TeX. So is an inline formula longer than 2,000 characters,
-  the furthest the inline reader looks back for an opening `$`.
-- Inline TeX is one line with no edge whitespace: a line break becomes a space.
+  `toMarkdown` (HTML keeps it). Three shapes are invalid TeX anyway: a bare `$`
+  inside a formula, a formula ending in an unpaired backslash, and an equation
+  with a line that is exactly `$$`. Three are not: inline TeX holding `](` with
+  no `)` after it, or an autolink opener such as `<https://` -- each leaves a
+  link or an autolink open
+  where the formula should close -- and, in a table cell, a backtick in TeX
+  beside a code span, which GFM pairs before anything else is read. Nor does an
+  inline formula of about 2,000 characters or more, the furthest the inline
+  reader looks back for an opening `$`.
+- Inline TeX is one line with no edge whitespace: a line break becomes a space,
+  and U+FFFC and U+FFFF, which mean nothing in TeX, are dropped.
 - Safari strips the `<annotation>` from HTML on the clipboard, so KaTeX copied
   from another page there arrives as the text it drew, not as a formula.
+- Markdown written before this version wrote `$` bare. Loaded now, a `$…$` in
+  it that fits the rule above is a formula.
 - Typing `$…$` is matched as the closing `$` arrives, like every inline rule:
   another rule that fires on the way -- `*b*` in `$a*b*c$` -- has already
   taken its delimiters out of the text when the formula closes. Pasted or loaded
@@ -681,8 +740,11 @@ flip a flag) instead of DOM surgery over partially overlapping
 }
 ```
 
+A run can instead be an inline formula, `{ "text": "\uFFFC", "math": "x^2" }`
+(see [Math](#math)).
+
 Runs are canonical: marks are sorted, empty runs are dropped, and adjacent runs
-with identical formatting are merged. Two documents that look the same are
+with identical formatting are merged (formulas never are). Two documents that look the same are
 therefore deeply equal.
 
 `normalizeDocument()` fills in missing fields, drops unknown marks, and migrates
@@ -722,7 +784,8 @@ onto block types; `<b>`, `<i>`, `<u>`, `<s>`, `<code>` and inline
 Word, Google Docs and other editors keeps both its structure and its formatting.
 
 When the clipboard carries no HTML, the plain text is parsed as **Markdown** —
-`# `, `- `, `1. `, `> `, `- [x] `, `---` and fenced code, plus the inline rules.
+`# `, `- `, `1. `, `> `, `- [x] `, `---`, fenced code and `$$` equations, plus the
+inline rules.
 One line becomes one block, so soft-wrapped prose arrives as several paragraphs.
 Inline parsing replays the same rules used while typing, so pasting `**a**` and
 typing it cannot diverge.
@@ -730,14 +793,31 @@ typing it cannot diverge.
 Where the paste lands depends on its shape:
 
 - A **single paragraph** is inserted at the caret, so pasting a phrase into the
-  middle of a sentence still works.
+  middle of a sentence still works -- even into an empty block, or over a
+  block's whole text, which keeps its type. So is the text of any other single block of prose (a heading, quote,
+  list item, to-do, toggle or callout), which takes the type of the block it
+  lands in, except in an empty block, which it replaces (below).
 - **Several blocks** splice into the document: the first merges into the block
-  you are in, the last absorbs whatever followed the caret, and pasting into an
-  empty block replaces it rather than leaving a blank line above.
-- A **table, image or divider** is spliced in whole rather than merged, because
+  you are in, and the last absorbs whatever followed the caret. They keep their
+  own shape, from the depth of the block you are in. Pasted into a toggle's or a
+  callout's own text, they become its children, as Enter makes them, and a
+  collapsed one opens (an empty one with nothing under it is replaced, and at
+  the start of one they go in front: the bullets below). A collapsed toggle the
+  paste brings is opened if anything of yours would end up under it.
+- A **table, image, divider, code block or equation** is spliced in whole
+  rather than merged -- an equation's TeX is not prose, nor prose TeX -- because
   only its text would survive the merge, and the text that followed the caret
-  gets a paragraph of its own rather than being parked in a field a divider or
-  a table never draws.
+  gets a block of its own rather than being parked in a field a divider or a
+  table never draws.
+- At the **very start of a block with text** (or with blocks nested under it),
+  several blocks, or one that cannot merge, go in front of it instead, and it
+  stays itself -- its type, id, check, icon and children. A last pasted block
+  of prose at the paste's own top level joins its text to the start of it; one
+  nested in what was pasted (a `<details>` body) stays where it was pasted.
+- Into an **empty block** -- or one whose whole text is selected -- with
+  nothing nested under it, anything but a single paragraph replaces it rather than leaving a blank
+  line above: it becomes the first pasted block, keeping only its id and
+  depth.
 - With **blocks selected**, the paste replaces them.
 
 Either way it is a single undo step.
@@ -792,7 +872,8 @@ writes is what `blocksFromMarkdown` reads back:
   because GFM links a bare URL up to the next space and took in whatever was
   written against it -- an escape's backslash, a line break's, a trailing
   space's reference. GFM's trailing punctuation stays outside it. A URL
-  holding `*`, a backtick, a bracket or `~~` (or a `~` in struck text) keeps
+  holding `*`, a backtick, a bracket or `~~` (or a `~` in struck text, or a
+  `$` when a formula or a code span holding a `$` follows it in the block) keeps
   the escaped spelling, because an autolink's text is plain once it closes;
   so does a `www.` URL, which has no autolink spelling. GFM readers still link
   those with the backslashes in.
@@ -802,7 +883,8 @@ writes is what `blocksFromMarkdown` reads back:
   begins a reference are backslash-escaped: the pipe would end a table cell,
   two backticks would close a code span, a `](` reads as a link of its own
   inside the URL, and other readers decode the reference. A relative URL holding a space or an angle
-  bracket comes back percent-encoded (`/a b` as `/a%20b`).
+  bracket, or a link's holding U+FFFC, comes back percent-encoded (`/a b` as
+  `/a%20b`, U+FFFC as `%EF%BF%BC`).
 - In an alt text or a callout icon, `[`, `]`, `\`, a backtick and `<` are
   escaped, and unescaped on the way back: a `]` would close the label early and
   leak the rest of the line into the document as markup, and other readers

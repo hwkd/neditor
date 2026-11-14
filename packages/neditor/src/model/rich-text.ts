@@ -56,7 +56,7 @@ export function isMathRun(run: TextRun | undefined): boolean {
 }
 
 /**
- * Canonical inline TeX: one line, no edge whitespace.
+ * Canonical inline TeX: one line, no edge whitespace, no barrier character.
  *
  * Inline math is written `$…$`, and that spelling can neither hold a line break
  * nor open or close against whitespace -- so a formula that did would be one
@@ -64,9 +64,18 @@ export function isMathRun(run: TextRun | undefined): boolean {
  * where a line break is a space and space at the edge of math mode is ignored.
  * Split and trimmed rather than matched with `\s*[\r\n]+\s*`, which is retried
  * from every character of a long whitespace run.
+ *
+ * Neither of the formula rule's two barriers means anything in TeX: the atom
+ * character, where the rule reads a finished formula, and U+FFFF, which is
+ * what a code span's `$` is read as (`CODE_DOLLAR`). Inside a formula either
+ * stops the rule's walk back to the opener, so it refuses to close: a
+ * formula holding either was written `$a\uFFFCb$` or `$a\uFFFFb$` and came
+ * back from Markdown as text. So both are dropped.
  */
 export function normalizeInlineTex(tex: string): string {
-  return (/[\r\n]/.test(tex) ? tex.split(/[\r\n]+/).join(' ') : tex).trim();
+  const one = /[\r\n]/.test(tex) ? tex.split(/[\r\n]+/).join(' ') : tex;
+
+  return (/[\uFFFC\uFFFF]/.test(one) ? one.replace(/[\uFFFC\uFFFF]/g, '') : one).trim();
 }
 
 /** One inline formula, or nothing when the TeX is empty. */

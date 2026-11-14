@@ -831,3 +831,71 @@ describe('a GFM delimiter row as GFM actually defines it', () => {
     expect(blocks.every((one) => one.type !== 'table')).toBe(true);
   });
 });
+
+describe("a finished code span's dollar is code to a formula", () => {
+  const atom = '\uFFFC';
+
+  // Audit round 2: the span's `$` stayed a `$` to the rules, and against the
+  // opener of a formula straight after it read as `$$`.
+  test('a formula straight after a code span ending in a dollar is a formula', () => {
+    expect(parseInlineMarkdown('`x$`$y$')).toEqual([
+      { text: 'x$', marks: ['code'] },
+      { text: atom, math: 'y' },
+    ]);
+    expect(parseInlineMarkdown('<code>$</code>$y$ z')).toEqual([
+      { text: '$', marks: ['code'] },
+      { text: atom, math: 'y' },
+      { text: ' z' },
+    ]);
+  });
+
+  test('a $$ that is not code still opens no inline formula', () => {
+    expect(parseInlineMarkdown('x$$y$')).toEqual([{ text: 'x$$y$' }]);
+  });
+
+  test("the span's dollars open nothing and are not reached back over", () => {
+    expect(parseInlineMarkdown('`$a`,$b$')).toEqual([
+      { text: '$a', marks: ['code'] },
+      { text: ',' },
+      { text: atom, math: 'b' },
+    ]);
+    expect(parseInlineMarkdown('\\$b `a$`c$')).toEqual([
+      { text: '$b ' },
+      { text: 'a$', marks: ['code'] },
+      { text: 'c$' },
+    ]);
+  });
+
+  // The projection is for formulas: a link's href is still the code span's
+  // `$`, in the path and in the host alike.
+  test('a link destination holding a dollar code span keeps its dollar', () => {
+    expect(parseInlineMarkdown('[x](https://a.test/`$`) $y$')).toEqual([
+      { text: 'x', link: 'https://a.test/$' },
+      { text: ' ' },
+      { text: atom, math: 'y' },
+    ]);
+    expect(parseInlineMarkdown('[x](https://`$`.test/)')).toEqual([
+      { text: 'x', link: 'https://$.test/' },
+    ]);
+  });
+
+  // Audit round 3: a formula closed inside an angled destination, and its
+  // atom, read back as a code span's `$`, made a link to
+  // `https://a.test/p%20q%20$`. A formula is no URL's characters, so there
+  // is no link; a code span's `$` still is one.
+  test('a formula inside an angled destination is no part of a URL', () => {
+    expect(parseInlineMarkdown('[x](<https://a.test/p q $y$>)')).toEqual([
+      { text: '[x](<https://a.test/p q ' },
+      { text: atom, math: 'y' },
+      { text: '>)' },
+    ]);
+    expect(parseInlineMarkdown('[x](<https://a.test/p q `$`>)')).toEqual([
+      { text: 'x', link: 'https://a.test/p%20q%20$' },
+    ]);
+    // The character a code span's `$` is projected to is the text's own
+    // where the text holds it: the href is read from the content.
+    expect(parseInlineMarkdown('[x](https://a.test/\uFFFF)')).toEqual([
+      { text: 'x', link: 'https://a.test/%EF%BF%BF' },
+    ]);
+  });
+});

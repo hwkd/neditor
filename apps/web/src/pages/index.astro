@@ -237,9 +237,10 @@ import Layout from '../layouts/Layout.astro';
       autofocus: false,
       // The package bundles no typesetter; the page brings its own. KaTeX's
       // defaults keep \href and friends off, which matters: the TeX comes from
-      // the document, and the HTML it returns is drawn as it stands.
+      // the document, and the HTML it returns is drawn as it stands. Throwing
+      // is how the editor learns the TeX is invalid, and says so in words.
       renderMath: (tex, { displayMode }) =>
-        katex.renderToString(tex, { displayMode, throwOnError: false }),
+        katex.renderToString(tex, { displayMode, throwOnError: true }),
       onChange: (doc) => {
         if (markdownOut) {
           markdownOut.textContent = editor.getMarkdown();

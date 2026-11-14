@@ -15,11 +15,30 @@ that changes what you store or what other applications receive is listed first.
   TeX is shown as source. See the README's Math section for the serialization
   and its limits.
 
+  New exports: `MATH_ATOM`, `isMathRun`, `richMath`, `richToSourceText`,
+  `isLiteralType`, and the types `MathRenderer`, `MathRenderOptions` and
+  `RenderOptions`; a new method, `openMathEditor()`; a **∑** button on the
+  selection toolbar.
+
 ### Changed output
 
+- **Stored Markdown: `$…$` now reads as a formula.** Earlier versions wrote
+  `$` bare, so text saved by them that fits the inline rule -- `$x$`, or
+  `a $b c$ d` -- loads as a formula and is saved that way. A price range
+  (`$5-$10`) does not: a closing `$` followed by a digit closes nothing.
 - **Markdown: a `$` in text is written `\$`**, because `$…$` is now a
-  formula; and `\$` is read as a literal `$` (before, the backslash was kept).
-  Inside a backtick code span `$` is still written bare.
+  formula -- in `toMarkdown` and so in the `text/plain` of every block copy,
+  which other applications receive. `\$` is read as a literal `$` (before,
+  the backslash was kept). Inside a backtick code span `$` is still written
+  bare. A digit right after a formula is written as a numeric reference
+  (`$x$&#50;`).
+- **HTML (`blocksToHtml`, and the `text/html` of a copy):** a formula is
+  `<span data-neditor-math="TeX">$TeX$</span>`, an equation
+  `<div data-neditor-math-block="TeX">$$TeX$$</div>`. Copying a text range
+  that holds a formula now writes this too, instead of the browser's copy of
+  what the renderer drew.
+- **The light theme's `--neditor-danger`** is `rgb(185 50 45)`, darkened from
+  `rgb(212 76 71)` so error text clears 4.5:1 on white and on the code tint.
 
 - **Markdown (`toMarkdown`, and the `text/plain` of a block copy).**
   - Whitespace and newlines at the edge of a block's text are written as
@@ -58,7 +77,8 @@ that changes what you store or what other applications receive is listed first.
     in whatever this writer put against it: an escape's backslash
     (`https://a.test/\~x`), a line break's, the `&#32;` of a trailing space.
     GFM's trailing punctuation stays outside the autolink. A URL holding `*`, a
-    backtick, a bracket or `~~` (or `~` in struck text) keeps the escaped
+    backtick, a bracket or `~~` (or `~` in struck text, or a `$` when a
+    formula or a code span holding `$` follows it in the block) keeps the escaped
     spelling, as does a `www.` URL, where a `_` between two letters or digits
     is written bare; GFM readers still link those with the backslashes in.
     CommonMark readers render the autolink as a link where they showed text.
@@ -102,6 +122,50 @@ that changes what you store or what other applications receive is listed first.
   `<figure data-neditor-image>` instead of a broken `<img src="">`.
 - **Touch.** A finger dragged across blocks no longer selects them (the browser
   scrolls); long press is the touch way into block selection.
+
+### Changed types
+
+- `BlockType` has a new member, `'math'`: an exhaustive `switch` over block
+  types needs a case for it.
+- `NEditorLabels` has new required keys (`inlineMath`, `mathTex`,
+  `mathPlaceholder`, `mathError`, `mathBlockLabel`), and `slashCommands` and
+  `placeholders` gain a `math` entry. A partial object passed as `labels` is
+  filled in by `resolveLabels`, so only a complete `NEditorLabels` written out
+  by hand needs them.
+- `TextRun` has a new optional field, `math`. `renderRichText` and
+  `richToMarkdown` take a new, optional, last argument.
+
+### Changed behaviour
+
+- **Code blocks are literal, like equations.** The selection toolbar is not
+  offered in one, `toggleMark` and `openLinkEditor` do nothing there and
+  `setLink` returns `false`: marks and links in a code block were dropped
+  when the document was saved.
+- **A pasted code block or equation stands as a block of its own.** Pasted
+  into a paragraph, its text was merged into the paragraph's.
+- **Pasted at the very start of a block with text (or with blocks nested
+  under it), several blocks -- or one that cannot merge, a table, an image, a
+  divider, a code block or an equation -- go in front of it** and leave it
+  itself: its type, id, check, icon and children. A last pasted block of prose
+  at the paste's top level joins its text to the start of the block. The
+  block was split at the caret instead and its text rebuilt as a new block: a
+  heading lost its level, a checked to-do its check, both their ids, and a
+  toggle or callout its children, which passed to another block.
+- **Pasted blocks keep their own shape, from the depth of the block they land
+  in** -- at the caret, at the start of a block, into an empty one or over
+  selected blocks -- and lines pasted into a toggle's or a callout's own text
+  become its children, as Enter makes them, opening a collapsed one. A paste
+  that started nested (`<ul><ul><li>`, a drag begun in a sub-item) went in as
+  a child of the block before it, inside a collapsed toggle there where
+  nobody saw it, and one pasted mid-text into a collapsed toggle hid the
+  reader's own text after the caret. A collapsed toggle a paste brings (a
+  closed `<details>`) opens when the reader's own blocks, or the text after
+  the caret, would otherwise end up hidden under it.
+- **A block a paste replaces keeps none of its old type's fields**, and a
+  block with children under it is never replaced, even with no text: pasted
+  into an empty toggle that has children, a table goes in front of it. A table that replaced an
+  empty to-do kept `checked`, and one that replaced an empty toggle kept
+  `collapsed` and took its children. A replaced block keeps its id and depth.
 
 ### Fixed
 

@@ -177,6 +177,41 @@ describe('theme tokens', () => {
     }
   });
 
+  /**
+   * An error is small text: a rejected URL, a TeX the renderer refused. It
+   * sits on the raised surface of a popover, or on the code tint behind an
+   * equation (translucent, so composited onto the theme's own ground). The
+   * light danger red was 4.26:1 on white and 3.6:1 on that tint.
+   */
+  test('error text clears 4.5:1 on every ground it is drawn on, in each theme', () => {
+    const over = (top: Colour, ground: Colour): Colour => ({
+      r: top.r * top.a + ground.r * (1 - top.a),
+      g: top.g * top.a + ground.g * (1 - top.a),
+      b: top.b * top.a + ground.b * (1 - top.a),
+      a: 1,
+    });
+    const white: Colour = { r: 255, g: 255, b: 255, a: 1 };
+
+    for (const { selector, tokens } of blocksDefining(NEDITOR_STYLES, '--neditor-danger')) {
+      const danger = parseColour(tokens['--neditor-danger'] as string);
+      // A transparent surface sits on the host page, assumed white as the light
+      // theme assumes it.
+      const declared = tokens['--neditor-surface'] ?? 'transparent';
+      const ground = declared === 'transparent' ? white : parseColour(declared);
+      const raised = parseColour(tokens['--neditor-surface-raised'] as string);
+      const tint = over(parseColour(tokens['--neditor-code-bg'] as string), ground);
+
+      for (const [name, background] of [
+        ['raised surface', raised],
+        ['code tint', tint],
+      ] as const) {
+        expect(contrast(danger, background), `danger on ${name} — ${selector}`).toBeGreaterThan(
+          4.5,
+        );
+      }
+    }
+  });
+
   test('each dark theme redefines exactly what the other one does', () => {
     const [, media, attribute] = blocksDefining(NEDITOR_STYLES, '--neditor-accent') as [
       TokenBlock,

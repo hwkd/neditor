@@ -48,13 +48,13 @@ export class LinkEditor {
     this.#input.setAttribute('aria-label', labels.linkUrl);
 
     // Named rather than colour-only, and wired to the input by
-    // `aria-describedby` so it is read out with the field it belongs to.
+    // `aria-describedby` so it is read out with the field it belongs to --
+    // while it is shown (`markInvalid`).
     this.#error = doc.createElement('p');
     this.#error.className = 'neditor-link-editor__error';
     this.#error.id = `neditor-link-error-${(errorIds += 1)}`;
     this.#error.textContent = labels.invalidUrl;
     this.#error.hidden = true;
-    this.#input.setAttribute('aria-describedby', this.#error.id);
 
     this.#input.addEventListener('keydown', (event) => {
       // The editor's own key handling must not see these.
@@ -128,6 +128,10 @@ export class LinkEditor {
     this.#input.dataset.invalid = 'true';
     this.#input.setAttribute('aria-invalid', 'true');
     this.#error.hidden = false;
+    // Named as the field's description only while it is shown: a hidden
+    // element a field names directly is still read as its description, and
+    // every open announced the error over a value that had none.
+    this.#input.setAttribute('aria-describedby', this.#error.id);
     this.#input.focus();
     this.#input.select();
   }
@@ -136,6 +140,7 @@ export class LinkEditor {
   #clearInvalid(): void {
     delete this.#input.dataset.invalid;
     this.#input.removeAttribute('aria-invalid');
+    this.#input.removeAttribute('aria-describedby');
     this.#error.hidden = true;
   }
 

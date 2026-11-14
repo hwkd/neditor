@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import { INLINE_SPAN_LIMIT, matchInlineRule } from './inline-rules.ts';
+import { INLINE_SPAN_LIMIT, matchInlineRule, matchInlineRuleInRuns } from './inline-rules.ts';
 import { blocksFromMarkdown } from './markdown.ts';
 
 /** Reproduces what the editor does with a match: strip delimiters, keep inner. */
@@ -299,4 +299,86 @@ describe('an autolink inside a code span left open', () => {
 // span opens whatever the run before its own backtick was.
 test('a <code> tag after a closed code span', () => {
   expect(matchInlineRule('`a `<code>x</code>')).not.toBeNull();
+});
+
+describe("a code run's dollar, typed against", () => {
+  const typed = (content: Array<{ text: string; marks?: Array<'code'> }>) =>
+    matchInlineRuleInRuns(
+      content,
+      content.reduce((length, run) => length + run.text.length, 0),
+    );
+
+  // Audit round 2: `x$` formatted as code and `$y$` typed after it read as
+  // `$$` -- display math -- in the plain text, and no formula came, where the
+  // Markdown reader (`` `x$`$y$ ``) makes one.
+  test('a formula typed straight after a code run ending in a dollar closes', () => {
+    expect(matchInlineRule('x$$y$')).toBeNull();
+    expect(typed([{ text: 'x$', marks: ['code'] }, { text: '$y$' }])).toMatchObject({
+      start: 2,
+      end: 5,
+      math: 'y',
+    });
+    expect(typed([{ text: '$', marks: ['code'] }, { text: '$y$' }])).toMatchObject({
+      start: 1,
+      math: 'y',
+    });
+  });
+
+  test('a typed $$ outside code is still display math, not an opener', () => {
+    expect(typed([{ text: 'x$$y$' }])).toBeNull();
+    expect(typed([{ text: 'x$', marks: ['code'] }, { text: '$$y$' }])).toBeNull();
+  });
+
+  test("a code run's dollar opens nothing and is not reached back over", () => {
+    expect(typed([{ text: '$a', marks: ['code'] }, { text: ',$' }])).toBeNull();
+    expect(typed([{ text: '$b ' }, { text: 'a$', marks: ['code'] }, { text: 'c$' }])).toBeNull();
+  });
+
+  test('typing and pasting agree', () => {
+    const [pasted] = blocksFromMarkdown('`x$`$y$');
+
+    expect(pasted?.content).toEqual([
+      { text: 'x$', marks: ['code'] },
+      { text: '\uFFFC', math: 'y' },
+    ]);
+  });
+
+  test('every other rule sees the code run as it is', () => {
+    expect(typed([{ text: 'a$', marks: ['code'] }, { text: ' **b**' }])).toMatchObject({
+      start: 3,
+      mark: 'bold',
+    });
+  });
+});
+
+describe('a dollar typed into a code run', () => {
+  // Audit round 3: typed DOM-first at the end of a code run, the `$` went
+  // into the run, and the formula rule paired it with the `$` of a price
+  // before the run and swallowed the run into a formula; the reader reads
+  // the same model's Markdown, `` Pay \$5 with `^a$` ``, as text and code.
+  test('is code, and closes no formula', () => {
+    expect(
+      matchInlineRuleInRuns([{ text: 'Pay $5 with ' }, { text: '^a$', marks: ['code'] }], 15),
+    ).toBeNull();
+  });
+
+  test('a formula typed after a code run still closes', () => {
+    expect(
+      matchInlineRuleInRuns([{ text: 'a ' }, { text: '^a', marks: ['code'] }, { text: ' $y$' }], 8),
+    ).toMatchObject({ start: 5, end: 8, math: 'y' });
+  });
+});
+
+describe('a formula inside a link destination', () => {
+  // Audit round 3: a finished formula in an angled destination was read as
+  // part of the URL -- its atom percent-encoded, typed, or taken for a code
+  // span's `$` by the reader. Its TeX is no URL's characters.
+  test('makes no link', () => {
+    expect(
+      matchInlineRuleInRuns(
+        [{ text: '[x](<https://a.test/p q ' }, { text: '￼', math: 'y' }, { text: '>)' }],
+        27,
+      ),
+    ).toBeNull();
+  });
 });

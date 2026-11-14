@@ -9,6 +9,7 @@ import {
   normalizeDocument,
   toMarkdown,
 } from './index.ts';
+import { LINEAR, growth } from './test-timing.ts';
 
 /**
  * Round-trip properties.
@@ -277,7 +278,127 @@ const CORPUS: Record<string, Block[]> = {
     b({ type: 'bulleted_list', content: t('item') }),
     b({ type: 'math', content: t('a\nb'), depth: 1 }),
   ],
+  // Audit round 1.
+  // A digit after a formula is written as a reference: bare, Pandoc's rule
+  // (which the reader follows so `$5-$10` stays a price) refuses the close.
+  'formula followed by a digit': [b({ content: [m('x'), { text: '2 apples' }] })],
+  // A `$` in a finished code span is code, not an opener for the next `$`.
+  'code span holding a dollar before a formula': [
+    b({ content: [{ text: '$a', marks: ['code'] }, { text: ',' }, m('b')] }),
+  ],
+  'shell variable in code before a formula': [
+    b({ content: [{ text: 'echo $HOME', marks: ['code'] }, { text: '/' }, m('x')] }),
+  ],
+  // A `$` in an autolink's text paired with a formula's after it.
+  'URL holding a dollar before a formula': [
+    b({ content: [{ text: 'see https://a.test/?q=$x (' }, m('y'), { text: ')' }] }),
+  ],
+  // TeX ends a line with a lone backslash for a control space: in an
+  // equation that is no soft break, and the line is not joined to the next.
+  'display equation with a control space at a line end': [
+    b({ type: 'math', content: t('a\\\nb') }),
+  ],
+  // The writer spells this code span as HTML with `]` escaped, so its `](` is
+  // never an open destination when the formula after it closes.
+  'code span holding a link opener before a formula': [
+    b({ content: [{ text: 'f](x', marks: ['code'] }, m('y')] }),
+  ],
+  // Audit round 2. A code span's `$` is code: written bare against the
+  // formula's opener (`` `x$`$y$ ``), it read as a doubled `$$` and the
+  // formula came back as text -- in every block that holds runs.
+  'formula after a code span ending in a dollar': [
+    b({ content: [{ text: 'x$', marks: ['code'] }, m('y')] }),
+  ],
+  'formula after a code span that is one dollar': [
+    b({ content: [{ text: '$', marks: ['code'] }, m('y')] }),
+  ],
+  'formula after a code span ending in two dollars, then a digit': [
+    b({ content: [{ text: 'a$$', marks: ['code'] }, m('y'), { text: '2' }] }),
+  ],
+  'formulas between code spans of dollars': [
+    b({
+      content: [
+        { text: '$', marks: ['code'] },
+        m('x'),
+        { text: '$', marks: ['code'] },
+        m('y'),
+        { text: '$', marks: ['code'] },
+      ],
+    }),
+  ],
+  'formula after a dollar code span in a heading': [
+    b({ type: 'heading3', content: [{ text: 'x$', marks: ['code'] }, m('y')] }),
+  ],
+  'formula after a dollar code span in a list item': [
+    b({ type: 'numbered_list', content: [{ text: 'x$', marks: ['code'] }, m('y')] }),
+  ],
+  'formula after a dollar code span in a quote': [
+    b({ type: 'quote', content: [{ text: 'x$', marks: ['code'] }, m('y')] }),
+  ],
+  'formula after a dollar code span in a table cell': [
+    b({
+      type: 'table',
+      rows: [
+        [[{ text: 'x$', marks: ['code'] }, m('y')], t('h')],
+        [t('a'), [{ text: '$', marks: ['code'] }, m('z'), { text: '1' }]],
+      ],
+    }),
+  ],
+  'formula after a dollar code span inside a link': [
+    b({
+      content: [
+        { text: 'x$', marks: ['code'], link: 'https://a.test/' },
+        m('y'),
+        { text: 'z', link: 'https://a.test/' },
+      ],
+    }),
+  ],
+  // A `$` in a URL is written in an autolink unless a bare `$` follows it in
+  // the block, which the reader would pair with once the autolink closed.
+  'URL holding dollars, no formula': [
+    b({ content: t('see https://h.test/?$filter=a&$top=2 now') }),
+  ],
+  'URL holding a dollar after a formula': [
+    b({ content: [m('y'), { text: ' at https://h.test/?$top=2' }] }),
+  ],
+  'URL holding a dollar before a code span holding one': [
+    b({ content: [{ text: 'see https://a.test/?q=$x ' }, { text: 'a$', marks: ['code'] }] }),
+  ],
+  'URL holding a dollar before a formula, in a table cell': [
+    b({
+      type: 'table',
+      rows: [
+        [[{ text: 'https://a.test/a$b c ' }, m('y')], t('h')],
+        [t('https://h.test/?$top=2'), t('b')],
+      ],
+    }),
+  ],
+  'struck URL holding a dollar before a formula': [
+    b({
+      content: [{ text: 'https://a.test/a$b c', marks: ['strikethrough'] }, m('y')],
+    }),
+  ],
+  // U+FFFF is what a code span's `$` is read as (`CODE_DOLLAR`), a barrier
+  // to the formula rule: TeX holding it was written `$a￿b$` and read
+  // back as text. It means nothing in TeX, so the model drops it.
+  'inline TeX holding U+FFFF': [b({ content: [m('a￿b')] })],
+  // The reader refuses a destination holding the formula atom, and a
+  // relative href is kept as it was written (`sanitizeUrl`), so a literal
+  // U+FFFC there lost the link. Registered below: it comes back encoded.
+  'relative link whose href holds U+FFFC': [b({ content: t('x', { link: '/a￼' }) })],
+  'image whose src holds U+FFFC': [b({ type: 'image', src: '/i￼.png', alt: 'p' })],
   // Known failures, registered below.
+  'inline TeX holding an unclosed link opener': [b({ content: [m('x \\in ]0,1](')] })],
+  'inline TeX holding an autolink opener': [b({ content: [m('a<http://b')] })],
+  'inline TeX with a backtick, beside a code span in a table cell': [
+    b({
+      type: 'table',
+      rows: [
+        [[m('a`b'), { text: '\nc ' }, { text: 'd', marks: ['code'] }], t('h')],
+        [t('x'), t('y')],
+      ],
+    }),
+  ],
   'inline TeX holding a bare dollar': [b({ content: [m('a$b')] })],
   'inline TeX ending in an unpaired backslash': [b({ content: [m('x\\')] })],
   'display TeX holding a $$ line': [b({ type: 'math', content: t('a\n$$\nb') })],
@@ -296,9 +417,24 @@ const KNOWN_MARKDOWN_FAILURES: Record<string, string> = {
   'inline TeX holding a bare dollar': 'invalid TeX: a bare $ ends the formula early',
   'inline TeX ending in an unpaired backslash': 'invalid TeX: the backslash escapes the closing $',
   'display TeX holding a $$ line': 'invalid TeX: a $$ line closes the equation early',
+  // The reader decides the formula when its closing `$` arrives, and these
+  // put the text behind it in a state where no `$` closes: an open link
+  // destination, an open autolink. The writer cannot escape inside TeX.
+  'inline TeX holding an unclosed link opener':
+    'TeX holding "](" with no ")" leaves a link destination open at the closing $',
+  'inline TeX holding an autolink opener':
+    'TeX holding "<http://" leaves an autolink open at the closing $',
+  // GFM pairs backticks across a cell before any inline parsing, so a lone
+  // one in TeX pairs with a code span's, and the <br> between them is code.
+  'inline TeX with a backtick, beside a code span in a table cell':
+    "a backtick in TeX pairs with a code span's in the cell's line",
   // The reader looks back INLINE_SPAN_LIMIT characters for an opening `$`,
   // and a formula has no other spelling to cut it into.
   'inline formula longer than the reader reaches': 'beyond INLINE_SPAN_LIMIT, as for any span',
+  // Kept as a link, which is what `formula atom in a link destination` below
+  // pins: the writer percent-encodes the atom, so the same resource comes
+  // back under another spelling, as `/a b` comes back `/a%20b`.
+  'relative link whose href holds U+FFFC': 'the atom comes back percent-encoded, %EF%BF%BC',
 };
 
 /** Currently broken through `blocksToHtml` -> `blocksFromHtml`. */
@@ -395,6 +531,72 @@ describe('round-trip coverage is not silently shrinking', () => {
       expect(CORPUS, `registry names "${name}", which is not in the corpus`).toHaveProperty(name);
     }
   });
+});
+
+describe('math is read and written in linear time', () => {
+  test.each([
+    ['dollars', '$ '],
+    ['escaped dollars', '\\$'],
+    ['openers', '$a '],
+    ['closers', 'a$ '],
+    ['formulas', '$x$ '],
+    ['prices', '$5-$10 '],
+    // A finished code span's dollars are projected as it closes.
+    ['code spans of dollars before formulas', '`x$`$y$ '],
+    ['code spans full of dollars', '`$$$$$$` '],
+    ['dollar code spans in a link destination', '[a](b`$`c) '],
+  ])(
+    'a line of %s',
+    (_name, piece) => {
+      // About 8,000 characters at the small size, whatever the piece: past the
+      // bounded look-back for an opening `$` (`INLINE_SPAN_LIMIT`, 2,000),
+      // inside which a line grows as its square up to the bound. At 1,000
+      // pieces the two-character pieces were still under it, and the ratio
+      // read 60-100 for honest code; at 4,000 pieces the long ones took
+      // seconds a call.
+      expect(
+        growth(
+          (size) => {
+            blocksFromMarkdown(piece.repeat(size));
+          },
+          Math.ceil(8000 / piece.length),
+        ),
+      ).toBeLessThan(LINEAR);
+    },
+    60_000,
+  );
+
+  test('a long run of equation fences', () => {
+    expect(
+      growth((size) => {
+        blocksFromMarkdown('$$\nx\n$$\n\n'.repeat(size));
+      }, 500),
+    ).toBeLessThan(LINEAR);
+  }, 60_000);
+
+  test('many formulas are written in linear time', () => {
+    expect(
+      growth((size) => {
+        toMarkdown({
+          blocks: [
+            b({
+              content: Array.from({ length: size }, (_, at) => [m('x'), { text: `${at} ` }]).flat(),
+            }),
+          ],
+        });
+        // 2,000: an `indexOf` per run reads about 76x at 500, under the line,
+        // and about 150x here, while linear code reads about 19 at both.
+      }, 2000),
+    ).toBeLessThan(LINEAR);
+  }, 60_000);
+
+  test('KaTeX nested in itself with no TeX to find reads in linear time', () => {
+    expect(
+      growth((size) => {
+        blocksFromHtml(document, `<p>${'<span class="katex">'.repeat(size)}x</p>`);
+      }, 200),
+    ).toBeLessThan(LINEAR);
+  }, 60_000);
 });
 
 describe('an empty image is ours to write, not a reading of foreign markup', () => {
@@ -658,46 +860,6 @@ describe('audit 3', () => {
   });
 });
 
-/**
- * Best of three, so one slow run on a loaded machine does not decide it.
- *
- * Timed as a ratio between two sizes rather than against a budget: a budget is
- * a statement about the machine, and the absolute version of this test failed
- * on an unmodified tree while passing on code that was still quadratic.
- */
-const bestOf = (work: () => void): number => {
-  let best = Infinity;
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const began = performance.now();
-    work();
-    best = Math.min(best, performance.now() - began);
-  }
-
-  return best;
-};
-
-/**
- * How much longer sixteen times the input takes: about 16x for linear work,
- * about 256x for quadratic. The line is drawn wide between them, because
- * allocation makes honest linear work come out at 30x or so at these sizes, and
- * more when the whole suite is running beside it.
- */
-const LINEAR = 90;
-const growth = (work: (size: number) => void, size: number): number => {
-  let least = Infinity;
-
-  // A loaded machine only ever makes the ratio worse, so the lowest of a few
-  // measurements is the honest one; quadratic work is over the line every time.
-  for (let attempt = 0; attempt < 3 && least >= LINEAR; attempt += 1) {
-    work(size);
-    const small = bestOf(() => work(size));
-    const large = bestOf(() => work(size * 16));
-    least = Math.min(least, large / Math.max(small, 1));
-  }
-
-  return least;
-};
 describe('audit 4', () => {
   test('a long soft-broken paragraph parses in linear time', () => {
     expect(
@@ -707,7 +869,7 @@ describe('audit 4', () => {
         );
       }, 5000),
     ).toBeLessThan(LINEAR);
-  });
+  }, 60_000);
 
   test('a long run of references in the middle of a line parses in linear time', () => {
     expect(
@@ -715,7 +877,7 @@ describe('audit 4', () => {
         blocksFromMarkdown(`a ${'&#32;'.repeat(size)} b`);
       }, 2500),
     ).toBeLessThan(LINEAR);
-  });
+  }, 60_000);
 
   test('a long run of backslashes before a link is written in linear time', () => {
     expect(
@@ -727,7 +889,7 @@ describe('audit 4', () => {
         });
       }, 4000),
     ).toBeLessThan(LINEAR);
-  });
+  }, 60_000);
 
   test('a long formatted run of short lines is written in linear time', () => {
     expect(
@@ -743,7 +905,7 @@ describe('audit 4', () => {
         });
       }, 10000),
     ).toBeLessThan(LINEAR);
-  });
+  }, 60_000);
 
   // CommonMark decodes no reference inside a code span, and neither does this
   // reader, so inline code about HTML needs no escape and no HTML fallback.
@@ -899,13 +1061,17 @@ describe('audit 5', () => {
   test.each([
     ['spaces', ' '],
     ['line breaks', '\n'],
-  ])('a long run of %s inside a paragraph is written in linear time', (_name, unit) => {
-    expect(
-      growth((size) => {
-        toMarkdown({ blocks: [b({ content: t(`a${unit.repeat(size)}b`) })] });
-      }, 2500),
-    ).toBeLessThan(LINEAR);
-  });
+  ])(
+    'a long run of %s inside a paragraph is written in linear time',
+    (_name, unit) => {
+      expect(
+        growth((size) => {
+          toMarkdown({ blocks: [b({ content: t(`a${unit.repeat(size)}b`) })] });
+        }, 2500),
+      ).toBeLessThan(LINEAR);
+    },
+    60_000,
+  );
 });
 
 describe('audit 10', () => {
@@ -1203,7 +1369,7 @@ describe('audit 17', () => {
         });
       }, 2500),
     ).toBeLessThan(LINEAR);
-  });
+  }, 60_000);
 
   test.each([
     ['a \n\t b', 'a b'],
@@ -1559,7 +1725,7 @@ describe('open items', () => {
         blocksFromMarkdown(`| ${'\\'.repeat(size)}a | b |\n| --- | --- |`);
       }, 4000),
     ).toBeLessThan(LINEAR);
-  });
+  }, 60_000);
 
   // A numbered item's content starts after `1. `, so its children are
   // indented that far: at two spaces every other reader ended the list there.
@@ -1637,7 +1803,7 @@ describe('open items', () => {
         blocksFromMarkdown('[a](b)(c)'.repeat(size));
       }, 200),
     ).toBeLessThan(LINEAR);
-  });
+  }, 60_000);
 
   // GFM links a bare URL up to the next whitespace or `<`, so anything written
   // against one went into the link: an escape's backslash, a line break's, the
@@ -2073,7 +2239,7 @@ describe('audit 28', () => {
         blocksFromHtml(document, `${level.repeat(size)}${'</li></ul>'.repeat(size)}`);
       }, 12),
     ).toBeLessThan(LINEAR);
-  });
+  }, 60_000);
 
   // A wrapper between list levels is never distributed from inside an item:
   // doing so cloned everything below it once per level, and shells piled up.
@@ -2095,9 +2261,13 @@ describe('audit 28', () => {
       'a block and a wrapper per level',
       (n: number) => `${'<ul><li>a<pre>x</pre><b>'.repeat(n)}${'</b></li></ul>'.repeat(n)}`,
     ],
-  ])('%s reads in linear time', (_name, html) => {
-    expect(growth((size) => void blocksFromHtml(document, html(size)), 8)).toBeLessThan(LINEAR);
-  });
+  ])(
+    '%s reads in linear time',
+    (_name, html) => {
+      expect(growth((size) => void blocksFromHtml(document, html(size)), 8)).toBeLessThan(LINEAR);
+    },
+    60_000,
+  );
 
   // An item's quote and table are visited now, so a quote's lists and a
   // table's cells must not each be read through everything nested below them.
@@ -2107,38 +2277,122 @@ describe('audit 28', () => {
   test.each([
     ['a quote', '<blockquote>', '</blockquote>'],
     ['a table', '<table><tr><td>', '</td></tr></table>'],
-  ])('%s per level reads in linear time', (_name, open, close) => {
+  ])(
+    '%s per level reads in linear time',
+    (_name, open, close) => {
+      const pad = '<i>q</i>'.repeat(20);
+      const html = (n: number) =>
+        `${`<ul><li>a${open}${pad}`.repeat(n)}${`${close}</li></ul>`.repeat(n)}`;
+      expect(growth((n) => blocksFromHtml(document, html(n)), 12)).toBeLessThan(LINEAR);
+    },
+    60_000,
+  );
+
+  // The same reading, counted rather than timed: each level's lists were once
+  // found by querying the whole subtree below it, and a timing ratio cannot
+  // tell that apart from honest work under load (it read 53-71 against 20-47).
+  // Counted is what three of the DOM's search tools hand the reader -- every
+  // element `querySelectorAll` returns, every node a tree walker visits, every
+  // `closest` call -- a count no load moves: about 16x for 16x the levels when
+  // each level is read once, about 256x when every level searches the levels
+  // below with one of them (both spellings the defect has had are caught).
+  // Not counted: a search spelled another way (`querySelector`,
+  // `getElementsByTagName`, `textContent`, a walk by hand, `closest`'s own
+  // climb), which is the timing test's to catch; and the count must be above
+  // zero, or the test passes for a reader that uses none of the three.
+  test('a quote per level is searched once per level', () => {
     const pad = '<i>q</i>'.repeat(20);
     const html = (n: number) =>
-      `${`<ul><li>a${open}${pad}`.repeat(n)}${`${close}</li></ul>`.repeat(n)}`;
-    let least = Infinity;
+      `${`<ul><li>a<blockquote>${pad}`.repeat(n)}${'</blockquote></li></ul>'.repeat(n)}`;
+    const owner = (start: object, name: string): Record<string, unknown> => {
+      let at: object | null = start;
 
-    for (let attempt = 0; attempt < 3 && least >= 30; attempt += 1) {
-      const small = bestOf(() => blocksFromHtml(document, html(12)));
-      const large = bestOf(() => blocksFromHtml(document, html(192)));
-      least = Math.min(least, large / Math.max(small, 1));
+      while (at && !Object.prototype.hasOwnProperty.call(at, name)) {
+        at = Object.getPrototypeOf(at);
+      }
+
+      return at as Record<string, unknown>;
+    };
+    const element = document.createElement('div');
+    const elements = owner(element, 'querySelectorAll');
+    const closests = owner(element, 'closest');
+    const documents = owner(document.implementation.createHTMLDocument(''), 'createTreeWalker');
+    const query = elements.querySelectorAll as (this: Element, selector: string) => NodeList;
+    const closest = closests.closest as (this: Element, selector: string) => Element | null;
+    const walker = documents.createTreeWalker as (
+      this: Document,
+      root: Node,
+      show?: number,
+      filter?: NodeFilter | null,
+    ) => TreeWalker;
+    let searched = 0;
+
+    elements.querySelectorAll = function counted(this: Element, selector: string) {
+      const result = query.call(this, selector);
+      searched += result.length;
+      return result;
+    };
+    closests.closest = function counted(this: Element, selector: string) {
+      searched += 1;
+      return closest.call(this, selector);
+    };
+    documents.createTreeWalker = function counted(
+      this: Document,
+      root: Node,
+      show?: number,
+      filter?: NodeFilter | null,
+    ) {
+      const accept =
+        typeof filter === 'function' ? filter : filter ? filter.acceptNode.bind(filter) : null;
+      const made = walker.call(
+        this,
+        root,
+        show,
+        accept
+          ? (node: Node) => {
+              searched += 1;
+              return accept(node);
+            }
+          : filter,
+      );
+      const next = made.nextNode.bind(made);
+      made.nextNode = () => {
+        if (!accept) {
+          searched += 1;
+        }
+
+        return next();
+      };
+      return made;
+    };
+
+    try {
+      const count = (n: number): number => {
+        searched = 0;
+        blocksFromHtml(document, html(n));
+        return searched;
+      };
+      const few = count(12);
+
+      expect(few).toBeGreaterThan(0);
+      expect(count(192) / few).toBeLessThan(40);
+    } finally {
+      elements.querySelectorAll = query;
+      closests.closest = closest;
+      documents.createTreeWalker = walker;
     }
-
-    expect(least).toBeLessThan(30);
   });
 
   // The parser rebuilds an anchor around every level, so one item's text
   // reaches every skipped list below it: a look-ahead from each for text after
   // it went through the rest. Only one item is read, so this is not capped by
-  // the list bound; measured, 8 when linear and 133 with the look-ahead.
+  // the list bound; measured, 8 when linear and 133 with the look-ahead (by
+  // the old helper, which clamped the small side to 1 ms).
   test('anchors between list levels read in linear time', () => {
     const html = (n: number) =>
       `${'<ul><li>a<a href="https://x.test/">'.repeat(n)}${'</a></li></ul>'.repeat(n)}`;
-    let least = Infinity;
-
-    for (let attempt = 0; attempt < 3 && least >= 40; attempt += 1) {
-      const small = bestOf(() => blocksFromHtml(document, html(100)));
-      const large = bestOf(() => blocksFromHtml(document, html(1600)));
-      least = Math.min(least, large / Math.max(small, 1));
-    }
-
-    expect(least).toBeLessThan(40);
-  });
+    expect(growth((n) => blocksFromHtml(document, html(n)), 100)).toBeLessThan(LINEAR);
+  }, 60_000);
 
   // Breaks deferred past skipped blocks are dropped in one pass, not one
   // splice each. Splicing is a fast copy, so it only shows at this size.
@@ -2162,7 +2416,7 @@ describe('audit 28', () => {
         );
       }, 120),
     ).toBeLessThan(LINEAR);
-  });
+  }, 60_000);
 
   // The last run holding text is remembered as the output grows, so a long
   // stretch of space-only runs is not looked back over at every break.
@@ -2172,7 +2426,7 @@ describe('audit 28', () => {
         blocksFromHtml(document, `<p>s</p><div>${'<i> </i><center></center>'.repeat(size)}x</div>`);
       }, 1000),
     ).toBeLessThan(LINEAR);
-  });
+  }, 60_000);
 
   // Whether a wrapper holds a display block is remembered per element, so a
   // deep chain is asked once, not once per level.
@@ -2185,7 +2439,7 @@ describe('audit 28', () => {
         );
       }, 25),
     ).toBeLessThan(LINEAR);
-  });
+  }, 60_000);
 
   // A srcset is read in one pass, however many candidates or separators.
   test('a long srcset reads in linear time', () => {
@@ -2197,7 +2451,7 @@ describe('audit 28', () => {
         );
       }, 4000),
     ).toBeLessThan(LINEAR);
-  });
+  }, 60_000);
 
   // Whether an element lays out items is read from its style once, not once
   // per item asking about its container.
@@ -2210,7 +2464,7 @@ describe('audit 28', () => {
         );
       }, 400),
     ).toBeLessThan(LINEAR);
-  });
+  }, 60_000);
 
   // Whether a block sits in an inline box is found by climbing, and the
   // climb is remembered: a deep chain of them is climbed once.
@@ -2223,7 +2477,7 @@ describe('audit 28', () => {
         );
       }, 150),
     ).toBeLessThan(LINEAR);
-  });
+  }, 60_000);
 
   // Each text in a code grid finds its line by climbing, and the climb is
   // remembered: deep markup inside one line is climbed once, not per text.
@@ -2236,12 +2490,37 @@ describe('audit 28', () => {
         );
       }, 300),
     ).toBeLessThan(LINEAR);
-  });
+  }, 60_000);
 
   test.each(['*a*', '&amp;'])('icon %j', (icon) => {
     const callout = b({ type: 'callout', icon, content: t('x') });
     const markdown = toMarkdown({ blocks: [callout] });
     expect(markdown).not.toContain(`[!${icon}]`);
     expect(blocksFromMarkdown(markdown)[0]?.icon).toBe(icon);
+  });
+});
+
+describe('formula atom in a link destination', () => {
+  // The reader refuses a destination holding U+FFFC, and `sanitizeUrl` keeps
+  // a relative href as written, so `[x](/a\uFFFC)` came back as that text.
+  test.each([
+    ['/a\uFFFC', '/a%EF%BF%BC'],
+    ['#s\uFFFC', '#s%EF%BF%BC'],
+    ['/a \uFFFC', '/a%20%EF%BF%BC'],
+  ])('a link to %j is still a link', (link, read) => {
+    const markdown = toMarkdown({ blocks: [b({ content: t('x', { link }) })] });
+
+    expect(markdown).not.toContain('\uFFFC');
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual([{ text: 'x', link: read }]);
+  });
+
+  // An image line is read whole, never by the link rule, so its source keeps
+  // the atom as written: encoding it there too changed a string that already
+  // came back.
+  test('an image source keeps it', () => {
+    const image = b({ type: 'image', src: '/i\uFFFC.png', alt: 'p' });
+
+    expect(start([image])[0]?.src).toBe('/i\uFFFC.png');
+    expect(blocksFromMarkdown(toMarkdown({ blocks: [image] }))[0]?.src).toBe('/i\uFFFC.png');
   });
 });

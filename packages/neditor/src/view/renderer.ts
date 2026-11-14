@@ -206,6 +206,10 @@ export class Renderer {
       // thing the attribute was trying to say.
     }
 
+    if (view.type === 'math') {
+      this.#applyMathAccess(view);
+    }
+
     // A control that cannot act is not an offer. Both image buttons open a
     // popover the editor refuses to open while read-only, so left enabled they
     // are tab stops that answer with nothing.
@@ -374,7 +378,7 @@ export class Renderer {
       pre.append(content);
       root.append(pre);
     } else if (block.type === 'math') {
-      root.append(this.#createMathBox(doc, content));
+      root.append(this.#createMathBox(doc, content, block.id));
     } else if (block.type === 'callout') {
       // The tint wraps icon and text together, and must not extend into the
       // gutter reservation on the block itself.
@@ -409,11 +413,11 @@ export class Renderer {
    * stylesheet hides the source visually -- never from focus, so arrowing into
    * the block still lands in it and reveals it -- and the preview stands in.
    *
-   * The preview is `aria-hidden`: the TeX in the host is what assistive
-   * technology reads and edits, and reading the picture as well would say
-   * every equation twice.
+   * Assistive technology gets one of the two, never both -- which one is
+   * `#applyMathAccess`'s to say -- and a TeX error is said outside the
+   * picture, where it can be read.
    */
-  #createMathBox(doc: Document, content: HTMLElement): HTMLElement {
+  #createMathBox(doc: Document, content: HTMLElement, blockId: string): HTMLElement {
     const box = doc.createElement('div');
     box.className = 'neditor-math-block';
     box.dataset.neditorMathLabel = this.#labels.mathBlockLabel;
@@ -423,8 +427,47 @@ export class Renderer {
     preview.contentEditable = 'false';
     preview.setAttribute('aria-hidden', 'true');
 
-    box.append(content, preview);
+    const error = doc.createElement('p');
+    error.className = 'neditor-math-block__error';
+    error.id = `${this.#domId(blockId)}-math-error`;
+    error.textContent = this.#labels.mathError;
+    error.hidden = true;
+
+    box.append(content, preview, error);
     return box;
+  }
+
+  /**
+   * Which of an equation's two views assistive technology gets.
+   *
+   * While it can be edited, the TeX: it is the text being edited, and the
+   * picture beside it is `aria-hidden` and out of the tab order -- a wide one
+   * scrolls, and a scroller is a tab stop in Chrome and Firefox, which put
+   * focus on a node announced as nothing. Read-only there is nothing to edit
+   * and the source cannot even take focus to show itself, so when there is a
+   * picture the picture is what is read (a typesetter's MathML, spoken as
+   * maths) and the hidden source is hidden from it too. Without a picture the
+   * source is the only view, and stays exposed.
+   */
+  #applyMathAccess(view: BlockView): void {
+    const box = view.root.querySelector<HTMLElement>('.neditor-math-block');
+    const preview = box?.querySelector<HTMLElement>('.neditor-math-block__preview');
+
+    if (!box || !preview || !view.content) {
+      return;
+    }
+
+    const pictured = !this.#editable && box.dataset.rendered === 'true';
+
+    if (pictured) {
+      preview.removeAttribute('aria-hidden');
+      preview.removeAttribute('tabindex');
+      view.content.setAttribute('aria-hidden', 'true');
+    } else {
+      preview.setAttribute('aria-hidden', 'true');
+      preview.tabIndex = -1;
+      view.content.removeAttribute('aria-hidden');
+    }
   }
 
   /** Redraws a display equation's preview, when its TeX has changed. */
@@ -455,12 +498,23 @@ export class Renderer {
 
     box.dataset.rendered = String(drawn);
 
-    if (!drawn && this.#renderMath && tex.trim().length > 0) {
-      preview.textContent = this.#labels.mathError;
-      box.dataset.error = 'true';
-    } else {
-      delete box.dataset.error;
+    // A renderer that refused the TeX: said beside the source, which names it
+    // as its description, so a screen reader hears it with the field -- inside
+    // the hidden picture it reached nobody.
+    const failed = !drawn && this.#renderMath !== undefined && tex.trim().length > 0;
+    const error = box.querySelector<HTMLElement>('.neditor-math-block__error');
+
+    if (error) {
+      error.hidden = !failed;
     }
+
+    if (failed && error && view.content) {
+      view.content.setAttribute('aria-describedby', error.id);
+    } else {
+      view.content?.removeAttribute('aria-describedby');
+    }
+
+    this.#applyMathAccess(view);
   }
 
   /** An editable host, styled and resolved exactly like a block's own content. */

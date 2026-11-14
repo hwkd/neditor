@@ -16,7 +16,7 @@ import {
   richSplit,
   richToPlainText,
 } from '../model/rich-text.ts';
-import { INLINE_SPAN_LIMIT, matchInlineRule } from './inline-rules.ts';
+import { CODE_DOLLAR, INLINE_SPAN_LIMIT, matchInlineRule } from './inline-rules.ts';
 
 /**
  * Markdown → blocks, for pasted plain text.
@@ -476,9 +476,10 @@ function joinSoftBreaks(lines: readonly string[]): string[] {
   // soft-broken paragraph.
   let pending: string[] = [];
   let fence = 0;
-  // A display equation's lines are TeX, where a trailing `\\` is a row
-  // break, not this writer's soft break: they pass through untouched, as a
-  // code fence's do.
+  // A display equation's lines are TeX and pass through untouched, as a code
+  // fence's do. An even run of backslashes at a line's end -- TeX's `\\` row
+  // break -- would be left alone anyway; an odd one would not, and TeX ends a
+  // line with one for a control space (`a\` then the line break).
   let math = false;
 
   const flush = (): void => {
@@ -611,6 +612,12 @@ export function parseInlineMarkdown(text: string): RichText {
   let openFrom = 0;
   let origin = 0;
   let retired = false;
+  /**
+   * Where a numeric reference stands that the writer put straight after a
+   * formula's closing `$` to spell a digit, the one place outside a block's
+   * edges it writes one (see `richToMarkdown`).
+   */
+  let afterFormula = -1;
 
   const flush = (): void => {
     if (pending.length > 0) {
@@ -807,14 +814,14 @@ export function parseInlineMarkdown(text: string): RichText {
       index += 1;
       literal = next;
       projected = ESCAPED;
-    } else if (char === '&' && decodable.length > 0) {
+    } else if (char === '&' && (decodable.length > 0 || index === afterFormula)) {
       // Visited in order, so the span lookup is a pointer that only moves on.
       while (span < decodable.length && decodable[span]![1] <= index) {
         span += 1;
       }
 
       const reference =
-        span < decodable.length && decodable[span]![0] <= index
+        index === afterFormula || (span < decodable.length && decodable[span]![0] <= index)
           ? NUMERIC_REFERENCE.exec(text.slice(index, index + 12))
           : null;
       const decoded = reference ? decodeReference(reference) : null;
@@ -862,6 +869,13 @@ export function parseInlineMarkdown(text: string): RichText {
     // in `$a*b*c$` -- has eaten its delimiters. The writer puts TeX between
     // the dollars exactly as it stands, so this is the inverse of that.
     if (match.math !== undefined) {
+      // Pandoc's third condition, which typing cannot ask because the next
+      // character has not arrived: a closing `$` is not followed by a digit,
+      // so `$5-$10` and `US$10 to US$20` are prices, not a formula `5-`.
+      if (/[0-9]/.test(text[index + 1] ?? '')) {
+        continue;
+      }
+
       const open = sourceOf(match.start);
       const formula = open === -1 ? [] : richMath(text.slice(open + 1, index));
 
@@ -871,6 +885,7 @@ export function parseInlineMarkdown(text: string): RichText {
 
       flush();
       recall(match.start);
+      afterFormula = index + 1;
       content = richInsert(
         richDelete(content, match.start - base, match.end - base),
         match.start - base,
@@ -902,10 +917,13 @@ export function parseInlineMarkdown(text: string): RichText {
     // CommonMark reads a destination, so the href is taken from there -- and
     // only now, with the whole span recalled: a destination can hold more
     // finished code spans than are kept to hand, and read any earlier it was
-    // whatever tail was left, which could name another host.
+    // whatever tail was left, which could name another host. A code span's
+    // `$` is a placeholder there too, and the text may hold that character
+    // itself: the content says which.
     let link = match.link;
+    const tail = matchable.slice(innerEnd, match.end);
 
-    if (link !== undefined && matchable.slice(innerEnd, match.end).includes(ESCAPED)) {
+    if (link !== undefined && (tail.includes(ESCAPED) || tail.includes(CODE_DOLLAR))) {
       const closing = richToPlainText(content).slice(innerEnd - base, match.end - base);
       const href = sanitizeUrl(
         closing.startsWith('](<') ? closing.slice(3, -2) : closing.slice(2, -1),
@@ -935,6 +953,29 @@ export function parseInlineMarkdown(text: string): RichText {
       content = richSetLink(content, start, end, link);
     } else if (match.mark) {
       content = richSetMark(content, start, end, match.mark, true);
+    }
+
+    // A `$` in a finished code span is code, and the writer leaves it bare
+    // there (`CODE_SPAN_UNSAFE`). Left a `$` in the projection, it read as a
+    // formula's opener -- pairing with the next `$` after the span and
+    // swallowing the span into a formula -- or as the first half of a `$$`
+    // against the opener of a formula written straight after it, which then
+    // came back as text (`` `x$`$y$ ``). To a formula it is a barrier, as a
+    // finished formula is: never a delimiter, and nothing a formula reaches
+    // back over. But not that formula's atom: in a link destination it is
+    // still a `$`, and a formula is not (`CODE_DOLLAR`). Only the dollars:
+    // the rest of the span stays visible to the rules around it, as every
+    // finished span's text does. Typing projects a code run the same way
+    // (`matchInlineRuleInRuns`).
+    if (match.mark === 'code') {
+      const inner = matchable.slice(match.start, match.start + (innerEnd - innerStart));
+
+      if (inner.includes('$')) {
+        matchable =
+          matchable.slice(0, match.start) +
+          inner.replaceAll('$', CODE_DOLLAR) +
+          matchable.slice(match.start + inner.length);
+      }
     }
 
     park();

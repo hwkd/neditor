@@ -49,8 +49,9 @@ export interface NEditorLabels {
   code: string;
   link: string;
   /**
-   * The toolbar button and shortcut that turn the selection into an inline
-   * equation, and the name of the popover that edits one.
+   * The selection toolbar's button (and its tooltip, beside Mod+Shift+E) that
+   * turns the selection into an inline equation, and the name of the popover
+   * that edits one.
    */
   inlineMath: string;
 
@@ -58,9 +59,10 @@ export interface NEditorLabels {
   mathTex: string;
   mathPlaceholder: string;
   /**
-   * Announced when a renderer rejects the TeX, and shown in place of the
-   * preview. The TeX is still kept: an equation half-typed is not an error to
-   * throw away.
+   * Said when the renderer refuses the TeX (throws): under an equation, as its
+   * TeX field's description, and in the equation popover beside its field,
+   * which is marked invalid. The TeX is still kept: an equation half-typed is
+   * not an error to throw away.
    */
   mathError: string;
 
@@ -359,7 +361,7 @@ export function resolveLabels(overrides?: Partial<NEditorLabels>): NEditorLabels
     ...(emptyNamed === undefined ? {} : { emptyBlockSelectedNamed: emptyNamed }),
     placeholders: { ...DEFAULT_LABELS.placeholders, ...overrides?.placeholders },
     // Per entry, like placeholders: translating one command must not blank the
-    // other thirteen.
+    // other fourteen.
     slashCommands: { ...DEFAULT_LABELS.slashCommands, ...overrides?.slashCommands },
   };
 }

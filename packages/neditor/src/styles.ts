@@ -31,7 +31,9 @@ export const NEDITOR_STYLES: string = `
   --neditor-on-accent: #ffffff;
   --neditor-code-bg: rgb(135 131 120 / 0.15);
   --neditor-code-text: rgb(185 50 45);
-  --neditor-danger: rgb(212 76 71);
+  /* Darkened from rgb(212 76 71), which was 4.26:1 on white and 3.6:1 on the
+     code tint behind an equation's error -- small text, below 4.5. */
+  --neditor-danger: rgb(185 50 45);
   --neditor-shadow: 0 0 0 1px rgb(15 15 15 / 0.05), 0 3px 6px rgb(15 15 15 / 0.1),
     0 9px 24px rgb(15 15 15 / 0.2);
   --neditor-indent: 1.5em;
@@ -354,7 +356,14 @@ export const NEDITOR_STYLES: string = `
   color: var(--neditor-text-muted);
 }
 
+/* TeX reads left to right in every language. Under dir="rtl" its neutral
+   characters -- plus, equals, a closing brace -- took the block's direction, and
+   both the source and KaTeX's inline-block glyph boxes drew reordered; so the
+   source, the pictures and the popover's field are isolated as LTR. */
 .neditor-math-block > .neditor-block__content {
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: start;
   font-family: var(--neditor-font-mono);
   font-size: 0.85em;
   line-height: 1.5;
@@ -374,8 +383,15 @@ export const NEDITOR_STYLES: string = `
 }
 
 .neditor-math-block__preview {
+  direction: ltr;
+  unicode-bidi: isolate;
   overflow-x: auto;
   text-align: center;
+}
+
+/* A click on the picture is a click into the TeX -- while there is TeX to
+   edit. Read-only it does nothing, and says so by not pointing. */
+.neditor-math-block > .neditor-block__content[contenteditable='true'] + .neditor-math-block__preview {
   cursor: text;
 }
 
@@ -389,15 +405,32 @@ export const NEDITOR_STYLES: string = `
   border-top: 1px solid var(--neditor-border);
 }
 
-.neditor-math-block[data-error='true'] .neditor-math-block__preview {
+/* The renderer refused the TeX: said in words beside the source, which names
+   it as its description. */
+.neditor-math-block__error {
+  margin: 0.5rem 0 0;
   font-size: 0.75em;
-  text-align: start;
   color: var(--neditor-danger);
+}
+
+.neditor-math-block__error[hidden] {
+  display: none;
 }
 
 /* An inline formula: one atom in the line, edited in its popover. */
 .neditor-math {
+  direction: ltr;
+  unicode-bidi: isolate;
   border-radius: 3px;
+}
+
+/* The caret position after a formula that ends a block (see renderRichText):
+   an empty image, drawn as nothing. */
+.neditor-math__separator {
+  display: inline;
+  border: 0;
+  margin: 0;
+  padding: 0;
 }
 
 .neditor-block__content[contenteditable='true'] .neditor-math {
@@ -1099,11 +1132,14 @@ export const NEDITOR_STYLES: string = `
 }
 
 .neditor-math-editor__input {
+  direction: ltr;
   font-family: var(--neditor-font-mono);
 }
 
 /* The picture of the TeX being typed, on a line of its own under the field. */
 .neditor-math-editor__preview {
+  direction: ltr;
+  unicode-bidi: isolate;
   order: 1;
   flex-basis: 100%;
   min-width: 0;
@@ -1140,14 +1176,16 @@ export const NEDITOR_STYLES: string = `
   /* System colours replace the palette, so the tint-based cues vanish. These
      restate every state in terms the mode keeps. */
   .neditor-link-editor__input[data-invalid='true'],
-  .neditor-image-editor__input[data-invalid='true'] {
+  .neditor-image-editor__input[data-invalid='true'],
+  .neditor-math-editor__input[data-invalid='true'] {
     forced-color-adjust: none;
     border-color: LinkText;
     outline: 2px solid LinkText;
   }
 
   .neditor-link-editor__error,
-  .neditor-image-editor__error {
+  .neditor-image-editor__error,
+  .neditor-math-block__error {
     forced-color-adjust: none;
     color: LinkText;
   }

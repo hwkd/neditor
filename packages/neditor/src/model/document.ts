@@ -13,6 +13,7 @@ import {
 import {
   cloneRichText,
   isMathRun,
+  MATH_ATOM,
   isRichEmpty,
   normalizeRuns,
   richFromPlainText,
@@ -169,13 +170,32 @@ export function contentForType(type: BlockType, content: readonly TextRun[]): Ri
     return normalizeRuns(content);
   }
 
-  const delimiter = type === 'code' ? '$' : '';
+  if (type === 'code') {
+    return normalizeRuns(
+      content.map((run) => (isMathRun(run) ? { text: `$${run.math}$` } : { text: run.text })),
+    );
+  }
 
-  return normalizeRuns(
-    content.map((run) =>
-      isMathRun(run) ? { text: `${delimiter}${run.math}${delimiter}` } : { text: run.text },
-    ),
-  );
+  // Bare TeX runs into its neighbours, and TeX reads a control word up to the
+  // first non-letter: `\alpha` beside `b` would be `\alphab`, one undefined
+  // command. A space ends a control word and is otherwise ignored in math
+  // mode, so one goes between a formula and whatever it touches.
+  let text = '';
+
+  content.forEach((run, index) => {
+    if (!isMathRun(run)) {
+      text += run.text;
+      return;
+    }
+
+    const next = content[index + 1];
+    // One character each side, never a pattern over the text built so far.
+    const before = text.length > 0 && !/\s/.test(text.at(-1) ?? '') ? ' ' : '';
+    const after = next && !/\s/.test(next.text[0] ?? '') ? ' ' : '';
+    text += `${before}${run.math ?? ''}${after}`;
+  });
+
+  return richFromPlainText(text);
 }
 
 export function isContinuingType(type: BlockType): boolean {
@@ -887,9 +907,11 @@ export function moveBlocks(
   const gap = Math.max(0, Math.min(gapIndex, blocks.length));
   const removedBefore = blocks.slice(0, gap).filter((block) => ids.has(block.id)).length;
 
-  rest.splice(gap - removedBefore, 0, ...moving);
+  const at = gap - removedBefore;
 
-  return normalizeDepths(rest);
+  // Not `splice(at, 0, ...moving)`: spread into one call, a selection of a
+  // hundred thousand blocks passed the engine's limit on arguments.
+  return normalizeDepths([...rest.slice(0, at), ...moving, ...rest.slice(at)]);
 }
 
 /** Copies blocks, with fresh ids, directly below the lowest one selected. */
@@ -907,8 +929,8 @@ export function duplicateBlocks(
 
   const lastIndex = blocks.reduce((last, block, index) => (ids.has(block.id) ? index : last), 0);
 
-  const next = [...blocks];
-  next.splice(lastIndex + 1, 0, ...copies);
+  // Not `splice(..., ...copies)`, whose arguments the engine limits.
+  const next = [...blocks.slice(0, lastIndex + 1), ...copies, ...blocks.slice(lastIndex + 1)];
 
   return { blocks: normalizeDepths(next), ids: copies.map((block) => block.id) };
 }
@@ -1095,7 +1117,7 @@ function gfmUrlEnd(text: string, start: number, end: number): number {
  * The reader takes `<https://…>` back as the plain text it holds. A `www.`
  * URL has no autolink spelling and is escaped as before.
  */
-function escapeWithAutolinks(text: string, struck = false): string {
+function escapeWithAutolinks(text: string, struck = false, dollarAfter = false): string {
   if (!/https?:\/\//i.test(text)) {
     return escapeMarkdownText(text);
   }
@@ -1111,11 +1133,16 @@ function escapeWithAutolinks(text: string, struck = false): string {
     // longer than the reader's window is one it cannot close: written as an
     // autolink it came back with its brackets, one more pair every save.
     const unsafe = struck ? UNSAFE_IN_STRUCK_AUTOLINK : UNSAFE_IN_AUTOLINK;
+    const url = text.slice(start, end);
 
+    // A `$` is unsafe only where the reader has a bare `$` after it to pair
+    // with (see `RunContext.dollarAfter`): an OData `?$filter=` written
+    // escaped is a link with a backslash in it to GFM.
     if (
       end - start <= match[0].indexOf('//') + 2 ||
       end - start > INLINE_SPAN_LIMIT - 2 ||
-      unsafe.test(text.slice(start, end))
+      unsafe.test(url) ||
+      (dollarAfter && url.includes('$'))
     ) {
       continue;
     }
@@ -1365,6 +1392,20 @@ function destinationToMarkdown(url: string): string {
 }
 
 /**
+ * A link's destination with the formula atom percent-encoded.
+ *
+ * The link rule refuses a destination holding the atom, which in its
+ * projection is where a formula closed (`matchInlineRule`), and `sanitizeUrl`
+ * keeps a relative href as it was written: `[x](/a\uFFFC)` came back as that
+ * text. Encoded as `%`-escapes it is the same resource, as `/a b` is
+ * `/a%20b`. Only a link's: an image line is read whole, never by that rule,
+ * and keeps its source as written.
+ */
+function linkDestination(url: string): string {
+  return url.includes(MATH_ATOM) ? url.replaceAll(MATH_ATOM, '%EF%BF%BC') : url;
+}
+
+/**
  * A fence longer than any run of backticks in the code it wraps.
  *
  * Three backticks in the payload would otherwise close the block early, and the
@@ -1437,17 +1478,26 @@ interface RunContext {
   whole?: boolean;
   /** The run is in a table cell, where an unescaped `|` ends the cell. */
   inTable?: boolean;
+  /**
+   * A later run in the block is written with a bare `$` the reader can pair
+   * with: a formula's, or one in a code run. An autolink's text is plain once
+   * it closes, so a `$` in it then opens a formula that swallows the rest of
+   * the URL -- `<https://a.test/a$b> c$y$` read as a formula `b> c`.
+   */
+  dollarAfter?: boolean;
 }
 
 /**
  * An inline formula as Markdown: `$TeX$`, the TeX exactly as it stands.
  *
- * Nothing inside is escaped. Every reader that knows the syntax -- this one,
- * Pandoc, GitHub, KaTeX's auto-render -- takes the text between the dollars
- * literally, so an escape written here would be a backslash in the TeX, and
- * TeX is full of characters this writer escapes elsewhere (`\`, `_`, `*`,
- * `|`). The reader recovers the TeX from the source between the delimiters for
- * the same reason, not from what its rules made of it.
+ * Nothing inside is escaped: this reader and Pandoc take the text between the
+ * dollars literally, so an escape written here would be a backslash in the
+ * TeX, and TeX is full of characters this writer escapes elsewhere (`\`,
+ * `_`, `*`, `|`). The reader recovers the TeX from the source between the
+ * delimiters for the same reason, not from what its rules made of it. Readers
+ * that run Markdown first and find math afterwards -- GitHub's, or KaTeX's
+ * auto-render over rendered HTML -- may still emphasise inside a formula;
+ * there is no spelling that is literal to every reader.
  *
  * Two shapes cannot be written, and both are invalid TeX: a bare `$` inside
  * the formula, which ends math mode in TeX as it ends the span here, and an
@@ -1516,7 +1566,7 @@ function runToMarkdown(run: TextRun, context: RunContext = {}): string {
   // a URL in it like any other.
   const escaped =
     run.link === undefined
-      ? escapeWithAutolinks(run.text, marks.has('strikethrough'))
+      ? escapeWithAutolinks(run.text, marks.has('strikethrough'), context.dollarAfter === true)
       : escapeMarkdownText(run.text);
 
   if (escaped.length === 0 || (marks.size === 0 && !run.link)) {
@@ -1554,7 +1604,7 @@ function runToMarkdown(run: TextRun, context: RunContext = {}): string {
   }
 
   if (run.link) {
-    core = `[${core}](${destinationToMarkdown(run.link)})`;
+    core = `[${core}](${destinationToMarkdown(linkDestination(run.link))})`;
   }
 
   // And one span per readable length: a span whose opening delimiter the reader
@@ -1713,10 +1763,24 @@ export function richToMarkdown(
   // has to judge -- not the atom character the model holds in its place.
   const edge = (run: TextRun | undefined, side: 'first' | 'last'): string =>
     isMathRun(run) ? '$' : ((side === 'first' ? run?.text[0] : run?.text.at(-1)) ?? '');
+  // Whether a run at or after each index is written with a bare `$`: one
+  // pass from the end, never a search per run.
+  const dollarFrom: boolean[] = [];
+
+  for (let index = content.length - 1; index >= 0; index -= 1) {
+    const run = content[index]!;
+
+    dollarFrom[index] =
+      dollarFrom[index + 1] === true ||
+      isMathRun(run) ||
+      (run.marks?.includes('code') === true && run.text.includes('$'));
+  }
+
   const contextAt = (index: number): RunContext => ({
     before: edge(content[index - 1], 'last'),
     after: edge(content[index + 1], 'first'),
     inTable: options.inTable === true,
+    dollarAfter: dollarFrom[index + 1] === true,
   });
   // Each run is written once here and looked at twice: as the run after the
   // one being decided, and then as that run itself.
@@ -1762,6 +1826,13 @@ export function richToMarkdown(
 
       if (touching) {
         written = runToMarkdown(run, { ...context, tagged: true });
+      }
+
+      // A digit straight after a formula would stop its `$` closing -- Pandoc's
+      // rule, which the reader follows so that `$5-$10` stays a price range --
+      // so it is written as the reference the reader decodes in that one place.
+      if (isMathRun(content[index - 1]) && /^[0-9]/.test(written)) {
+        written = `&#${written.charCodeAt(0)};${written.slice(1)}`;
       }
 
       // `!` straight before a link makes it an image in every other reader. An
