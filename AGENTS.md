@@ -64,6 +64,7 @@ A monorepo for a block-based rich-text editor, packaged as a reusable, framework
 - **Depth is re-clamped, not trusted**: `normalizeDepths` runs after every multi-block edit so no block is ever more than one level below its predecessor. New structural operations should end with it.
 - Drop indicators and the gutter position themselves with `offsetTop`/`offsetLeft` against the root, not `getBoundingClientRect`, so they survive page scrolling. The gutter's space is reserved by padding on `.neditor-block`, not on the root — a host stylesheet with higher specificity (Astro's scoped styles, for one) would win against the root.
 - `parseRichText` is a **trust boundary**: it also consumes pasted HTML. Anything not in `SKIP_TAGS` contributes text, and only `sanitizeUrl`-approved hrefs become links. Add new element handling there, not in the editor.
+- **The clipboard reader builds nothing in the live document.** The paste is parsed in a template, whose contents are inert, but every wrapper, fragment or copy the reader makes afterwards adopts what it is handed, and an image or media element adopted into the live document loads and runs its `onload` or `onerror` -- in every engine, on paste, on drop and from `blocksFromHtml` called by a host. `readBlocksFromHtml` makes a document with no browsing context per read (`inertDocument`) and passes it down as `doc`; past the template the markup is parsed in, anything that creates an element or fragment during a read takes that `doc`, never the caller's document. Not a pasted node's `ownerDocument` either: that is inert in a browser but the live document in happy-dom, where the unit tests that pin this could no longer tell the two apart. (A `cloneNode` copy stays in its source's document -- the template's, or the read's own -- which is inert either way in a browser.) The e2e guards are `C7b` (paste, written from a page's own `copy` event, which no engine cleans) and `D1b` (drop), each in every engine.
 - **Foreign content enters through the parser or not at all — and pasting is not the only way in.** A drop carries the same flavours as a clipboard, and the browser's default for one is to write the dragged fragment straight into a live editing host; because typing is DOM-first, `#syncFromDom` then reads that fragment back as the block's own content, the model agrees with the DOM, and nothing later renders it away. So an `<iframe>`, a password form or a fixed full-viewport overlay dragged in from another page _persists_. `#handleDrop` cancels the drop unconditionally — before any check that might give up — and re-enters the payload through `#insertForeignContent`, the single path paste also takes; `#handleBeforeInput` refuses `UNPARSED_INPUT_TYPES` as the backstop for anything that slips past either handler. Any new way content can arrive belongs on that path, never on the browser's default.
 - **Input rules fire on insertion, not on deletion.** `#tryBlockRule`, `#tryInlineRule` and `#tryOpenSlashMenu` read the text before the caret and treat it as text just typed; a deletion leaves the identical text there without anyone having typed it, so backspacing the word after a `# ` converted the block and ate the prefix. `#handleInput` gates them on `isInsertion(event)`. `#updateSlashQuery` is deliberately ahead of that gate — an open menu reads the text rather than acting on it, and must still narrow on Backspace and close when the `/` goes.
 - Floating UI is portalled to `document.body`, so it sits outside `.neditor` and does not inherit its custom properties. Use `ui/portal.ts`: it applies the `neditor-portal` class the theme tokens key off, and `positionPortal` measures the real element rather than estimating. Never call `scrollIntoView` inside a fixed portal — it scrolls the page to the portal's layout origin.
@@ -348,6 +349,18 @@ var(--indent))` is dropped entirely when a host sets the gutter to a unitless
   parsing that same plain text, so the comparison is a round trip against itself
   and true for anything Markdown-shaped. The test that should have caught it
   asserted the right invariant with an input that happened not to exercise it.
+
+- **Read content where it stands, then cut the parse.** A run of pasted inline
+  content holding pictures is read in one parse, each picture written as an
+  `IMAGE_ATOM`, and split at the atoms afterwards; a heading's or quote's own
+  text drops the lines its pictures stood on alone the same way. It used to be
+  copied out piece by piece around each picture, and every piece lost a
+  neighbour the walk judges it by -- its table cell, inline box, flex item,
+  `white-space`, the comment beside it -- so the same words read apart without
+  the picture and together with it. Four review rounds patched one lost
+  neighbour each and exposed the next. A sentinel the walk writes into text
+  (`\uFDD0`–`\uFDD6`) must be one `collapseWhitespace` escapes, and every
+  reader of it must tell the text's own character from the sentinel.
 
 - **Write the test before the fix when the fix is a retry.** Three attempts on
   the code-block paste rule and three on the mount role each shipped a new

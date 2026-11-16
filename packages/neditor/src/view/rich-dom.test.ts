@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import ts from 'typescript';
 
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 
 import type { Block } from '../model/document.ts';
 import { blockText } from '../model/document.ts';
@@ -6102,8 +6102,7 @@ describe('a list item hands on its images in document order', () => {
     ]);
   });
 
-  // Blocks with nothing between them are still visited together, so an item
-  // without images reads exactly as it did.
+  // A guard on the output only: an item with no images reads as it did.
   test('an item with no images is unchanged', () => {
     expect(read('<ul><li>a<pre>p</pre><ul><li>c</li></ul><p>d</p></li></ul>')).toEqual([
       'bulleted_list@0:a',
@@ -6122,14 +6121,16 @@ describe('a list item hands on its images in document order', () => {
       (n: number) => `<ul><li>a${`<ul><li>c</li></ul>${inline('i')}`.repeat(n)}</li></ul>`,
     ];
 
+    // At 25 a scan of the item's children per run grew 22x, inside the line;
+    // at 400 it is well past it.
     for (const shape of shapes) {
       expect(
         growth((n) => {
           blocksFromHtml(document, shape(n));
-        }, 25),
+        }, 400),
       ).toBeLessThan(LINEAR);
     }
-  }, 60_000);
+  }, 120_000);
 });
 
 describe('a styled display block keeps its marks beside an image', () => {
@@ -6162,12 +6163,16 @@ describe('a styled display block keeps its marks beside an image', () => {
   });
 
   // It still ends the lines around it, as it did when its marks were lost.
+  // It reads as it does without the picture -- its own lines, in the text
+  // around it -- split where the picture stands.
   test('it still stands apart from the text around it', () => {
-    expect(read(`before<aside style="font-weight:bold">q z${img}</aside>after`)).toEqual([
-      `paragraph@0:${JSON.stringify([{ text: 'before' }])}`,
-      bold('q z'),
+    expect(read(`before<aside style="font-weight:bold">q${img}z</aside>after`)).toEqual([
+      `paragraph@0:${JSON.stringify([{ text: 'before\n' }, { text: 'q', marks: ['bold'] }])}`,
       'image@0:k.png',
-      `paragraph@0:${JSON.stringify([{ text: 'after' }])}`,
+      `paragraph@0:${JSON.stringify([{ text: 'z', marks: ['bold'] }, { text: '\nafter' }])}`,
+    ]);
+    expect(read('before<aside style="font-weight:bold">qz</aside>after')).toEqual([
+      `paragraph@0:${JSON.stringify([{ text: 'before\n' }, { text: 'qz', marks: ['bold'] }, { text: '\nafter' }])}`,
     ]);
   });
 
@@ -6204,19 +6209,2076 @@ describe('a styled display block keeps its marks beside an image', () => {
   });
 
   test('reading them is linear', () => {
-    const shapes = [
-      (n: number) => `<aside style="font-weight:bold">${`q ${img}`.repeat(n)}</aside>`,
-      (n: number) =>
-        `<center style="font-weight:bold">${'<span>'.repeat(n)}q${img}${'</span>'.repeat(n)}</center>`,
-      (n: number) => `<aside style="font-weight:bold">q${img}</aside>`.repeat(n),
+    // The chain stays under the inline nesting bound at its large size, where
+    // it would stop being the same document.
+    const shapes: Array<[(n: number) => string, number]> = [
+      [(n) => `<aside style="font-weight:bold">${`q ${img}`.repeat(n)}</aside>`, 400],
+      [
+        (n) =>
+          `<center style="font-weight:bold">${'<span>'.repeat(n)}q${img}${'</span>'.repeat(n)}</center>`,
+        100,
+      ],
+      [(n) => `<aside style="font-weight:bold">q${img}</aside>`.repeat(n), 400],
     ];
 
-    for (const shape of shapes) {
+    for (const [shape, size] of shapes) {
       expect(
         growth((n) => {
           blocksFromHtml(document, shape(n));
-        }, 25),
+        }, size),
       ).toBeLessThan(LINEAR);
     }
+  }, 120_000);
+});
+
+describe('reader fixes, review round 1', () => {
+  const img = (name: string) => `<img src="https://x.test/${name}.png">`;
+  const read = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image'
+        ? `image@${block.depth}:${block.src?.replace('https://x.test/', '')}`
+        : `${block.type}@${block.depth}:${JSON.stringify(block.content)}`,
+    );
+  const para = (...runs: object[]) => `paragraph@0:${JSON.stringify(runs)}`;
+
+  // L1: an image an item hands on among its blocks leaves its line open, as an
+  // inline image does, so a `<br>` that follows it ends that line.
+  test('an image placed among an item’s blocks leaves its line open', () => {
+    const tail = `<span>${img('2')}</span><a href="https://x.test/"><br>${img('3')}</a>`;
+
+    expect(read(`<ul><li>t<pre>p</pre>${tail}</li></ul>`)).toEqual([
+      `bulleted_list@0:${JSON.stringify([{ text: 't' }])}`,
+      `code@1:${JSON.stringify([{ text: 'p' }])}`,
+      'image@1:2.png',
+      'image@1:3.png',
+    ]);
+    expect(read(`<ul><li>t${tail}</li></ul>`)).toEqual([
+      `bulleted_list@0:${JSON.stringify([{ text: 't' }])}`,
+      'image@1:2.png',
+      'image@1:3.png',
+    ]);
+    // As the same markup reads outside a list.
+    expect(read(`<pre>p</pre>${tail}`)).toEqual([
+      `code@0:${JSON.stringify([{ text: 'p' }])}`,
+      'image@0:2.png',
+      'image@0:3.png',
+    ]);
+  });
+
+  // D1: a styled container (`<header>`, `<footer>`, `<nav>`, `<main>`, `<dl>`)
+  // states a mark that a tag inside it may still overrule. Whether it holds an
+  // image or a block decided whether that mark was read at all.
+  test.each(['header', 'footer', 'nav', 'main', 'dl'])(
+    '<%s> reads its mark with or without an image or a block',
+    (tag) => {
+      const open = `<${tag} style="font-weight:bold">`;
+      const bold = para({ text: 'q z', marks: ['bold'] });
+
+      expect(read(`${open}q z</${tag}>`)).toEqual([bold]);
+      expect(read(`${open}q z${img('k')}</${tag}>`)).toEqual([bold, 'image@0:k.png']);
+      expect(read(`${open}<p>q z</p></${tag}>`)).toEqual([bold]);
+      expect(read(`${open}<p>q z</p>${img('k')}</${tag}>`)).toEqual([bold, 'image@0:k.png']);
+    },
+  );
+
+  // And weakly, image or not: the shorthand the footer states does not undo
+  // the `<s>` inside it.
+  test('a container mark stays weak without an image', () => {
+    const marks = (html: string) =>
+      blocksFromHtml(document, html)
+        .flatMap((block) => (block.content ?? []).flatMap((run) => run.marks ?? []))
+        .sort();
+
+    expect(marks('<footer style="text-decoration:underline"><s>q</s></footer>')).toEqual([
+      'strikethrough',
+      'underline',
+    ]);
+    expect(marks(`<footer style="text-decoration:underline"><s>q</s>${img('k')}</footer>`)).toEqual(
+      ['strikethrough', 'underline'],
+    );
+  });
+
+  // T5: a styled `<figcaption>` reached as a block reads its mark, as it does
+  // without the image.
+  test('a styled figcaption keeps its mark beside an image', () => {
+    const table = '<table><tr><td>x</td></tr></table>';
+
+    expect(
+      read(
+        `<figure><figcaption style="font-weight:bold">q z${img('k')}</figcaption>${table}</figure>`,
+      )[0],
+    ).toBe(para({ text: 'q z', marks: ['bold'] }));
+  });
+
+  // D2: flex and grid items stay apart when their container is split around
+  // an image, as they are without one.
+  test.each([
+    [
+      `<address style="display:flex;align-items:center;font-weight:bold">${img('k')}<span>Jane</span><span>Nov 14</span></address>`,
+      ['image@0:k.png', para({ text: 'Jane\nNov 14', marks: ['bold'] })],
+    ],
+    [
+      `<aside style="display:grid;font-weight:bold">q<span>z</span>${img('k')}</aside>`,
+      [para({ text: 'q\nz', marks: ['bold'] }), 'image@0:k.png'],
+    ],
+    [
+      `<span style="display:flex;font-weight:bold"><span>q</span><span>z</span>${img('k')}</span>`,
+      [para({ text: 'q\nz', marks: ['bold'] }), 'image@0:k.png'],
+    ],
+  ])('%s keeps its items apart', (html, blocks) => {
+    expect(read(html)).toEqual(blocks);
+  });
+
+  // The whitespace between items is not drawn, split or not.
+  test('pretty-printed items read no space', () => {
+    expect(
+      read(
+        `<aside style="display:flex;font-weight:bold">\n  <span>Jane</span>\n  <span>Nov 14</span>\n  ${img('k')}\n</aside>`,
+      ),
+    ).toEqual([para({ text: 'Jane\nNov 14', marks: ['bold'] }), 'image@0:k.png']);
+  });
+
+  // A display block ended inside the wrapper ends that line, not the one a
+  // picture after it opens: a `<br>` after the wrapper ends the picture's line.
+  test('a picture after a nested display block keeps its line open', () => {
+    expect(read(`<b><center>y${img('k')}</center>w${img('2')}</b><br>z`)).toEqual([
+      para({ text: 'y', marks: ['bold'] }),
+      'image@0:k.png',
+      para({ text: 'w', marks: ['bold'] }),
+      'image@0:2.png',
+      para({ text: 'z' }),
+    ]);
+  });
+
+  // An item that holds the image ends the line on both sides of it.
+  test('an item holding the image is a line of its own', () => {
+    const text = read(
+      `<aside style="display:flex;font-weight:bold"><span>q</span><span>z${img('k')}y</span></aside>`,
+    ).join('|');
+
+    expect(text).not.toContain('qz');
+    expect(text).toContain('image@0:k.png');
+  });
+
+  // K2: a wrapper that holds a display block as well as an image keeps its
+  // marks and link, and the block keeps its lines.
+  test.each([
+    [
+      `<b>q<aside>z</aside>${img('k')}</b>`,
+      [para({ text: 'q\nz', marks: ['bold'] }), 'image@0:k.png'],
+    ],
+    [
+      `<aside style="font-weight:bold">q<center>z</center>${img('k')}</aside>`,
+      [para({ text: 'q\nz', marks: ['bold'] }), 'image@0:k.png'],
+    ],
+    [
+      `<b><aside style="font-style:italic">q${img('k')}</aside></b>`,
+      [para({ text: 'q', marks: ['bold', 'italic'] }), 'image@0:k.png'],
+    ],
+    [
+      `<a href="https://l.test/"><aside style="font-weight:bold">q${img('k')}</aside></a>`,
+      [para({ text: 'q', marks: ['bold'], link: 'https://l.test/' }), 'image@0:k.png'],
+    ],
+    [
+      `<i><p>p</p><aside style="font-weight:bold">q${img('k')}</aside></i>`,
+      [
+        para({ text: 'p', marks: ['italic'] }),
+        para({ text: 'q', marks: ['bold', 'italic'] }),
+        'image@0:k.png',
+      ],
+    ],
+    [
+      `<fieldset style="font-weight:bold"><legend>L</legend>q${img('k')}</fieldset>`,
+      [para({ text: 'L\nq', marks: ['bold'] }), 'image@0:k.png'],
+    ],
+  ])('%s keeps its formatting', (html, blocks) => {
+    expect(read(html)).toEqual(blocks);
+  });
+
+  // An image inside the display block splits the run there, and the block's
+  // lines either side of it stay, as without the image (`x\nyw\nz`).
+  test('an image inside a nested display block ends the lines around the block', () => {
+    expect(read(`<b>x<center>y${img('k')}w</center>z</b>`)).toEqual([
+      para({ text: 'x\ny', marks: ['bold'] }),
+      'image@0:k.png',
+      para({ text: 'w\nz', marks: ['bold'] }),
+    ]);
+    expect(read('<b>x<center>yw</center>z</b>')).toEqual([
+      para({ text: 'x\nyw\nz', marks: ['bold'] }),
+    ]);
+  });
+
+  // K1: a quote hands its images on among its lists where they stand, as a
+  // list item now does.
+  test.each([
+    [
+      `<blockquote>a<ul><li>b</li></ul><span>${img('1')}</span></blockquote>`,
+      ['quote@0:[{"text":"a"}]', 'bulleted_list@1:[{"text":"b"}]', 'image@1:1.png'],
+    ],
+    [
+      `<blockquote>a<span>${img('1')}</span><ul><li>b</li></ul><span>${img('2')}</span></blockquote>`,
+      [
+        'quote@0:[{"text":"a"}]',
+        'image@1:1.png',
+        'bulleted_list@1:[{"text":"b"}]',
+        'image@1:2.png',
+      ],
+    ],
+    // Bare: a quote of nothing but a list and an image is those, in order.
+    [
+      `<blockquote><ul><li>b</li></ul><span>${img('1')}</span></blockquote>`,
+      ['bulleted_list@0:[{"text":"b"}]', 'image@0:1.png'],
+    ],
+  ])('%s keeps document order', (html, blocks) => {
+    expect(read(html)).toEqual(blocks);
+  });
+
+  // D4: a chain of styled containers holding an image hands each one's mark on
+  // once, not by copying everything below it once per level.
+  test('a chain of styled containers is linear', () => {
+    expect(
+      growth((n) => {
+        blocksFromHtml(
+          document,
+          `${'<footer style="font-weight:bold">'.repeat(n)}q${img('k')}${'</footer>'.repeat(n)}`,
+        );
+      }, 40),
+    ).toBeLessThan(LINEAR);
+    expect(
+      growth((n) => {
+        blocksFromHtml(
+          document,
+          `${'<footer style="font-weight:bold">'.repeat(n)}<p>q</p>${'</footer>'.repeat(n)}`,
+        );
+      }, 40),
+    ).toBeLessThan(LINEAR);
   }, 60_000);
+
+  test('splitting a wrapper around its display blocks is linear', () => {
+    expect(
+      growth((n) => {
+        blocksFromHtml(
+          document,
+          `<b>${`q<aside>z</aside><center>y${img('i')}</center>`.repeat(n)}</b>`,
+        );
+      }, 200),
+    ).toBeLessThan(LINEAR);
+  }, 60_000);
+});
+
+describe('reader fixes, review round 2', () => {
+  const img = (name: string, scheme = 'https://x.test/') => `<img src="${scheme}${name}.png">`;
+  const read = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image'
+        ? `image@${block.depth}:${block.src?.replace('https://x.test/', '')}`
+        : `${block.type}@${block.depth}:${JSON.stringify(block.content)}`,
+    );
+  const marksOf = (html: string) =>
+    [
+      ...new Set(
+        blocksFromHtml(document, html).flatMap((block) =>
+          (block.content ?? []).flatMap((run) => run.marks ?? []),
+        ),
+      ),
+    ].sort();
+  const para = (...runs: object[]) => `paragraph@0:${JSON.stringify(runs)}`;
+
+  // C1: a container's mark is weak -- any element below that turns it off
+  // wins, as the browser draws it. Chromium writes each element's matched
+  // rules inline, so a Tailwind header (semibold, its tagline normal) arrives
+  // like this.
+  test('a Chromium-copied header keeps only its own mark', () => {
+    expect(
+      read(
+        '<header style="font-weight: 600;"><a href="https://s.test/">Site</a><p style="margin:0; font-weight: 400;">Notes on things</p><nav><ul><li style="font-weight: 400;">Home</li></ul></nav></header>',
+      ),
+    ).toEqual([
+      para({ text: 'Site', marks: ['bold'], link: 'https://s.test/' }),
+      para({ text: 'Notes on things' }),
+      `bulleted_list@0:${JSON.stringify([{ text: 'Home' }])}`,
+    ]);
+  });
+
+  test.each([
+    '<header style="font-weight:bold"><p style="font-weight:normal">x</p></header>',
+    '<header style="font-weight:bold"><span style="font-weight:400"><p>x</p></span></header>',
+    '<footer style="font-weight:bold"><b style="font-weight:normal" id="docs-internal-guid-1"><p>x</p></b></footer>',
+    '<footer style="font-weight:bold"><nav style="font-weight:normal"><p>x</p></nav></footer>',
+    `<header style="font-weight:bold">${img('k')}<span style="font-weight: normal"><p>x</p></span></header>`,
+  ])('%s turns the container’s mark off', (html) => {
+    expect(marksOf(html)).toEqual([]);
+  });
+
+  test('an item or a cell turns it off for itself alone', () => {
+    expect(
+      read(
+        '<nav style="font-style:italic"><ul><li>a</li><li style="font-style:normal">b</li></ul></nav>',
+      ),
+    ).toEqual([
+      `bulleted_list@0:${JSON.stringify([{ text: 'a', marks: ['italic'] }])}`,
+      `bulleted_list@0:${JSON.stringify([{ text: 'b' }])}`,
+    ]);
+    const [table] = blocksFromHtml(
+      document,
+      '<main style="font-weight:700"><table><tr><td>c</td><td style="font-weight:400">d</td></tr></table></main>',
+    );
+
+    expect(table?.rows).toEqual([[[{ text: 'c', marks: ['bold'] }], [{ text: 'd' }]]]);
+  });
+
+  // The same nesting reads the same in a list item as outside one.
+  test('a nested container’s off holds inside a list item', () => {
+    const inner = '<footer style="font-weight:normal;font-style:italic"><p>x</p></footer>';
+
+    expect(
+      marksOf(`<footer style="font-weight:bold"><ul><li>t${inner}</li></ul></footer>`),
+    ).toEqual(['bold', 'italic']);
+    expect(
+      blocksFromHtml(
+        document,
+        `<footer style="font-weight:bold"><ul><li>t${inner}</li></ul></footer>`,
+      )
+        .flatMap((block) => block.content ?? [])
+        .filter((run) => run.text.includes('x')),
+    ).toEqual([{ text: 'x', marks: ['italic'] }]);
+  });
+
+  // C3: a nested container's mark is weak too, against the tags inside it.
+  test.each([
+    [
+      '<b><footer style="text-decoration:underline"><s><p>q</p></s></footer></b>',
+      ['bold', 'strikethrough', 'underline'],
+    ],
+    [
+      '<footer style="text-decoration:underline"><nav style="text-decoration:line-through"><u><p>q</p></u></nav></footer>',
+      ['strikethrough', 'underline'],
+    ],
+  ])('%s keeps the tag inside it', (html, marks) => {
+    expect(marksOf(html)).toEqual(marks);
+  });
+
+  // C4: a styled flex container's item break carries the mark, as the split's
+  // does: the same document, one run.
+  test('a styled flex container reads one run', () => {
+    expect(
+      read(
+        '<footer style="display:flex;font-weight:bold"><span>Jane</span><span>Nov 14</span></footer>',
+      ),
+    ).toEqual([para({ text: 'Jane\nNov 14', marks: ['bold'] })]);
+  });
+
+  // Q1: a picture's line stays open only when nothing in the item's text
+  // ended it first: two `<br>`s in a row are a blank line, as outside a list.
+  test.each([
+    [
+      `<ul><li>t<span>${img('1')}</span><br><a href="https://x.test/"><br>${img('2')}</a></li></ul>`,
+      `t<span>${img('1')}</span><br><a href="https://x.test/"><br>${img('2')}</a>`,
+    ],
+    [
+      `<ul><li><span>${img('1')}</span>text<br><a href="https://x.test/"><br>${img('2')}</a></li></ul>`,
+      `<span>${img('1')}</span>text<br><a href="https://x.test/"><br>${img('2')}</a>`,
+    ],
+  ])('%s keeps its blank line', (html, outside) => {
+    const blank = (blocks: string[]) =>
+      blocks.filter((block) => block.startsWith('paragraph@') && block.endsWith(':[]')).length;
+
+    expect(blank(read(html))).toBe(1);
+    // Outside a list the line is there too: a blank paragraph, or the break
+    // that ends the text before the second picture.
+    expect(
+      blank(read(outside)) + read(outside).filter((block) => block.includes('\\n"')).length,
+    ).toBe(1);
+  });
+
+  // And when the picture sat in a line of its own in the item's text, whose
+  // end ended the picture's line.
+  test('a picture in a line of the item’s text closes with it', () => {
+    const blank = (blocks: string[]) =>
+      blocks.filter((block) => block.startsWith('paragraph@') && block.endsWith(':[]')).length;
+
+    expect(
+      blank(
+        read(
+          `<ul><li>t<div><span>${img('1')}</span></div><a href="https://x.test/"><br>${img('2')}</a></li></ul>`,
+        ),
+      ),
+    ).toBe(1);
+  });
+
+  // Q4: a picture the reader cannot use takes no place among the lists.
+  test('an unusable picture is not counted before a list', () => {
+    expect(
+      read(`<blockquote>a${img('x', 'cid:')}<ul><li>b</li></ul>${img('1')}</blockquote>`),
+    ).toEqual(['quote@0:[{"text":"a"}]', 'bulleted_list@1:[{"text":"b"}]', 'image@1:1.png']);
+  });
+
+  // Q5: the break at a block's head is the picture's only when the picture
+  // came before it; one the author wrote first is a blank line.
+  test.each([
+    [`<blockquote><br>text${img('1')}</blockquote>`, 'quote@0:[{"text":"\\ntext"}]'],
+    [`<h1><br>text${img('1')}</h1>`, 'heading1@0:[{"text":"\\ntext"}]'],
+    [`<blockquote>${img('1')}<br>text</blockquote>`, 'quote@0:[{"text":"text"}]'],
+    [`<h1>${img('1')}<br>text</h1>`, 'heading1@0:[{"text":"text"}]'],
+  ])('%s', (html, first) => {
+    expect(read(html)[0]).toBe(first);
+  });
+
+  // S1: words beside table cells and inside inline boxes stay apart when
+  // the wrapper is split around a picture, as they are without one.
+  test.each([
+    [
+      `<a href="https://h.test/"><center>Contents</center><span style="display:table-cell">10</span><span style="display:table-cell">Algebraic Proof</span>${img('k')}</a>`,
+      'Contents\n10 Algebraic Proof',
+    ],
+    [
+      `<b><span style="display:table-cell">10</span><span style="display:table-cell">Title${img('k')}</span></b>`,
+      '10 Title',
+    ],
+    [
+      `<b><span style="display:table"><span style="display:table-cell">a</span><span style="display:table-cell">b${img('k')}</span></span></b>`,
+      'a b',
+    ],
+    [
+      `<b>${img('x', 'cid:')}<span style="display:table-cell">a</span><span style="display:table-cell">b</span></b>`,
+      'a b',
+    ],
+    [
+      `<b><span style="display:inline-block"><span style="display:block">top</span><span style="display:block">bottom${img('k')}</span></span> next</b>`,
+      'top bottom',
+    ],
+  ])('%s keeps its words apart', (html, text) => {
+    expect(
+      blocksFromHtml(document, html)
+        .filter((block) => block.type !== 'image')
+        .map((block) => richToPlainText(block.content))
+        .join('|'),
+    ).toContain(text);
+  });
+
+  // S2: a line of its own by being an item or by its declared display, not
+  // only by its tag -- a line, as without the picture, never the same words.
+  test.each([
+    [`<b style="display:flex">loose<span>z${img('k')}</span></b>`, 'loose\nz'],
+    [`<b>q<span style="display:block">z${img('k')}</span></b>`, 'q\nz'],
+    [`x<span style="display:block;font-weight:bold">q${img('k')}</span>`, 'x\nq'],
+  ])('%s is a line of its own', (html, text) => {
+    const texts = blocksFromHtml(document, html)
+      .filter((block) => block.type !== 'image')
+      .map((block) => richToPlainText(block.content));
+
+    expect(texts).toEqual([text]);
+    expect(
+      blocksFromHtml(document, html.replace(img('k'), '')).map((block) =>
+        richToPlainText(block.content),
+      ),
+    ).toEqual([text]);
+  });
+
+  // S3: whitespace between items is not drawn, whatever their white-space.
+  test.each([
+    ['<b style="display:flex;white-space:pre"><span>a</span>\n<span>c</span></b>', 'a\nc'],
+    [
+      `<b><span style="display:flex;white-space:pre"><span>a</span>\n<span>c</span></span>${img('k')}</b>`,
+      'a\nc',
+    ],
+  ])('%s reads no blank lines', (html, text) => {
+    expect(richToPlainText(blocksFromHtml(document, html)[0]!.content)).toBe(text);
+  });
+
+  // Q7: at the size the item's test uses; a scan per list as cheap as an
+  // array lookup still costs less than the parse at any size worth running.
+  test('a quote placing its images is linear', () => {
+    expect(
+      growth((n) => {
+        blocksFromHtml(
+          document,
+          `<blockquote>a${`<ul><li>b</li></ul><span>${img('i')}</span>`.repeat(n)}</blockquote>`,
+        );
+      }, 400),
+    ).toBeLessThan(LINEAR);
+  }, 120_000);
+});
+
+describe('reader fixes, review round 3', () => {
+  const img = (name: string, scheme = 'https://x.test/') => `<img src="${scheme}${name}.png">`;
+  const read = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image'
+        ? `image@${block.depth}:${block.src?.replace('https://x.test/', '')}`
+        : `${block.type}@${block.depth}:${JSON.stringify(block.content)}`,
+    );
+  /** Every run, from text, captions and table cells, as `text[marks]`. */
+  const runs = (html: string) =>
+    blocksFromHtml(document, html).flatMap((block) =>
+      [...(block.content ?? []), ...(block.rows ?? []).flat(2)].map(
+        (run) => `${run.text}[${[...(run.marks ?? [])].sort().join(',')}]`,
+      ),
+    );
+  const texts = (html: string) =>
+    blocksFromHtml(document, html)
+      .filter((block) => block.type !== 'image')
+      .map((block) => richToPlainText(block.content));
+  /** A blank line, as a blank paragraph or as the break ending the text before it. */
+  const blankLines = (html: string) =>
+    read(html).filter(
+      (block) =>
+        (block.startsWith('paragraph@') && block.endsWith(':[]')) || block.includes('\\n"'),
+    ).length;
+
+  // Y1: a wrapper inside an item, a quote, a cell or a summary that turns a
+  // container's mark off wins there too.
+  test.each([
+    [
+      '<nav style="font-weight:600"><ul><li><a href="https://x.test/x" style="font-weight:400"><div>Title</div><p>desc</p></a></li></ul></nav>',
+      ['Title\ndesc[]'],
+    ],
+    [
+      '<header style="font-weight:bold"><ul><li><span style="font-weight:normal;font-style:italic"><div>x</div></span></li></ul></header>',
+      ['x[italic]'],
+    ],
+    [
+      '<header style="font-weight:bold"><blockquote><em style="font-weight:normal"><p>x</p></em></blockquote></header>',
+      ['x[italic]'],
+    ],
+    [
+      '<header style="font-weight:bold"><table><tr><td><a href="https://x.test/x" style="font-weight:normal"><div>x</div></a></td></tr></table></header>',
+      ['x[]'],
+    ],
+    [
+      '<header style="font-weight:bold"><details><summary><a href="https://x.test/x" style="font-weight:normal"><div>T</div></a></summary>b</details></header>',
+      ['T[]', 'b[bold]'],
+    ],
+    [
+      '<nav style="font-weight:bold"><ul><li>t<ul><a href="https://x.test/x" style="font-weight:normal"><li>x</li></a></ul></li></ul></nav>',
+      ['t[bold]', 'x[]'],
+    ],
+  ])('%s turns the mark off where it stands', (html, expected) => {
+    expect(runs(html)).toEqual(expected);
+  });
+
+  // Y2: `inherit` asks for the container's mark rather than turning it off,
+  // and so does every value the reader cannot resolve.
+  test.each([
+    ['<header style="font-weight:bold"><p style="font: inherit">x</p></header>', 'x[bold]'],
+    ['<header style="font-weight:bold"><p style="font-weight: inherit">x</p></header>', 'x[bold]'],
+    ['<header style="font-weight:bold"><p style="font-weight: unset">x</p></header>', 'x[bold]'],
+    ['<header style="font-weight:bold"><p style="font-weight: var(--w)">x</p></header>', 'x[bold]'],
+    [
+      '<header style="font-style:italic"><p style="font-style: inherit">x</p></header>',
+      'x[italic]',
+    ],
+    [
+      '<header style="font-style:italic"><p style="font-style: oblique 10deg">x</p></header>',
+      'x[italic]',
+    ],
+    [
+      '<header style="font-weight:bold"><ul><li style="font-weight: inherit">x</li></ul></header>',
+      'x[bold]',
+    ],
+    ['<b><span style="font-weight:inherit">x</span></b>', 'x[bold]'],
+    ['<p><span style="font-style: oblique 10deg">x</span></p>', 'x[italic]'],
+  ])('%s keeps the mark', (html, expected) => {
+    expect(runs(html)).toEqual([expected]);
+  });
+
+  // Y3: a row further in reads as one marked run, as a row at the top does:
+  // each item's shell lays it out as an item (round 11, E11-1), so the break
+  // between two of them is drawn inside the marks.
+  test.each([
+    '<header style="font-weight:bold"><div style="display:flex"><span>a</span><span>c</span></div></header>',
+    '<b><footer style="display:flex"><span>a</span><span>c</span></footer></b>',
+  ])('%s keeps its items apart and marked', (html) => {
+    expect(runs(html)).toEqual(['a\nc[bold]']);
+  });
+
+  // Y4: a space at a paste's edge stays, styled or not.
+  test.each([
+    [
+      '<footer style="display:flex;font-weight:bold"> a</footer>',
+      '<footer style="display:flex"> a</footer>',
+    ],
+    [
+      '<footer style="display:flex;font-weight:bold"><span> a</span><span>c </span></footer>',
+      '<footer style="display:flex"><span> a</span><span>c </span></footer>',
+    ],
+  ])('%s keeps its edges', (styled, plain) => {
+    expect(texts(styled)).toEqual(texts(plain));
+  });
+
+  // Y5 was answered the other way in round 4 (M3): a `text-decoration: none`
+  // below a container's decoration takes it off on every path, as text read
+  // in place always had it; see "reader fixes, review round 4".
+
+  // P1: a gap goes before a cell or a stacked part only after another one on
+  // the same parent, as the walk puts it -- never after any earlier text.
+  test.each([
+    [`<b>x<span style="display:table-cell">y${img('k')}</span></b>`, 'xy'],
+    [
+      `<b>x<span style="display:inline-block"><span style="display:block">y${img('k')}</span></span></b>`,
+      'xy',
+    ],
+    [
+      `<b><span style="display:table-cell">a</span><span><span style="display:table-cell">b${img('k')}</span></span></b>`,
+      'ab',
+    ],
+  ])('%s takes no gap', (html, text) => {
+    expect(texts(html)[0]).toBe(text);
+  });
+
+  test('loose text before a cell holding a picture takes no gap', () => {
+    expect(read(`<b><i>x</i><span style="display:table-cell">y${img('k')}</span></b>`)[0]).toBe(
+      `paragraph@0:${JSON.stringify([
+        { text: 'x', marks: ['bold', 'italic'] },
+        { text: 'y', marks: ['bold'] },
+      ])}`,
+    );
+  });
+
+  // P2: and after one the split descended into.
+  test.each([
+    [
+      `<b><span style="display:table-cell">a${img('k')}b</span><span style="display:table-cell">c</span></b>`,
+      ['a', 'b c'],
+    ],
+    [
+      `<b><span style="display:inline-block"><span style="display:block">a</span><span style="display:block">b${img('k')}c</span><span style="display:block">d</span></span></b>`,
+      ['a b', 'c d'],
+    ],
+  ])('%s keeps the next one apart', (html, expected) => {
+    expect(texts(html)).toEqual(expected);
+  });
+
+  // P3: a piece copied out of an inline box keeps the box.
+  test.each([
+    [
+      `<b>x<span style="display:inline-block"><span><span style="display:block">p</span></span>${img('k')}</span>y</b>`,
+      ['xp', 'y'],
+    ],
+    [
+      `<b><span style="display:inline-block">${img('k')}<span><span style="display:block">p</span><span style="display:block">q</span></span></span></b>`,
+      ['p q'],
+    ],
+  ])('%s stays in its line', (html, expected) => {
+    expect(texts(html)).toEqual(expected);
+  });
+
+  // P4: what the walk does not draw between two cells keeps them side by side.
+  test.each(['<!--x-->', '<script>s</script>', '<template></template>'])(
+    'cells either side of %s stay apart',
+    (between) => {
+      expect(
+        texts(
+          `<b><span style="display:table-cell">a</span>${between}<span style="display:table-cell">b</span>${img('k')}</b>`,
+        ),
+      ).toEqual(['a b']);
+    },
+  );
+
+  // P5: spaces inside one anonymous item are text, not the gap between items.
+  test('spaces between comments in a flex item are kept', () => {
+    expect(texts('<b style="display:flex;white-space:pre">x<!---->   <!---->y</b>')).toEqual([
+      'x   y',
+    ]);
+  });
+
+  // E1: a picture alone on its line ends that line with its own break; the
+  // blank line the author wrote before it stays.
+  test.each([
+    [`<blockquote><br>${img('1')}<br>text</blockquote>`, 'quote@0:[{"text":"\\ntext"}]'],
+    [`<h1><br>${img('1')}<br>Title</h1>`, 'heading1@0:[{"text":"\\nTitle"}]'],
+    [`<blockquote><br><br>${img('1')}<br>text</blockquote>`, 'quote@0:[{"text":"\\n\\ntext"}]'],
+    [
+      `<blockquote><div><br></div><div>${img('1')}<br></div><div>text</div></blockquote>`,
+      'quote@0:[{"text":"\\ntext"}]',
+    ],
+    [`<blockquote><br>${img('1')}text</blockquote>`, 'quote@0:[{"text":"\\ntext"}]'],
+  ])('%s', (html, first) => {
+    expect(read(html)[0]).toBe(first);
+  });
+
+  // E2-E5: an item's line ends, wherever they come from, are what they are
+  // outside a list.
+  test.each([
+    // A bare picture, and a line of its own, between two of the item's blocks.
+    `t${img('1')}<br><a href="https://x.test/"><br>${img('2')}</a>`,
+    `t${img('1')}<span style="display:block">u</span><a href="https://x.test/"><br>${img('2')}</a>`,
+    // A picture the reader cannot use ends nothing.
+    `t${img('1')}<br>${img('x', 'cid:')}<a href="https://x.test/"><br>${img('2')}</a>`,
+    // A line of its own after the picture, inside the same wrapper.
+    `t<span>${img('1')}<span style="display:block">u</span></span><a href="https://x.test/"><br>${img('2')}</a>`,
+  ])('<ul><li>%s</li></ul> keeps its blank line', (inner) => {
+    expect(blankLines(`<ul><li>${inner}</li></ul>`)).toBe(1);
+    expect(blankLines(inner)).toBe(1);
+  });
+
+  // E4 counted a preserved newline after the picture as ending its line;
+  // round 4 (I4) found that double-counted the line the item text already
+  // keeps. See "a preserved newline after the picture is one blank line".
+
+  // E5: what the head-break strip passes over: nested lists and skipped elements.
+  test.each([
+    [
+      `<blockquote><ul><li>a<br>b</li></ul>${img('1')}<br>text</blockquote>`,
+      'quote@0:[{"text":"text"}]',
+    ],
+    [
+      `<blockquote><noscript><br></noscript>${img('1')}<br>text</blockquote>`,
+      'quote@0:[{"text":"text"}]',
+    ],
+  ])('%s', (html, first) => {
+    expect(read(html)[0]).toBe(first);
+  });
+});
+
+describe('reader fixes, review round 4', () => {
+  const img = (name: string, scheme = 'https://x.test/') => `<img src="${scheme}${name}.png">`;
+  const read = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image'
+        ? `image@${block.depth}:${block.src?.replace('https://x.test/', '')}`
+        : `${block.type}@${block.depth}:${JSON.stringify(block.content)}`,
+    );
+  const runs = (html: string) =>
+    blocksFromHtml(document, html).flatMap((block) =>
+      [...(block.content ?? []), ...(block.rows ?? []).flat(2)].map(
+        (run) => `${run.text}[${[...(run.marks ?? [])].sort().join(',')}]`,
+      ),
+    );
+  const texts = (html: string) =>
+    blocksFromHtml(document, html)
+      .filter((block) => block.type !== 'image')
+      .map((block) => richToPlainText(block.content));
+  const blankLines = (html: string) =>
+    read(html).filter(
+      (block) =>
+        (block.startsWith('paragraph@') && block.endsWith(':[]')) || block.includes('\\n"'),
+    ).length;
+
+  // I1-I3: the head of a heading's or quote's text loses only the line a
+  // picture handed on stood on alone -- read off the parse's own lines.
+  test.each([
+    [
+      `<blockquote type="cite"><div>${img('1')}</div><div><br></div><div>text</div></blockquote>`,
+      '\ntext',
+    ],
+    [`<blockquote><p>${img('1')}</p><p><br></p><p>text</p></blockquote>`, '\ntext'],
+    [`<blockquote>${img('1')}<div><br>text</div></blockquote>`, '\ntext'],
+    [`<h1><div>${img('1')}</div><div><br></div>Title</h1>`, '\nTitle'],
+    [`<blockquote><br>${img('1')}${img('2')}<br>text</blockquote>`, '\ntext'],
+    [`<blockquote><br>${img('1')}${img('x', 'cid:')}<br>text</blockquote>`, '\ntext'],
+    [`<blockquote style="white-space:pre-wrap"><br>${img('1')}\ntext</blockquote>`, '\ntext'],
+    [`<blockquote style="white-space:pre-wrap">\n${img('1')}text</blockquote>`, '\ntext'],
+    [`<blockquote><noscript>x</noscript>${img('1')}<br>text</blockquote>`, 'text'],
+    [`<h1><br>x${img('1')}<br>y</h1>`, '\nx\ny'],
+  ])('%s reads %j', (html, text) => {
+    expect(texts(html)[0]).toBe(text);
+  });
+
+  // I4: a newline a style preserves after the picture is the item text's own,
+  // so the item reads one blank line, as the same markup outside a list.
+  test('a preserved newline after the picture is one blank line', () => {
+    const inner = `<span>t${img('1')}\n</span><a href="https://x.test/"><br>${img('2')}</a>`;
+
+    expect(blankLines(`<ul><li style="white-space:pre">${inner}</li></ul>`)).toBe(1);
+    expect(blankLines(`<div style="white-space:pre">${inner}</div>`)).toBe(1);
+  });
+
+  // A run split at its pictures: a `<br>` with only the picture after it is
+  // the filler of its line, and a block's break before the picture is no line
+  // of the text's.
+  test.each([
+    [`<p>text<br>${img('1')}more</p>`, ['text', '[img]', 'more']],
+    [
+      `<b><span style="display:flex"><span>a</span><span>c</span></span>${img('1')}more</b>`,
+      ['a\nc', '[img]', 'more'],
+    ],
+  ])('%s reads %j', (html, expected) => {
+    expect(
+      blocksFromHtml(document, html).map((block) =>
+        block.type === 'image' ? '[img]' : richToPlainText(block.content),
+      ),
+    ).toEqual(expected);
+  });
+
+  // I10: the reset at each of the item's blocks.
+  test('a line ended before a block is not ended again after the next one', () => {
+    expect(
+      read(
+        `<ul><li>t<br><a href="https://x.test/">${img('1')}</a>x<a href="https://x.test/"><br>${img('2')}</a></li></ul>`,
+      ),
+    ).toEqual([
+      `bulleted_list@0:${JSON.stringify([{ text: 't\nx' }])}`,
+      'image@1:1.png',
+      'image@1:2.png',
+    ]);
+  });
+
+  // I5 / M2: `lighter` under an ordinary bold is normal weight.
+  test.each([
+    ['<p><b><span style="font-weight:lighter">x</span></b></p>', 'x[]'],
+    ['<header style="font-weight:700"><p style="font-weight:lighter">x</p></header>', 'x[]'],
+  ])('%s reads %s', (html, expected) => {
+    expect(runs(html)).toEqual([expected]);
+  });
+
+  // I6 / M4: a custom property that sets only a colour leaves the line.
+  test.each([
+    '<p><span style="text-decoration: underline var(--c)">x</span></p>',
+    '<p><span style="text-decoration: underline dotted var(--accent)">x</span></p>',
+  ])('%s is underlined', (html) => {
+    expect(runs(html)).toEqual(['x[underline]']);
+  });
+
+  // M1: on a mark's own tag, a value the reader cannot resolve replaces the
+  // tag's mark as CSS replaces the user agent's.
+  test.each([
+    '<p><b style="font-weight:inherit">x</b>y</p>',
+    '<p><strong style="font-weight:unset">x</strong>y</p>',
+    '<p><b style="font:inherit">x</b>y</p>',
+    '<p><em style="font-style:inherit">x</em>y</p>',
+    '<p><u style="text-decoration:inherit">x</u>y</p>',
+    '<p><b style="font-weight:var(--w)">x</b>y</p>',
+  ])('%s reads plain', (html) => {
+    expect(runs(html)).toEqual(['xy[]']);
+  });
+
+  // M5: and inside a mark, it asks for that mark.
+  test.each([
+    ['<u><span style="text-decoration:inherit">x</span></u>', 'x[underline]'],
+    // (`revert-layer` is not here: happy-dom drops the declaration, so a test
+    // of it would pass with the code removed.)
+    ['<p><span style="font-style: oblique 0deg">x</span></p>', 'x[]'],
+  ])('%s reads %s', (html, expected) => {
+    expect(runs(html)).toEqual([expected]);
+  });
+
+  // M3: a `text-decoration: none` below a container's decoration reads the
+  // same whether the container is pushed into blocks or read in place.
+  test.each([
+    [
+      '<footer style="text-decoration:underline"><b style="text-decoration:none"><p>x</p></b></footer>',
+      '<footer style="text-decoration:underline"><p><b style="text-decoration:none">x</b></p></footer>',
+    ],
+    [
+      '<footer style="text-decoration:underline"><span style="text-decoration:none;font-style:italic"><p>x</p></span></footer>',
+      '<footer style="text-decoration:underline"><p><span style="text-decoration:none;font-style:italic">x</span></p></footer>',
+    ],
+  ])('%s reads as %s', (pushed, inPlace) => {
+    expect(runs(pushed)).toEqual(runs(inPlace));
+  });
+
+  // G3: whitespace between flex items, joined through comments (Vue's
+  // `<!--v-if-->`), is not drawn; spaces beside text, through a `<script>`,
+  // are.
+  test.each([
+    [
+      '<p>A</p><b style="white-space:pre-wrap"><span style="display:flex">\n<!---->\n<span>a</span>\n<!---->\n<span>b</span></span></b><p>Z</p>',
+      'a\nb',
+    ],
+    [
+      '<b style="display:flex;white-space:pre">x<script></script>   <script></script>y</b>',
+      'x   y',
+    ],
+    ['<b style="display:flex;white-space:pre">x<!---->   <!---->y</b>', 'x   y'],
+  ])('%s', (html, text) => {
+    expect(texts(html).filter((block) => block !== 'A' && block !== 'Z')).toEqual([text]);
+  });
+
+  // A cell after one holding the picture, past an empty element, is apart.
+  test('a cell after a split cell stays apart', () => {
+    expect(
+      texts(
+        `<b><span style="display:table-cell">a${img('k')}b</span><span></span><span style="display:table-cell">c</span></b>`,
+      ),
+    ).toEqual(['a', 'b c']);
+  });
+
+  // The split reads the run as it reads without the picture, cut where the
+  // picture stands: cells and stacked parts stay apart.
+  test.each([
+    [
+      `<p>A</p><a href="https://x.test/u">Visit <span style="display:inline-table">${img('k')}<span style="display:table-cell">10</span><span style="display:table-cell">Title</span></span></a><p>Z</p>`,
+      ['A', 'Visit', '10 Title', 'Z'],
+    ],
+    [
+      `<a href="https://x.test/u">Visit <span style="display:inline-block">${img('k')}<span style="display:block">Line one</span><span style="display:block">Line two</span></span></a>`,
+      ['Visit', 'Line one Line two'],
+    ],
+  ])('%s reads %j', (html, expected) => {
+    expect(texts(html)).toEqual(expected);
+  });
+
+  // With the picture first, block for block as without it. (Joined into
+  // words instead, a block boundary passed for a word gap.)
+  test.each([
+    `<b><span style="display:flex">${img('k')}<span style="display:inline-block">f<span style="display:block">g</span></span></span></b>`,
+    `<b>${img('k')}<span style="display:table-cell">a</span><!----><span style="display:table-cell">&#8203;</span><!----><span style="display:table-cell">b</span></b>`,
+  ])('%s reads as without the picture', (html) => {
+    expect(texts(html)).toEqual(texts(html.replace(img('k'), '')));
+  });
+});
+
+describe('splitting a run at its pictures', () => {
+  // Thousands of pictures in one run, between marked text, read in one parse
+  // and split in one pass.
+  test('is linear in the pictures', () => {
+    expect(
+      growth((n) => {
+        blocksFromHtml(
+          document,
+          `<p>${'<b>q</b><img src="https://x.test/i.png"><i>r</i>'.repeat(n)}</p>`,
+        );
+      }, 300),
+    ).toBeLessThan(LINEAR);
+  }, 120_000);
+});
+
+describe('reader fixes, review round 5', () => {
+  const img = (name: string, scheme = 'https://x.test/') => `<img src="${scheme}${name}.png">`;
+  const shape = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image'
+        ? `[img ${block.src?.replace(/^.*\//, '')}]`
+        : richToPlainText(block.content),
+    );
+  const marksOf = (html: string) =>
+    blocksFromHtml(document, html)
+      .flatMap((block) => (block.content ?? []).flatMap((run) => run.marks ?? []))
+      .sort();
+
+  // A1: in a heading or quote, whose pictures are handed on after it, a
+  // block's line before a picture is still a line: the picture cuts nothing.
+  test.each([
+    [`<blockquote><p>Quote text</p>${img('1')}Author</blockquote>`, 'Quote text\nAuthor'],
+    [`<h2><div>Title</div>${img('1')}subtitle</h2>`, 'Title\nsubtitle'],
+    [`<h1><span style="display:block">A</span>${img('1')}B</h1>`, 'A\nB'],
+    [`<h1><div>a</div><div>${img('1')}c</div></h1>`, 'a\nc'],
+  ])('%s reads %j', (html, text) => {
+    expect(shape(html)[0]).toBe(text);
+  });
+
+  // A2: layout whitespace between a block and a picture is no line of its own.
+  test.each([
+    `<a href="https://l.test/">\n  <span style="display:block">Title</span>\n  ${img('1')}\n  Caption\n</a>`,
+    `<span>\n  <center>Title</center>\n  ${img('1')}\n  Caption\n</span>`,
+    `<b><span style="display:block">Title</span> ${img('1')}y</b>`,
+  ])('%s ends the title at the picture', (html) => {
+    expect(shape(html)[0]).toBe('Title');
+  });
+
+  // A3: a picture whose source is its <picture>'s, beside a block.
+  test('a picture holding a block keeps its picture', () => {
+    const blocks = blocksFromHtml(
+      document,
+      '<picture><source srcset="https://e.test/s.png 2x"><img alt="pic"><div>caption</div></picture>',
+    );
+
+    expect(blocks.map((block) => block.type)).toEqual(['image', 'paragraph']);
+    expect(blocks[0]).toMatchObject({ src: 'https://e.test/s.png', alt: 'pic' });
+  });
+
+  // A4: a picture past the inline nesting bound is still handed on.
+  test('a picture past the nesting bound is kept', () => {
+    expect(shape(`${'<span>'.repeat(2100)}a ${img('1')} b${'</span>'.repeat(2100)}`)).toContain(
+      '[img 1.png]',
+    );
+  });
+
+  // A5 / A6: a U+FDD6 the text holds is the text's, beside a picture too.
+  test.each([
+    [`<h1>T&#xFDD6;itle${img('1')}</h1>`, ['T﷖itle', '[img 1.png]']],
+    [`<blockquote>a﷖b<br>${img('1')}</blockquote>`, ['a﷖b', '[img 1.png]']],
+    [`<blockquote>${img('1')}﷖</blockquote>`, ['﷖', '[img 1.png]']],
+    [`<p>a&#xFDD6;b ${img('1')} c</p>`, ['a﷖b', '[img 1.png]', 'c']],
+  ])('%s keeps its own character', (html, expected) => {
+    expect(shape(html)).toEqual(expected);
+  });
+
+  // A6: a preserved break that ends the line a picture ends is no line.
+  test.each([
+    [`<p style="white-space:pre-wrap">text\n${img('1')}more</p>`, ['text', '[img 1.png]', 'more']],
+    [`<span style="white-space:pre-wrap">a\n${img('1')}</span>`, ['a', '[img 1.png]']],
+  ])('%s', (html, expected) => {
+    expect(shape(html)).toEqual(expected);
+  });
+
+  // A6: whether the text after the last picture is a blank line is decided by
+  // its own `<br>`s -- the one before the picture is that picture's line.
+  test('a break before the last picture makes no blank line after it', () => {
+    const blanks = (html: string) => shape(html).filter((text) => text === '').length;
+
+    expect(blanks(`<span style="white-space:pre-wrap"><br>${img('1')}\n\n</span><p>x</p>`)).toBe(
+      blanks(`<span style="white-space:pre-wrap"><br>${img('1')}</span><p>x</p>`),
+    );
+  });
+
+  // B2: a heading or quote with thousands of pictures reads in linear time.
+  test('stripping a quote’s pictures is linear', () => {
+    expect(
+      growth((n) => {
+        blocksFromHtml(
+          document,
+          `<blockquote>${`<b>q</b>${img('i')}<i>r</i>`.repeat(n)}</blockquote>`,
+        );
+      }, 150),
+    ).toBeLessThan(LINEAR);
+    expect(
+      growth((n) => {
+        blocksFromHtml(document, `<h1>t${`<br><b>w</b><br>${img('i')}`.repeat(n)}</h1>`);
+      }, 150),
+    ).toBeLessThan(LINEAR);
+  }, 120_000);
+
+  // B3: a `text-decoration: none` below a container's decoration takes it off,
+  // whatever element says it -- through `yieldSoft` for one that adds no mark,
+  // through `formattingWithin` for one that adds one (the nav and the link).
+  test.each([
+    [
+      '<footer style="text-decoration:underline"><span style="text-decoration:none"><p>x</p></span></footer>',
+      [],
+    ],
+    [
+      '<footer style="text-decoration:underline"><div style="text-decoration:none"><p>x</p></div></footer>',
+      [],
+    ],
+    [
+      '<footer style="text-decoration:underline"><blockquote style="text-decoration:none">x</blockquote></footer>',
+      [],
+    ],
+    [
+      '<footer style="text-decoration:underline"><h2 style="text-decoration:none">x</h2></footer>',
+      [],
+    ],
+    [
+      '<footer style="text-decoration:underline"><ul><li style="text-decoration:none">x</li></ul></footer>',
+      [],
+    ],
+    [
+      '<footer style="text-decoration:underline"><nav style="text-decoration:none;font-weight:bold"><p>x</p></nav></footer>',
+      ['bold'],
+    ],
+    [
+      '<footer style="text-decoration:underline"><a href="https://x.test/x" style="text-decoration:none"><p>x</p></a></footer>',
+      [],
+    ],
+    [
+      '<footer style="text-decoration:line-through"><span style="text-decoration:none"><p>x</p></span></footer>',
+      [],
+    ],
+  ])('%s', (html, marks) => {
+    expect(marksOf(html)).toEqual(marks);
+  });
+
+  // B4: a run of picture-only lines at the end takes the break before it.
+  test.each([
+    [`<h1>Title<br>${img('1')}<br>${img('2')}<br></h1>`, 'Title'],
+    [`<h1 style="white-space:pre-line">Title\n${img('1')}\n${img('2')}</h1>`, 'Title'],
+    [`<blockquote style="white-space:pre-wrap">text\n${img('1')}</blockquote>`, 'text'],
+    [`<blockquote>text<br>${img('1')}<br></blockquote>`, 'text'],
+  ])('%s reads %j', (html, text) => {
+    expect(shape(html)[0]).toBe(text);
+  });
+
+  // B5: a picture between two cells in a heading leaves them apart.
+  test('cells either side of a picture in a heading stay apart', () => {
+    expect(
+      shape(
+        `<h1><span style="display:table-cell">1</span>${img('1')}<span style="display:table-cell">Title</span></h1>`,
+      )[0],
+    ).toBe('1 Title');
+  });
+
+  // B6 / B7: a decoration is decided by its line keywords alone.
+  test.each([
+    [
+      '<p><span style="text-decoration: line-through var(--underline-color)">x</span></p>',
+      ['strikethrough'],
+    ],
+    ['<u><span style="text-decoration: none var(--underline)">x</span></u>', []],
+    ['<u style="text-decoration: UNDERLINE">x</u>', ['underline']],
+    ['<u><span style="text-decoration: blink var(--c)">x</span></u>', []],
+  ])('%s', (html, marks) => {
+    expect(marksOf(html)).toEqual(marks);
+  });
+
+  // B7: `revert` rolls a mark's own tag back to the user agent's value, which
+  // is the tag's mark. (`revert-layer` is not here: happy-dom drops it.)
+  test('revert on a mark tag keeps its mark', () => {
+    expect(
+      blocksFromHtml(document, '<p><b style="font-weight:revert">x</b>y</p>')[0]!.content,
+    ).toEqual([{ text: 'x', marks: ['bold'] }, { text: 'y' }]);
+  });
+
+  // An unstyled `<center>` holding a picture reads as without the picture.
+  test('a center holding a picture is read whole', () => {
+    expect(shape(`before<center>q${img('1')}z</center>after`)).toEqual([
+      'before\nq',
+      '[img 1.png]',
+      'z\nafter',
+    ]);
+    expect(shape('before<center>qz</center>after')).toEqual(['before\nqz\nafter']);
+  });
+});
+
+describe('reader fixes, review round 6', () => {
+  const img = (name: string) => `<img src="https://x.test/${name}.png">`;
+  const pic =
+    '<picture><source srcset="https://e.test/s.png 2x"><img alt="pic"><div>x</div></picture>';
+  const shape = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image'
+        ? `[img ${block.src?.replace(/^.*\//, '')}]`
+        : richToPlainText(block.content),
+    );
+  const marksOf = (html: string) =>
+    blocksFromHtml(document, html)
+      .flatMap((block) => (block.content ?? []).flatMap((run) => run.marks ?? []))
+      .sort();
+
+  // R1: a blank line the author wrote before pictures at the end of a heading
+  // or quote stays, as it does in an inline run.
+  test.each([
+    [`<h2>T<br>${img('1')}<br><br>${img('2')}</h2>`, 'T\n'],
+    [`<blockquote>Line<br>${img('1')}<br><br>${img('2')}</blockquote>`, 'Line\n'],
+    [`<blockquote>Line<br><br>${img('1')}<br><br>${img('2')}</blockquote>`, 'Line\n\n'],
+  ])('%s reads %j', (html, text) => {
+    expect(shape(html)[0]).toBe(text);
+  });
+
+  // K8 was reverted in round 7 (V1): it took every empty last line for a
+  // preserved newline, and dropped a blank line an author's `<br>` made. A
+  // heading's or quote's trailing preserved newline is kept as its text keeps
+  // any source whitespace, picture or not.
+
+  // K3: a wrapped picture between two cells, or two stacked parts, in a
+  // heading is nothing between them.
+  test.each([
+    [
+      `<h1><span style="display:table-cell">1</span><a href="https://x.test/">${img('1')}</a><span style="display:table-cell">Title</span></h1>`,
+      '1 Title',
+    ],
+    [
+      `<h1><span style="display:table-cell">1</span><span>${img('1')}</span><span style="display:table-cell">Title</span></h1>`,
+      '1 Title',
+    ],
+    [
+      `<h1><span style="display:inline-block"><span style="display:block">a</span><span>${img('1')}</span><span style="display:block">b</span></span></h1>`,
+      'a b',
+    ],
+  ])('%s reads %j', (html, text) => {
+    expect(shape(html)[0]).toBe(text);
+  });
+
+  // K4 / R4: the text's own U+FDD6 is text, picture or none in sight.
+  test.each([
+    ['<h1><div>a</div><b>&#xFDD6;</b></h1>', 'a\n﷖'],
+    ['<p><span style="display:block">a</span>&#xFDD6;</p>', 'a\n﷖'],
+  ])('%s reads %j', (html, text) => {
+    expect(shape(html)[0]).toBe(text);
+  });
+
+  // R2: a picture whose source is its <picture>'s is judged as itself on
+  // every path that hands pictures on.
+  test.each([
+    `<b><h1>T<br>${pic}</h1></b>`,
+    `<b><blockquote>T${pic}</blockquote></b>`,
+    `<b><ul><li>T${pic}</li></ul></b>`,
+    `<b><table><tr><td>T${pic}</td></tr></table></b>`,
+  ])('%s keeps its picture', (html) => {
+    expect(shape(html)).toContain('[img s.png]');
+  });
+
+  // R5: the line break before such a picture is the picture's filler -- which
+  // asks `imageSource` for the picture's source through its original's
+  // <picture>, as every path that judges a picture does (R2).
+  test('a break before a picture in its picture is filler', () => {
+    expect(
+      shape(
+        '<picture><source srcset="https://e.test/s.png 2x"><span>x<br></span><img alt="pic"><span>y</span><div>c</div></picture>',
+      ),
+    ).toEqual(['x', '[img s.png]', 'y', 'c']);
+  });
+
+  // R3: past the block and list nesting bounds a picture is still kept.
+  test.each([
+    `${'<div>'.repeat(1100)}a ${img('1')} b${'</div>'.repeat(1100)}`,
+    `${'<ul><li>'.repeat(300)}a ${img('1')} b${'</li></ul>'.repeat(300)}`,
+  ])('a picture past a nesting bound is kept (%#)', (html) => {
+    expect(shape(html)).toContain('[img 1.png]');
+  });
+
+  // K1: `revert` on a mark's own tag keeps the tag's mark however the DOM
+  // spells it -- Chromium writes the longhand and the shorthand both.
+  test('revert on a decoration tag keeps it', () => {
+    expect(
+      marksOf('<p><u style="text-decoration: revert; text-decoration-line: revert">x</u></p>'),
+    ).toEqual(['underline']);
+  });
+
+  // K2: a block's own decoration is no mark, so the `off` its shorthand
+  // implies is none either; only `none` takes a container's decoration off.
+  test.each([
+    [
+      '<footer style="text-decoration: line-through"><p style="text-decoration: underline">a</p></footer>',
+      ['strikethrough'],
+    ],
+    [
+      '<footer style="text-decoration: underline"><div style="text-decoration: line-through"><p>x</p></div></footer>',
+      ['underline'],
+    ],
+  ])('%s', (html, marks) => {
+    expect(marksOf(html)).toEqual(marks);
+  });
+
+  // K5 / K6: an undefined custom property draws its fallback -- which is what
+  // a paste usually has, the page's definitions not coming with it.
+  test.each([
+    ['<p><span style="text-decoration: var(--deco, underline)">x</span></p>', ['underline']],
+    ['<p><span style="text-decoration: var(--deco, underline wavy)">x</span></p>', ['underline']],
+    [
+      '<s><span style="text-decoration: var(--a, rgb(0 0 0) underline wavy)">x</span></s>',
+      ['underline'],
+    ],
+    ['<u><span style="text-decoration: var(--underline-color)">x</span></u>', ['underline']],
+    // (A weight or a style through a fallback is in round 7's W6: happy-dom
+    // drops one spelled with a space after the comma, and keeps one without.)
+    // K7: the error lines are line keywords too.
+    ['<u><span style="text-decoration: spelling-error var(--c)">x</span></u>', []],
+  ])('%s', (html, marks) => {
+    expect(marksOf(html)).toEqual(marks);
+  });
+});
+
+describe('reader fixes, review round 7', () => {
+  const img = (name: string) => `<img src="https://x.test/${name}.png">`;
+  const shape = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image'
+        ? `[img ${block.src?.replace(/^.*\//, '')}]`
+        : richToPlainText(block.content),
+    );
+  const marksOf = (html: string) =>
+    blocksFromHtml(document, html)
+      .flatMap((block) => (block.content ?? []).flatMap((run) => run.marks ?? []))
+      .sort();
+
+  // V1: a blank line the author wrote after the last picture line stays.
+  test.each([
+    [`<h1>A<br>${img('1')}<br><br></h1>`, 'A\n'],
+    [`<blockquote>A<br>${img('1')}<div><br></div></blockquote>`, 'A\n'],
+    [`<blockquote><p>A<br>${img('1')}</p><br></blockquote>`, 'A\n'],
+    [`<blockquote>Line<br>${img('1')}<br><br>${img('2')}<br><br></blockquote>`, 'Line\n\n'],
+  ])('%s reads %j', (html, text) => {
+    expect(shape(html)[0]).toBe(text);
+  });
+
+  // V2: a read never depends on the pictures earlier reads held. In a fresh
+  // module, as a new page has it: the count that leaked only lined up with
+  // `out` while it was small, which earlier tests in this file are past.
+  test('earlier pictures change no later read', async () => {
+    vi.resetModules();
+    const fresh = await import('./rich-dom.ts');
+    const read = (html: string) =>
+      fresh.blocksFromHtml(document, html).map((block) => richToPlainText(block.content));
+    const cell = '<h1>a<span style="display:table-cell">b</span></h1>';
+
+    expect(read(cell)).toEqual(['ab']);
+    read(`<h1>x${img('p')}${img('q')}</h1>`);
+    expect(read(cell)).toEqual(['ab']);
+  });
+
+  // V3: the gap across a picture between two cells is one space.
+  test.each([
+    [
+      `<h1><span style="display:table-cell">bb </span><span>${img('1')}</span><span style="display:table-cell">c</span></h1>`,
+      'bb c',
+    ],
+    [
+      `<h1><span style="display:inline-block"><span style="display:block">a </span><span>${img('1')}</span><span style="display:block">b</span></span></h1>`,
+      'a b',
+    ],
+  ])('%s reads %j', (html, text) => {
+    expect(shape(html)[0]).toBe(text);
+  });
+
+  // V4 / W1: a picture of many unsourced images, and a style of many custom
+  // properties, read in linear time.
+  test('many images in one picture, and many fallbacks, are linear', () => {
+    expect(
+      growth((n) => {
+        blocksFromHtml(
+          document,
+          `<picture><source srcset="https://e.test/s.png 2x">${'<img alt="a">'.repeat(n)}</picture>`,
+        );
+      }, 200),
+    ).toBeLessThan(LINEAR);
+    expect(
+      growth((n) => {
+        blocksFromHtml(
+          document,
+          `<p><u><span style="text-decoration: ${'var(--a,x) '.repeat(n)}underline">x</span></u></p>`,
+        );
+      }, 2000),
+    ).toBeLessThan(LINEAR);
+  }, 120_000);
+
+  // W2 / W3: a wrapper's decoration is a mark, so a container's yields to it;
+  // only a block's own stated line leaves the container's alone, whatever
+  // line it names.
+  test.each([
+    [
+      '<footer style="text-decoration:underline"><blockquote><span style="text-decoration:line-through"><p>x</p></span></blockquote></footer>',
+      ['strikethrough'],
+    ],
+    [
+      '<footer style="text-decoration:underline"><table><tr><td><span style="text-decoration:line-through"><p>x</p></span></td></tr></table></footer>',
+      ['strikethrough'],
+    ],
+    [
+      '<footer style="text-decoration:underline"><div style="text-decoration:overline"><p>x</p></div></footer>',
+      ['underline'],
+    ],
+  ])('%s', (html, marks) => {
+    const all = blocksFromHtml(document, html).flatMap((block) => [
+      ...(block.content ?? []),
+      ...(block.rows ?? []).flat(2),
+    ]);
+
+    expect([...new Set(all.flatMap((run) => run.marks ?? []))].sort()).toEqual(marks);
+  });
+
+  // W4: a value no keyword survives in decides nothing; an empty fallback is
+  // `unset`, which takes a mark tag's own mark.
+  test.each([
+    ['<u><span style="text-decoration:var(--a, bogus)">x</span></u>', ['underline']],
+    ['<p><u style="text-decoration:var(--d,)">x</u></p>', []],
+  ])('%s', (html, marks) => {
+    expect(marksOf(html)).toEqual(marks);
+  });
+
+  // W6: a weight or style read through its fallback, as GitHub's CSS writes
+  // `<strong>`'s; and lowercased there too.
+  test.each([
+    ['<p><span style="font-weight:var(--w,700)">x</span></p>', ['bold']],
+    [
+      '<p><strong style="font-weight:var(--base-text-weight-semibold,600)">x</strong></p>',
+      ['bold'],
+    ],
+    ['<p><span style="font-weight:var(--w,BOLD)">x</span></p>', ['bold']],
+    ['<p><span style="font-style:var(--s,ITALIC)">x</span></p>', ['italic']],
+    // `env()` and `attr()` draw their fallback only for a name the UA does
+    // not know or an attribute that is missing, which the reader does not
+    // check: they decide nothing, and the tag's mark around them stays.
+    ['<u><span style="text-decoration:env(x, none)">x</span></u>', ['underline']],
+  ])('%s', (html, marks) => {
+    expect(marksOf(html)).toEqual(marks);
+  });
+
+  // W7: a fallback holding a function, read past its parentheses.
+  test('a nested fallback is read whole', () => {
+    expect(
+      marksOf('<u><span style="text-decoration: var(--a, rgb(0 0 0) none)">x</span></u>'),
+    ).toEqual([]);
+  });
+
+  // W9: `revert-layer` on a decoration tag keeps the tag's mark.
+  test('revert-layer on a decoration tag keeps it', () => {
+    expect(marksOf('<p><u style="text-decoration: revert-layer">x</u></p>')).toEqual(['underline']);
+  });
+});
+
+describe('reader fixes, review round 8', () => {
+  const img = (name: string) => `<img src="https://x.test/${name}.png">`;
+  const shape = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image'
+        ? `[img ${block.src?.replace(/^.*\//, '')}]`
+        : richToPlainText(block.content),
+    );
+  const marksOf = (html: string) =>
+    [
+      ...new Set(
+        blocksFromHtml(document, html).flatMap((block) =>
+          [...(block.content ?? []), ...(block.rows ?? []).flat(2)].flatMap(
+            (run) => run.marks ?? [],
+          ),
+        ),
+      ),
+    ].sort();
+
+  // X1: source layout after the last picture line is no line of the text's;
+  // a line written after it -- a `<br>`, a block's -- still is (V1).
+  test.each([
+    [`<blockquote>\n<p>Note</p>\n<a href="https://l.test/">${img('1')}</a>\n</blockquote>`, 'Note'],
+    [`<blockquote>\n  <div>A</div>\n  <span>${img('1')}</span>\n</blockquote>`, 'A'],
+    [`<h1>A<br>${img('1')}\n</h1>`, 'A'],
+    [`<h1>A<br>${img('1')}<br><br></h1>`, 'A\n'],
+  ])('%s reads %j', (html, text) => {
+    expect(shape(html)[0]).toBe(text);
+  });
+
+  // X2: an empty cell after many pictures looks back past them once. (The
+  // look-back it replaced cost about three times as much here but grew only
+  // about 55x against the line of 90: the parse outweighs it, as Q7 found for
+  // a scan per list. This guards against worse, not against that.)
+  test('empty cells after many pictures are linear', () => {
+    expect(
+      growth((n) => {
+        blocksFromHtml(
+          document,
+          `<h1><span style="display:table-cell">a</span>${img('i').repeat(n)}${'<span style="display:table-cell"></span>'.repeat(n)}</h1>`,
+        );
+      }, 1000),
+    ).toBeLessThan(LINEAR);
+  }, 120_000);
+
+  // X3: the text's own U+FDD6 is text to the gap between cells.
+  test('a cell holding U+FDD6 stays apart', () => {
+    expect(
+      shape(
+        '<h1><span style="display:table-cell">a</span><span style="display:table-cell">﷖</span><span style="display:table-cell">b</span></h1>',
+      )[0],
+    ).toBe('a ﷖ b');
+  });
+
+  // Z1: thousands of custom properties in one value, at a size where the
+  // old slicing was quadratic.
+  test('a value of many custom properties is linear', () => {
+    expect(
+      growth((n) => {
+        blocksFromHtml(
+          document,
+          `<p><u><span style="text-decoration: ${'var(--a,x) '.repeat(n)}underline">x</span></u></p>`,
+        );
+      }, 16000),
+    ).toBeLessThan(LINEAR);
+  }, 300_000);
+
+  // Z2: a block that states a line of its own leaves a container's other line
+  // alone, whatever block it is; so does a styled container inside one.
+  test.each(['nav', 'header', 'main', 'aside', 'center', 'dl', 'footer'])(
+    '<%s> stating a line keeps the container’s',
+    (tag) => {
+      expect(
+        marksOf(
+          `<footer style="text-decoration:underline"><${tag} style="text-decoration:overline"><p>x</p></${tag}></footer>`,
+        ),
+      ).toEqual(['underline']);
+    },
+  );
+
+  test('a styled container stating a line keeps the other', () => {
+    expect(
+      marksOf(
+        '<footer style="text-decoration:line-through"><nav style="text-decoration:underline"><p>x</p></nav></footer>',
+      ),
+    ).toEqual(['strikethrough', 'underline']);
+  });
+
+  // Z3: `oblique` is a keyword, not a prefix.
+  test('a fallback that only starts with oblique is no italic', () => {
+    expect(marksOf('<p><span style="font-style:var(--s,oblique-x)">x</span></p>')).toEqual([]);
+  });
+});
+
+describe('reader fixes, review round 9', () => {
+  const img = (name: string) => `<img src="https://x.test/${name}.png">`;
+  const shape = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image'
+        ? `[img ${block.src?.replace(/^.*\//, '')}]`
+        : `${block.type}:${richToPlainText(block.content)}`,
+    );
+  const marksOf = (html: string) =>
+    [
+      ...new Set(
+        blocksFromHtml(document, html).flatMap((block) =>
+          [...(block.content ?? []), ...(block.rows ?? []).flat(2)].flatMap(
+            (run) => run.marks ?? [],
+          ),
+        ),
+      ),
+    ].sort();
+
+  // Q9-1: a block's break after the last picture that nothing made stand is
+  // no line of the author's; one a `<br>` made stand is.
+  test.each([
+    [`<h1>A<br>${img('1')}<div>\n</div></h1>`, ['heading1:A', '[img 1.png]']],
+    [`<h1><br>${img('1')}<div>\n</div></h1>`, ['[img 1.png]']],
+    [`<h1>A<br>${img('1')}<p></p><br></h1>`, ['heading1:A\n', '[img 1.png]']],
+  ])('%s', (html, expected) => {
+    expect(shape(html)).toEqual(expected);
+  });
+
+  // Q9-2: indentation closing the source after the last picture is layout.
+  // (A `pre-wrap` heading's spaces-only last line after a picture goes too,
+  // which a browser would draw: the trade taken for pretty-printed markup.)
+  test.each([
+    [
+      `<blockquote>\n  <p>Note</p>\n  <a href="https://l.test/">${img('1')}</a>\n  </blockquote>`,
+      'quote:Note',
+    ],
+    [`<h1>A<br>${img('1')}\n  </h1>`, 'heading1:A'],
+  ])('%s reads %j', (html, first) => {
+    expect(shape(html)[0]).toBe(first);
+  });
+
+  // Q9-3: a block by its display states a line of its own as a block by its
+  // tag does; and read in place, a block stating a line keeps the line around
+  // it as the pushed reading does.
+  test.each([
+    '<footer style="text-decoration:underline"><span style="display:block;text-decoration:overline"><p>x</p></span></footer>',
+    '<table><tr><td><u><p style="text-decoration:overline">x</p></u></td></tr></table>',
+    '<ul><li><u><p style="text-decoration:overline">x</p></u></li></ul>',
+  ])('%s keeps the underline', (html) => {
+    expect(marksOf(html)).toEqual(['underline']);
+  });
+});
+
+describe('reader fixes, review round 10', () => {
+  const img = (name: string) => `<img src="https://x.test/${name}.png">`;
+  const shape = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image'
+        ? `[img@${block.depth}]`
+        : `${block.type}@${block.depth}:${richToPlainText(block.content)}`,
+    );
+  const marksOf = (html: string) =>
+    [
+      ...new Set(
+        blocksFromHtml(document, html).flatMap((block) =>
+          [...(block.content ?? []), ...(block.rows ?? []).flat(2)].flatMap(
+            (run) => run.marks ?? [],
+          ),
+        ),
+      ),
+    ].sort();
+
+  // T10-1: a `<br>` that makes a block's break stand is the author's line,
+  // whatever source whitespace stands between them.
+  test.each([
+    `<h1>A<br>${img('1')}<p>\n</p><br></h1>`,
+    `<blockquote>A<br>${img('1')}<p></p>\n<br></blockquote>`,
+    `<h1>A<br>${img('1')}<div>\n  </div><br></h1>`,
+  ])('%s keeps its blank line', (html) => {
+    // (Its spaces are the source's, which a heading's text keeps as it stands.)
+    expect(shape(html)[0]).toMatch(/:A\n[ \t]*$/);
+  });
+
+  // T10-2: a newline a style preserves, alone in a block after the last
+  // picture, goes with the picture lines -- the documented trade-off, as for
+  // a `pre-wrap` block's last line of spaces.
+  test('a preserved newline alone after the pictures goes with them', () => {
+    expect(shape(`<h1>A<br>${img('1')}<p style="white-space:pre-wrap">\n</p></h1>`)[0]).toBe(
+      'heading1@0:A',
+    );
+  });
+
+  // T10-3: a flex item keeps a container's line at the top level as it does
+  // read in place.
+  test.each([
+    [
+      '<s><div style="display:flex"><a href="https://l.test/" style="text-decoration:underline">x</a><a href="https://l.test/" style="text-decoration:underline">y</a></div></s>',
+      ['strikethrough', 'underline'],
+    ],
+    [
+      '<footer style="text-decoration:line-through"><div style="display:flex"><span style="text-decoration:overline">x</span></div></footer>',
+      ['strikethrough'],
+    ],
+  ])('%s', (html, marks) => {
+    expect(marksOf(html)).toEqual(marks);
+    expect(marksOf(`<ul><li>${html}</li></ul>`)).toEqual(marks);
+  });
+
+  // T10-4: a `display:block` span stating a line the reader models keeps the
+  // container's other line, holding a block (the case round 10 fixed) or not
+  // (read in place: its companion, which already held).
+  test.each([
+    '<footer style="text-decoration:underline"><span style="display:block;text-decoration:line-through"><p>x</p></span></footer>',
+    '<footer style="text-decoration:underline"><span style="display:block;text-decoration:line-through">x</span></footer>',
+  ])('%s keeps both lines', (html) => {
+    expect(marksOf(html)).toEqual(['strikethrough', 'underline']);
+  });
+
+  // T10-5: a quote whose text all goes with its pictures is no quote, and
+  // its lists stand where it stood.
+  test.each([
+    `<p>before</p><blockquote><ul><li>x</li></ul>${img('1')}\n </blockquote>`,
+    `<p>before</p><blockquote>\n<ul>\n<li>x</li>\n</ul>\n<a href="https://l.test/">${img('1')}</a>\n  </blockquote>`,
+  ])('%s keeps its list at the quote’s depth', (html) => {
+    expect(shape(html)).toEqual(['paragraph@0:before', 'bulleted_list@0:x', '[img@0]']);
+  });
+});
+
+describe('reader fixes, review round 11', () => {
+  const runsOf = (html: string) =>
+    blocksFromHtml(document, html).flatMap((block) =>
+      [...(block.content ?? []), ...(block.rows ?? []).flat(2)].map(
+        (run) =>
+          `${run.text}[${[...(run.marks ?? [])].sort().join(',')}${run.link ? `|${run.link}` : ''}]`,
+      ),
+    );
+
+  // E11-1: a flex item's own marks win over the chain around it, as they do
+  // out of a row, in an item and in a cell.
+  test.each([
+    [
+      '<a href="https://shop.test/p/1" style="text-decoration: none;"><h3>Mug</h3><div style="display: flex;"><del>$20.00</del><span>$10.00</span></div></a>',
+      '$20.00[strikethrough|https://shop.test/p/1]',
+    ],
+    [
+      '<span style="text-decoration:underline"><div style="display:flex"><s>x</s><span>y</span></div><p>z</p></span>',
+      'x[strikethrough,underline]',
+    ],
+    [
+      '<b><div style="display:flex"><span style="font-weight:normal">x</span><span>y</span></div><p>z</p></b>',
+      'x[]',
+    ],
+    [
+      '<s><div style="display:flex"><span style="text-decoration:none">x</span><span>y</span></div><p>z</p></s>',
+      'x[]',
+    ],
+  ])('%s', (html, run) => {
+    expect(runsOf(html)).toContain(run);
+  });
+
+  // E11-2: a deep chain of flex items reads without overflowing.
+  test('a deep chain of flex items reads', () => {
+    expect(() =>
+      blocksFromHtml(
+        document,
+        `<b><div style="display:flex">${'<span style="display:flex">'.repeat(5000)}x${'</span>'.repeat(5000)}</div><p>z</p></b>`,
+      ),
+    ).not.toThrow();
+  });
+
+  // E11-3: spaces in an item keep the chain's marks and link.
+  test('a space making up an item keeps the bold', () => {
+    expect(
+      runsOf('<b><div style="display:flex"><span> </span><span>c</span></div><p>z</p></b>'),
+    ).not.toContain(' []');
+  });
+});
+
+describe('reader fixes, review round 12', () => {
+  const runsOf = (html: string) =>
+    blocksFromHtml(document, html).flatMap((block) =>
+      [...(block.content ?? []), ...(block.rows ?? []).flat(2)].map(
+        (run) =>
+          `${run.text}[${[...(run.marks ?? [])].sort().join(',')}${run.link ? `|${run.link}` : ''}]`,
+      ),
+    );
+
+  // F12-1: loose text in a row is an item of its own (an anonymous one), and
+  // the break beside it is drawn inside the marks and the link.
+  test.each([
+    [
+      '<b><footer style="display:flex"><span>a</span>t<span>c</span></footer></b>',
+      ['a\nt\nc[bold]'],
+    ],
+    [
+      '<a href="https://w.test/"><div style="display:flex">Price: <span>$1</span></div><p>z</p></a>',
+      ['Price:\n$1[|https://w.test/]', 'z[|https://w.test/]'],
+    ],
+  ])('%s', (html, expected) => {
+    expect(runsOf(html)).toEqual(expected);
+  });
+
+  // F12-3: a chain of two marks around a row keeps the row one run: the item
+  // shell's inner element is the row the item stands in.
+  test('a link and bold around a row read it as one run', () => {
+    expect(
+      runsOf(
+        '<a href="https://w.test/"><b><div style="display:flex"><span>a</span><span>c</span></div><p>z</p></b></a>',
+      )[0],
+    ).toBe('a\nc[bold|https://w.test/]');
+  });
+
+  // F12-3: E11-3's space, asserted where it stands.
+  test('a space making up an item keeps the bold, where it stands', () => {
+    expect(
+      runsOf('<b><div style="display:flex"><span> </span><span>c</span></div><p>z</p></b>')[0],
+    ).toMatch(/^ \n?c\[bold\]$/);
+  });
+});
+
+describe('loose text in a row at a paste edge', () => {
+  // A parity guard: loose text in a row and the same text in an element item
+  // read the same at a paste's edge. (The edges are judged on the shell's
+  // outer element, which both mark; which inner node the walk up starts from
+  // changes nothing observable.)
+  test('an edge space in loose row text stays as in an item', () => {
+    const text = (html: string) =>
+      blocksFromHtml(document, html).map((block) => richToPlainText(block.content));
+
+    expect(text('<b><div style="display:flex"> a<span>c</span></div><p>z</p></b>')[0]).toBe(
+      text('<b><div style="display:flex"><span> a</span><span>c</span></div><p>z</p></b>')[0],
+    );
+  });
+});
+
+describe('reader fixes, review round 13', () => {
+  const runsOf = (html: string) =>
+    blocksFromHtml(document, html).flatMap((block) =>
+      [...(block.content ?? []), ...(block.rows ?? []).flat(2)].map(
+        (run) =>
+          `${run.text}[${[...(run.marks ?? [])].sort().join(',')}${run.link ? `|${run.link}` : ''}]`,
+      ),
+    );
+  const texts = (html: string) =>
+    blocksFromHtml(document, html).map((block) => richToPlainText(block.content));
+
+  // G13-1: a no-break space is content, in a row and between blocks: it
+  // keeps the marks and the link around it.
+  test.each([
+    [
+      '<a href="https://w.test/"><div style="display:flex"><span>by</span>&nbsp;<span>Author</span></div><p>z</p></a>',
+      'by\n \nAuthor[|https://w.test/]',
+    ],
+    ['<b><p>a</p>&nbsp;<p>b</p></b>', ' [bold]'],
+  ])('%s keeps its no-break space marked', (html, run) => {
+    expect(runsOf(html)).toContain(run);
+  });
+
+  // G13-2: what draws no box in a row joins the text beside it, which is one
+  // anonymous item, as it reads in place.
+  test.each([
+    '<a href="https://w.test/"><div style="display:flex">foo<script>x</script>bar<span>c</span></div><p>z</p></a>',
+    '<a href="https://w.test/"><div style="display:flex">foo<template>x</template>bar<span>c</span></div><p>z</p></a>',
+  ])('%s reads one item before the span', (html) => {
+    expect(texts(html)[0]).toBe('foobar\nc');
+  });
+});
+
+describe('reader fixes, review round 14', () => {
+  const runsOf = (html: string) =>
+    blocksFromHtml(document, html).flatMap((block) =>
+      [...(block.content ?? []), ...(block.rows ?? []).flat(2)].map(
+        (run) =>
+          `${run.text}[${[...(run.marks ?? [])].sort().join(',')}${run.link ? `|${run.link}` : ''}]`,
+      ),
+    );
+  const texts = (html: string) =>
+    blocksFromHtml(document, html).map((block) => richToPlainText(block.content));
+
+  // H14-1: an element the reader skips but a browser draws as a box -- an
+  // `<svg>` star, an `<iframe>` -- is still an item in a row: the words
+  // either side stay apart.
+  test.each([
+    [
+      '<p>q</p><a href="https://shop.test/p/1"><div style="display:flex;align-items:center">4.5<svg width="12" height="12"></svg>(120 reviews)</div><p>Blue kettle</p></a>',
+      '4.5\n(120 reviews)',
+    ],
+    ['<b style="display:flex">Home<svg width="8"></svg>Docs<p>x</p></b>', 'Home\nDocs'],
+    ['<b style="display:flex">Home<iframe></iframe>Docs<p>x</p></b>', 'Home\nDocs'],
+  ])('%s keeps its words apart', (html, text) => {
+    expect(texts(html)).toContain(text);
+  });
+
+  // H14-2: what the reader skips opening a row is no item of spaces.
+  test.each([
+    [
+      '<a href="https://w.test/"><div style="display:flex">\n  <script type="application/ld+json">{}</script>\n  <span>Price</span>\n</div><p>z</p></a>',
+      'Price',
+    ],
+  ])('%s reads %j first', (html, text) => {
+    expect(texts(html)[0]).toBe(text);
+  });
+
+  // H14-3: indentation before the first text of a paste is layout, past a
+  // comment or a style, as the same markup reads unwrapped.
+  test.each([
+    ['<b>\n<!--c-->&nbsp;<p>z</p></b>', ' '],
+    ['<b>\n<!--c-->foo<p>z</p></b>', 'foo'],
+  ])('%s reads %j first', (html, text) => {
+    expect(texts(html)[0]).toBe(text);
+  });
+
+  // H14-4: a no-break space before indentation is the text's, kept with it
+  // in the wrapper's marks -- not popped as indentation.
+  test('a no-break space before a newline keeps the bold', () => {
+    expect(runsOf('<b><span>x</span>&nbsp;\n<p>b</p></b>')[0]).toBe('x [bold]');
+  });
+});
+
+describe('a boxed skipped item in a row, read in place', () => {
+  // H14-1's sibling: read in place (no wrapper pushed in), an `<svg>` a row
+  // lays out as an item still stands between the words either side, as a
+  // browser draws it; a `<script>` there draws nothing and joins them.
+  test.each([
+    ['<div style="display:flex">foo<svg width="8"></svg>bar</div>', 'foo\nbar'],
+    ['<ul><li><div style="display:flex">foo<svg width="8"></svg>bar</div></li></ul>', 'foo\nbar'],
+    ['<div style="display:flex">foo<script></script>bar</div>', 'foobar'],
+  ])('%s reads %j', (html, text) => {
+    expect(blocksFromHtml(document, html).map((block) => richToPlainText(block.content))[0]).toBe(
+      text,
+    );
+  });
+});
+
+describe('reader fixes, review round 15', () => {
+  const texts = (html: string) =>
+    blocksFromHtml(document, html).map((block) => richToPlainText(block.content));
+
+  // J15-1: a `<br>` inside a boxed skipped item is no break of the reader's.
+  test.each([
+    [
+      '<p>q</p><div style="display:flex"><svg><foreignObject><div>a<br>c</div></foreignObject></svg></div><p>z</p>',
+      ['q', 'z'],
+    ],
+    ['s<div style="display:flex"><object><br></object></div>&nbsp;', ['s', ' ']],
+  ])('%s reads %j', (html, expected) => {
+    expect(texts(html)).toEqual(expected);
+  });
+
+  // The item a boxed skipped element is stands in the run as an empty block,
+  // never as a copy of it: a `<br>` in an `<object>`'s fallback or an
+  // `<svg>`'s `foreignObject` would be read as the run's own (the cases
+  // above). The artifact is pinned too: nothing of the object is cloned.
+  test('a boxed skipped item is not copied into the run', () => {
+    const spy = vi.spyOn(Node.prototype, 'cloneNode');
+
+    try {
+      expect(
+        blocksFromHtml(
+          document,
+          '<div style="display:flex">foo<object data="https://t.test/x"><img src="https://t.test/y.png"></object>bar</div>',
+        ).map((block) => richToPlainText(block.content)),
+      ).toEqual(['foo\nbar']);
+      expect(spy.mock.contexts.map((node) => (node as Node).nodeName)).not.toContain('OBJECT');
+      expect(spy.mock.contexts.map((node) => (node as Node).nodeName)).not.toContain('IMG');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // J15-2: `<base>` is skipped and draws nothing, in a row or out.
+  test.each([
+    ['<div style="display:flex">foo<base>bar</div>', 'foobar'],
+    ['<b style="display:flex">foo<base>bar<p>x</p></b>', 'foobar'],
+    ['<b style="display:flex">\n<base>\n<span>s</span><p>z</p></b>', 's'],
+  ])('%s reads %j first', (html, text) => {
+    expect(texts(html)[0]).toBe(text);
+  });
+
+  // J15-3 (a): an assistive copy of a formula in a row is no item of its
+  // own. Unwrapped (no `.katex` around it), the copy is skipped and its
+  // drawing read -- the TeX and the drawing told apart -- which guards the
+  // copy checks in `visitBlocksInner` (top level) and `cloneDeep` (a wrapper
+  // pushed in). Wrapped as KaTeX writes it, it is one formula.
+  test.each(['', '<b>'])(
+    'an unwrapped copy in a row reads its drawing (%j around it)',
+    (wrapper) => {
+      const row =
+        '<div style="display:flex">a<span class="katex-mathml"><math><semantics><mi>α</mi><annotation encoding="application/x-tex">\\alpha</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span>α</span></span>b</div>';
+
+      expect(texts(wrapper ? `<b>${row}<p>z</p></b>` : row)[0]).toBe('a\nα\nb');
+    },
+  );
+
+  test('a KaTeX formula in a row is one formula', () => {
+    const [block] = blocksFromHtml(
+      document,
+      '<div style="display:flex">a<span class="katex"><span class="katex-mathml"><math><semantics><mi>α</mi><annotation encoding="application/x-tex">\\alpha</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span>α</span></span></span>b</div>',
+    );
+
+    expect(block!.content.filter((run) => run.math !== undefined)).toEqual([
+      expect.objectContaining({ math: '\\alpha' }),
+    ]);
+  });
+
+  // And where the drawing beside a copy draws no box, the copy is no item
+  // either: the two sides are one line (`drawsNoBox`'s assistive half).
+  test('a copy beside a box-less drawing is no item', () => {
+    expect(
+      texts(
+        '<div style="display:flex">a<span class="katex-mathml"><math><semantics><mi>α</mi><annotation encoding="application/x-tex">\\alpha</annotation></semantics></math></span><script class="katex-html"></script>b</div>',
+      )[0],
+    ).toBe('ab');
+  });
+
+  // J15-3 (b): indentation is left out of a run only before a paste's first
+  // text; elsewhere it is the run's, and keeps its link.
+  test('indentation after the paste starts keeps its link', () => {
+    const blocks = blocksFromHtml(
+      document,
+      '<a href="https://l.test/"><img src="https://i.test/b.png" alt="B"><p>\n<!--c-->\nbaz </p></a>',
+    );
+    const runs = blocks.flatMap((block) => block.content ?? []);
+
+    expect(runs.every((run) => run.link === 'https://l.test/')).toBe(true);
+  });
+});
+
+describe('the reader builds nothing in the live document', () => {
+  // A pasted `<img onerror>` copied into an element of the live document is
+  // adopted into it, starts loading, and runs its handler: script from the
+  // clipboard. The reader's scratch DOM -- every wrapper, fragment and
+  // copy -- belongs to a document with no browsing context. happy-dom loads
+  // nothing, and makes a template's contents owner the live document itself,
+  // so the artifact is pinned: the live document makes no element or fragment
+  // during a read that parsing the payload into a template does not make on
+  // its own. (A `cloneNode` copy stays in its source's document -- the
+  // template's, or the read's own once a copy has been adopted into it --
+  // inert either way in a browser.)
+  // Counted: the live document's own methods that make or take in a node,
+  // the realm's constructors that make one owned by it (and `Range`, whose
+  // fragments are), and copies of a connected node (`document.body`), which
+  // no read makes. So the usual other spellings of the bug fail here too
+  // (`createElementNS`, `importNode`, `new DocumentFragment()`). The list is
+  // not exhaustive -- a method borrowed from `Document.prototype`, or a copy
+  // of the unconnected parse template, goes uncounted -- and the e2e (C7b,
+  // D1b), which watches for the handler itself, is the backstop.
+  const CONSTRUCTORS = ['DocumentFragment', 'Text', 'Comment', 'Range', 'Image', 'Audio', 'Option'];
+  const madeBy = (read: () => void): unknown[] => {
+    const element = vi.spyOn(document, 'createElement');
+    const fragment = vi.spyOn(document, 'createDocumentFragment');
+    const others = (
+      [
+        'createElementNS',
+        'createTextNode',
+        'createComment',
+        'importNode',
+        'adoptNode',
+        'createRange',
+      ] as const
+    ).map((name) => vi.spyOn(document, name));
+    const clone = vi.spyOn(Node.prototype, 'cloneNode');
+    const constructed = new Map<string, number>();
+
+    for (const name of CONSTRUCTORS) {
+      const Real = (globalThis as unknown as Record<string, new (...args: unknown[]) => object>)[
+        name
+      ];
+
+      // Only those this environment has.
+      if (typeof Real !== 'function') {
+        continue;
+      }
+
+      vi.stubGlobal(
+        name,
+        class extends Real {
+          constructor(...args: unknown[]) {
+            super(...args);
+            constructed.set(name, (constructed.get(name) ?? 0) + 1);
+          }
+        },
+      );
+    }
+
+    try {
+      read();
+
+      return [
+        element.mock.calls.map(([tag]) => tag),
+        fragment.mock.calls.length,
+        [
+          ...others.map((spy) => spy.mock.calls.length),
+          [...constructed],
+          (clone.mock.contexts as Node[])
+            .filter((node) => node.isConnected)
+            .map((node) => node.nodeName),
+        ],
+      ];
+    } finally {
+      element.mockRestore();
+      fragment.mockRestore();
+      clone.mockRestore();
+
+      for (const spy of others) {
+        spy.mockRestore();
+      }
+
+      vi.unstubAllGlobals();
+    }
+  };
+  const parsing = (html: string): unknown[] =>
+    madeBy(() => {
+      document.createElement('template').innerHTML = html;
+    });
+
+  test.each([
+    '<p>safe<img src="x" onerror="window.__pwned=2">more</p>',
+    '<b><p>x</p><img src="x" onerror="window.__pwned=2"></b>',
+    '<a href="https://l.test/"><div style="display:flex"><span>a</span><img src="x" onerror="1"></div><p>z</p></a>',
+    '<header>h<img src="x" onerror="1"></header>',
+    '<span style="font-weight:bold"><div>x<img src="x" onerror="1"></div></span>',
+    // The list readers build with the document passed down. In a browser a
+    // list item read in place is owned by the inert template document anyway;
+    // these two pin that the readers never reach for that, which in happy-dom
+    // is the live document.
+    '<ul><li>a</li><b><li>b<img src="x" onerror="1"></li></b></ul>',
+    '<ul><li>a<p>b</p>c<img src="https://i.test/x.png" onerror="1"><p>d</p></li></ul>',
+    // A list in a quote, loose content in a list, a list straight inside a
+    // list, a bare item, a run that keeps its `white-space`, and the body of
+    // a toggle: each passes the document down.
+    '<ul>loose<img src="x" onerror="1">more<li>a</li></ul>',
+    '<ul><li>a</li><ul><li>b</li><b><li>c<img src="x" onerror="1"></li></b></ul></ul>',
+    '<li>a<p>b</p>c<img src="https://i.test/x.png" onerror="1"><p>d</p></li>',
+    '<div style="white-space:pre-wrap">a  <img src="x" onerror="1">b</div>',
+    '<details><summary>s</summary>t<img src="x" onerror="1">u</details>',
+    '<blockquote><ul><li>a</li><b><li>b<img src="x" onerror="1"></li></b></ul></blockquote>',
+    // An item read again after a display equation, a wrapper inside a list
+    // holding loose content, a figure that is not one picture, and a
+    // container's formatting pushed in, as a wrapper's and as its own style;
+    // then a whole flex row's shell, a wrapper's `white-space` holder, a
+    // loose item in a row, and the stand-in for a boxed item.
+    '<ul><li><div data-neditor-math-block="x^2">x^2</div><p>t</p><figure><p>safe' +
+      '<img src="https://i.test/x.png" onerror="1">more</p><figcaption>c</figcaption></figure></li></ul>',
+    '<ul><b><li>a</li>loose<img src="x" onerror="1">more</b></ul>',
+    '<figure><p>safe<img src="x" onerror="1">more</p><figcaption>c</figcaption></figure>',
+    '<header><b><p>x</p><video src="x" onerror="1"></video></b></header>',
+    '<header style="font-weight:bold"><p>x</p><video src="x" onerror="1"></video></header>',
+    '<header style="display:flex;font-weight:bold"><span>a</span><img src="x" onerror="1"></header>',
+    '<b style="white-space:pre-wrap"><p>x</p><img src="x" onerror="1"></b>',
+    '<b><div style="display:flex">loose<img src="x" onerror="1"><span>s</span></div><p>z</p></b>',
+    '<div style="display:flex"><span>a</span><svg></svg><img src="x" onerror="1"><span>b</span></div>',
+    // Inside a wrapper pushed inward: a styled container, a block that seals
+    // what it holds, and an inline wrapper, each handing the formatting on;
+    // and a wrapper that turns a mark off, whose shell says so.
+    '<b><p>x</p><header style="font-weight:bold">h<img src="x" onerror="1"><p>y</p></header></b>',
+    '<b><p>x</p><pre><i>a<img src="x" onerror="1"><p>y</p></i></pre></b>',
+    '<b><p>x</p><i>a<img src="x" onerror="1"><p>y</p></i></b>',
+    '<i style="font-weight:normal"><p>x</p>a<img src="x" onerror="1"></i>',
+    // An assistive copy of a formula in a run cut at its pictures: the copy
+    // the run is read from keeps the assistive copy's place with a stand-in.
+    '<p><span class="katex"><span class="katex-mathml"><math><mi>x</mi></math></span>' +
+      '<span class="katex-html">x</span></span><img src="x" onerror="1">y</p>',
+    // A formula's source is replaced by an element the reader makes.
+    '<p>Let <span class="MathJax_MathML" id="MathJax-Element-1-Frame"><span class="MathJax_MathContainer">' +
+      '<span><math><mi>x</mi></math></span></span></span>' +
+      '<script type="math/tex" id="MathJax-Element-1">x</script> be.</p>',
+  ])('%s', (html) => {
+    expect(madeBy(() => blocksFromHtml(document, html))).toEqual(parsing(html));
+  });
+
+  // A summary a wrapper holds, and a wrapper pushed into the blocks it holds
+  // around an assistive copy: each leaves a stand-in `<template>` made in the
+  // document passed down. Fragments are left out here: the stand-in is
+  // copied once it has been adopted into the paste's own document, the live
+  // one in happy-dom, and happy-dom's copy of a `<template>` makes its content
+  // fragment with its source's document.
+  test.each([
+    '<details><span><summary>S</summary></span><p>b</p></details>',
+    '<b><p>x</p><span class="katex"><span class="katex-mathml"><math><mi>x</mi></math></span>' +
+      '<span class="katex-html">x</span></span></b>',
+  ])('the stand-ins it leaves: %s', (html) => {
+    const [elements, , others] = madeBy(() => blocksFromHtml(document, html));
+    const [parsed, , parsedOthers] = parsing(html);
+
+    expect([elements, others]).toEqual([parsed, parsedOthers]);
+  });
+
+  test('parseRichTextFromHtml likewise: the formulas it replaces', () => {
+    // Its other reading makes nothing at all; a formula's source is replaced
+    // by an element the reader makes.
+    const html =
+      'Let <span class="MathJax_MathML" id="MathJax-Element-1-Frame"><span class="MathJax_MathContainer">' +
+      '<span><math><mi>x</mi></math></span></span></span>' +
+      '<script type="math/tex" id="MathJax-Element-1">x</script> be.';
+
+    expect(madeBy(() => parseRichTextFromHtml(document, html))).toEqual(parsing(html));
+  });
 });

@@ -222,6 +222,25 @@ const CORPUS: Record<string, Block[]> = {
   // F4 (e2e finding): an image with no source came back as literal "![]()".
   'empty image': [b({ type: 'image', src: '', alt: '' })],
   'empty image with alt': [b({ type: 'image', src: '', alt: 'pending' })],
+  // An image below a list item, a to-do or a toggle is written outside the
+  // item with its depth, and read back to the same place among its siblings.
+  'images among a list item’s children': [
+    b({ type: 'bulleted_list', content: t('item') }),
+    b({ type: 'image', src: 'https://a.test/1.png', alt: 'one', depth: 1 }),
+    b({ type: 'bulleted_list', content: t('child'), depth: 1 }),
+    b({ type: 'image', src: 'https://a.test/2.png', alt: 'two', depth: 2 }),
+    b({ type: 'code', content: t('c'), depth: 1 }),
+    b({ type: 'image', src: 'https://a.test/3.png', alt: 'three', depth: 1 }),
+  ],
+  'an image under a to-do': [
+    b({ type: 'todo', content: t('task'), checked: true }),
+    b({ type: 'image', src: 'https://a.test/x.png', alt: 'shot', depth: 1 }),
+  ],
+  'an image under a collapsed toggle': [
+    b({ type: 'toggle', content: t('more'), collapsed: true }),
+    b({ type: 'image', src: 'https://a.test/x.png', alt: 'hidden', depth: 1 }),
+    b({ type: 'paragraph', content: t('after'), depth: 1 }),
+  ],
   'long block with bold': [
     b({ content: [{ text: 'x'.repeat(2100) }, { text: 'bold', marks: ['bold'] }] }),
   ],

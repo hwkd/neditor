@@ -1,5 +1,6 @@
 import { expect, MOD, test } from '../helpers/test.ts';
-import { shape, writeClipboard } from '../helpers/clipboard.ts';
+import { copyFromPage, shape, writeClipboard } from '../helpers/clipboard.ts';
+import { afterFailedLoads, READER_COPIES, recordArrivingHtml } from '../helpers/hostile.ts';
 
 test.describe('11 · clipboard', () => {
   test.describe('block-mode copy round trips', () => {
@@ -304,6 +305,38 @@ test.describe('11 · clipboard', () => {
     expect(await page.evaluate(() => (window as { __pwned?: number }).__pwned)).toBeUndefined();
     await expect(page.locator('body')).toBeVisible();
   });
+
+  // Written from the page's own copy event, which no engine cleans: through
+  // the async clipboard API, Firefox and WebKit strip the handler, and only
+  // Chromium could tell a broken reader. The drop spec (D1b) is the other way
+  // in.
+  for (const [index, [html, text]] of READER_COPIES.entries()) {
+    test(`C7b.${index + 1} no copy the reader makes of pasted markup runs its handlers: ${html}`, async ({
+      editor,
+      page,
+      consoleErrors,
+    }) => {
+      // The images are meant to fail, and Chromium and WebKit log that
+      // (Firefox logs nothing); nothing else may be logged.
+      test.info().annotations.push({
+        type: 'allow-console-errors',
+        description: 'failed image loads, by design',
+      });
+      await editor.load({ doc: 'empty' });
+      const arrived = await recordArrivingHtml(page);
+      await copyFromPage(page, MOD, { html, text: 'PLAIN' });
+      await editor.placeCaret('p1', 0);
+      await page.keyboard.press(`${MOD}+v`);
+      // This markup arrived, handler and all -- not the plain text, not what
+      // an earlier test left on the clipboard, not a copy an engine cleaned: a
+      // test the payload never reached proves nothing.
+      expect(await arrived()).toEqual([expect.stringContaining('onerror=')]);
+      expect((await editor.texts()).join('')).toBe(text);
+      await afterFailedLoads(page);
+      expect(await page.evaluate(() => (window as { __pwned?: number }).__pwned)).toBeUndefined();
+      expect(consoleErrors.filter((error) => !/failed to load resource/i.test(error))).toEqual([]);
+    });
+  }
 
   test('C8 plain-text Markdown becomes real blocks, including a ragged GFM table', async ({
     editor,
