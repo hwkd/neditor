@@ -40,3 +40,7 @@ apps/web/.astro/
 apps/e2e/test-results/
 apps/e2e/playwright-report/
 apps/e2e/blob-report/
+
+# Audit logs and trails are working notes: never tracked
+docs/audit/
+audit-log*.md
