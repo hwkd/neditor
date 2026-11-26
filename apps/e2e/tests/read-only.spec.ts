@@ -1706,11 +1706,9 @@ test.describe('17 · read-only', () => {
    * the Selection API from its own press is the API's, and selects every
    * block it reaches, as round 13 did; read at that press's release with
    * the pointer's rule, b:2..c:0 was cut to "ock B". R15-SEL-P3-1: such a
-   * range reveals the block it reaches, its focus end. R15-SEL-P3-3: a
-   * triple-click on the last block selects its paragraph, though WebKit
-   * (and Chromium after an announcement) runs the range on past the blocks.
+   * range reveals the block it reaches, its focus end.
    */
-  test('RO6q9 an API range from a page press selects its blocks; a triple-click on the last block its text', async ({
+  test('RO6q9 an API range from a page press selects its blocks; a drag into the page stays the page’s', async ({
     editor,
     page,
     browserName,
@@ -1756,57 +1754,43 @@ test.describe('17 · read-only', () => {
     const last = await page.evaluate(() => (window as unknown as { __last: string }).__last);
     await expect(editor.block(last), 'the focus end is revealed').toBeInViewport();
 
-    // In a shadow mount too, where the range ends in the page around the
-    // host (R16-1: the order was asked across the boundary, and the shadow
-    // mount kept "Block E" and the lines after).
-    for (const [mount, before] of [
-      ['plain', 'clean'],
-      ['plain', 'after a block selection'],
-      ['shadow', 'after a block selection'],
-    ] as const) {
-      await editor.load({ doc: 'five', toolbar: 0, editable: false, mount });
-      if (before !== 'clean') {
-        const from = await editor.pointAt(editor.content('b'), 2);
-        const to = await editor.pointAt(editor.content('d'), 3);
-        await page.mouse.move(from.x, from.y);
-        await page.mouse.down();
-        await page.mouse.move(to.x, to.y, { steps: 8 });
-        await page.mouse.up();
-        await editor.settle();
-        expect(await editor.selected(), 'the drag').toEqual(['b', 'c', 'd']);
-      }
-      const at = await editor.pointAt(editor.content('e'), 2);
-      await page.mouse.click(at.x, at.y, { clickCount: 3 });
-      await editor.settle();
-      expect(await editor.selected(), `${mount}, ${before}: no blocks`).toEqual([]);
-      expect(await editor.selection(), `${mount}, ${before}: the last block's text`).toMatchObject({
-        blockId: 'e',
-        range: { start: 0, end: 7 },
-      });
-    }
-
     // A drag from the last block into the page's own text below the editor
-    // takes in that text, and stays the page's range (R16-2: cut to the
-    // block, Mod+C copied "ock E" and none of the page's text).
-    await editor.load({ doc: 'five', toolbar: 0, editable: false });
-    await page.evaluate(() => {
-      const below = document.createElement('p');
-      below.id = 'page-below';
-      below.textContent = 'Page text below';
-      document.body.append(below);
-    });
-    const start = await editor.pointAt(editor.content('e'), 2);
-    const end = (await page.locator('#page-below').boundingBox())!;
-    await page.mouse.move(start.x, start.y);
-    await page.mouse.down();
-    await page.mouse.move(end.x + 40, end.y + end.height / 2, { steps: 8 });
-    await page.mouse.up();
-    await editor.settle();
-    expect(await editor.selected(), 'into the page: no blocks').toEqual([]);
-    expect(
-      await page.evaluate(() => document.getSelection()!.toString()),
-      'into the page: the page keeps its text',
-    ).toContain('Page');
+    // takes in that text, and stays the page's range, in a shadow mount too
+    // (R16-2, R17-1: a rule for WebKit's triple-click on the last block cut
+    // it to the block, and Mod+C copied "ock E"; reverted, see AGENTS.md).
+    for (const mount of ['plain', 'shadow'] as const) {
+      await editor.load({ doc: 'five', toolbar: 0, editable: false, mount });
+      await page.evaluate(() => {
+        const below = document.createElement('p');
+        below.id = 'page-below';
+        below.textContent = 'Page text below';
+        document.body.append(below);
+      });
+      const start = await editor.pointAt(editor.content('e'), 2);
+      const end = (await page.locator('#page-below').boundingBox())!;
+      await page.mouse.move(start.x, start.y);
+      await page.mouse.down();
+      await page.mouse.move(end.x + 40, end.y + end.height / 2, { steps: 8 });
+      await page.mouse.up();
+      await editor.settle();
+      expect(await editor.selected(), `${mount}, into the page: no blocks`).toEqual([]);
+      // Where the range really ends: the composed range, since Chromium's
+      // document selection is retargeted at a shadow root's host.
+      expect(
+        await page.evaluate(() => {
+          const root = window.__e2e.editor.element.getRootNode();
+          const selection = document.getSelection() as Selection & {
+            getComposedRanges(options: { shadowRoots: Node[] }): StaticRange[];
+          };
+          const shadowRoots = root instanceof ShadowRoot ? [root] : [];
+          const range = selection.getComposedRanges({ shadowRoots })[0];
+          return range
+            ? document.getElementById('page-below')!.contains(range.endContainer)
+            : false;
+        }),
+        `${mount}, into the page: the range ends in the page's text`,
+      ).toBe(true);
+    }
   });
 
   /*

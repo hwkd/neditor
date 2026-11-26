@@ -8310,40 +8310,19 @@ export class NEditor {
     }
 
     const from = this.#renderer.blockIdFromNode(selection.anchorNode);
-    let to = this.#renderer.blockIdFromNode(selection.focusNode);
-
-    // A release's range that runs on past the last block over nothing the
-    // page draws -- WebKit's triple-click on the last block always,
-    // Chromium's while the live region holds an announcement, ends after
-    // the blocks or at the start of the next editor -- reaches the last
-    // block, and its paragraph is read as any other's (R15-SEL-4: Mod+C
-    // copied "Block E" and the lines after). One that takes in the page's
-    // text is the page's, and stays as it is (`#runsOnPastBlocks`).
-    const lastShown = this.#visible().at(-1);
-    const lastElement = lastShown ? this.#renderer.getView(lastShown.id)?.root : undefined;
-
-    if (
-      release &&
-      from &&
-      !to &&
-      lastShown &&
-      lastElement &&
-      this.#runsOnPastBlocks(lastElement, selection.focusNode, selection.focusOffset)
-    ) {
-      to = lastShown.id;
-
-      if (from === to) {
-        return this.#releaseWithin(selection, from, from);
-      }
-    }
+    const to = this.#renderer.blockIdFromNode(selection.focusNode);
 
     if (!from || !to || from === to) {
       return false;
     }
 
     // A range with an end outside the editor is not across its blocks, and
-    // none of them is the reader's to select (one that runs on past the last
-    // block over nothing the page draws excepted, above): at the release of a drag from
+    // none of them is the reader's to select -- a triple-click on the last
+    // block that WebKit (and Chromium after an announcement) runs on past
+    // the blocks included: a known limit, since telling that run-on from the
+    // reader's drag into the page's text took three rounds and was still
+    // wrong in a shadow mount and over text the page does not draw (R15-SEL-4,
+    // R16-1/-2, R17-1/-2; reverted). At the release of a drag from
     // the page's text into a shadow-mounted editor, Firefox moves the
     // selection's own anchor into the tree, to the first block, and a..d
     // were selected -- Mod+C copied the blocks -- for a range the reader
@@ -8351,10 +8330,7 @@ export class NEditor {
     // the range really is (`readSelectionEnds`).
     const ends = readSelectionEnds(this.#root);
 
-    if (
-      ends &&
-      (!this.#root.contains(ends.start) || (!this.#root.contains(ends.end) && to !== lastShown?.id))
-    ) {
+    if (ends && (!this.#root.contains(ends.start) || !this.#root.contains(ends.end))) {
       return false;
     }
 
@@ -8407,54 +8383,6 @@ export class NEditor {
     }
 
     this.#setBlockSelection(ids, from, release === undefined ? { show: to } : { reveal: false });
-    return true;
-  }
-
-  /**
-   * Whether a range's focus, outside the last block, is past it with none of
-   * the page's text between (`#promoteCrossBlockSelection`). The order is
-   * asked as boundary points: the focus is a point in the element around
-   * the last block, after it, which as a node contains it and orders before
-   * it, and a shadow mount's triple-click ran on past the blocks (R16-1).
-   * Every engine reports that point in the mount's own tree; one in
-   * another tree is not read. Text in the editor's own root -- the live region -- is not the
-   * page's; text of the page the range takes in is the reader's, and a drag
-   * from the last block into it stays the page's range (R16-2).
-   */
-  #runsOnPastBlocks(last: HTMLElement, focus: Node, offset: number): boolean {
-    const at: Node = last;
-    const doc = at.ownerDocument;
-
-    if (!doc || !at.parentNode || at.getRootNode() !== focus.getRootNode()) {
-      return false;
-    }
-
-    // Compared as boundary points, not nodes: the focus is often a point in
-    // the element around the last block or its host, after it, which as a
-    // node contains it and orders before it.
-    const past = doc.createRange();
-    past.setStartAfter(at);
-
-    if (past.comparePoint(focus, offset) < 0) {
-      return false;
-    }
-
-    past.setEnd(focus, offset);
-    const walker = doc.createTreeWalker(past.commonAncestorContainer, 4);
-
-    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      if (!past.intersectsNode(node) || this.#root.contains(node)) {
-        continue;
-      }
-
-      const text = node.textContent ?? '';
-      const taken = node === focus ? text.slice(0, offset) : text;
-
-      if (taken.trim().length > 0) {
-        return false;
-      }
-    }
-
     return true;
   }
 

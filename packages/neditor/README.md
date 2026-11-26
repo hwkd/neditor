@@ -416,7 +416,9 @@ reaches, the next one as soon as the range reaches the start of its text. A
 pointer's selection is read when the button comes up: a triple-click selects
 its paragraph, not the next block, whose start some browsers end the paragraph
 at -- in a table's cell, that cell's text; on a collapsed toggle, its text, not
-the blocks it hides -- and an empty paragraph, a divider or a picture with no
+the blocks it hides; on the last block, Safari (and Chrome right after a block
+selection) runs the selection on past the editor, and a copy takes the empty
+lines after the paragraph too, a known limit -- and an empty paragraph, a divider or a picture with no
 caption after it is selected only when the press was on it, as a Shift+click on
 it is, or when the selection began on it. A Shift+click beside the next block from the end of a block's text, which
 selects no character of either, selects both. A selection from a table's cell

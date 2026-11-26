@@ -299,10 +299,11 @@ Run `vp run ready` (check, test, build). `vp -C apps/web run check` additionally
   release with no text drag lacks. A block with no text a key's range
   reaches stays in it too (Firefox's Shift+↓ runs onto a last divider).
   A range with an end outside the editor is never
-  promoted -- except a release's that runs on from the last block past
-  every block over none of the page's text, as WebKit's triple-click on the
-  last block does, which reaches the last block (`#runsOnPastBlocks`,
-  R15-SEL-4, R16-1, R16-2): its ends are read by `readSelectionEnds` -- the selection a
+  promoted, not even WebKit's read-only triple-click on the last block,
+  which runs on past the blocks (Chromium's too after an announcement):
+  telling that run-on from a drag into the page's text was tried for three
+  rounds and stayed wrong (R15-SEL-4 to R17-2, reverted), so the copy takes
+  the paragraph and the empty lines after it, a known limit. Its ends are read by `readSelectionEnds` -- the selection a
   shadow root gives of its own where it has one (Chromium's), else the
   document's, through that selection's composed range where one reaches
   into the tree, else by its own anchor and focus -- since at the
