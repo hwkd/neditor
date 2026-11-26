@@ -184,6 +184,22 @@ export class History {
     }
   }
 
+  /**
+   * Takes back the newest entry, when it is the one recorded before `blocks`
+   * were replaced -- for an edit the editor made on its own and withdraws
+   * before anything else happened, so that undo never steps through it.
+   * Returns false, and changes nothing, when anything has been recorded since.
+   */
+  withdraw(blocks: readonly Block[]): boolean {
+    if (this.#undo.at(-1)?.blocks !== blocks) {
+      return false;
+    }
+
+    this.#undo.pop();
+    this.breakRun();
+    return true;
+  }
+
   /** Ends the current run, so the next edit starts a fresh entry. */
   breakRun(): void {
     this.#runKey = null;

@@ -222,6 +222,8 @@ export const DOCS = {
       ]),
       block('eq', 'math', 'E = mc^2'),
       p('p2', 'After'),
+      // A block that ends in a formula: the caret after it has nothing after it.
+      block('m2', 'paragraph', [{ text: 'Ends with ' }, { text: '\uFFFC', math: 'y' }]),
     ],
   }),
 

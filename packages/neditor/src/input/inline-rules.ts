@@ -444,6 +444,16 @@ const DOLLAR = 36;
 /** U+FFFC, the character a finished formula occupies (see `MATH_ATOM`). */
 const ATOM = 0xfffc;
 
+/**
+ * What a code span's `$` is projected to for the formula rule: by the
+ * Markdown reader as the span closes, and by typing for a code run
+ * (`matchInlineRuleInRuns`). A barrier to a formula, as the atom is, but
+ * not the atom: in a link destination it is the `$` it stands for, and a
+ * real formula there is no URL's characters at all.
+ */
+export const CODE_DOLLAR = '\uFFFF';
+const CODE_DOLLAR_CODE = 0xffff;
+
 /** Whether the character at `index` is escaped by an odd run of backslashes. */
 function escapedAt(text: string, index: number): boolean {
   let slashes = 0;
@@ -458,21 +468,30 @@ function escapedAt(text: string, index: number): boolean {
 /**
  * An inline formula, `$TeX$`, that the `$` at the end of the window closes.
  *
- * Pandoc's rule, which GitHub and KaTeX's auto-render share in the part that
- * matters: the opening `$` has a non-space character after it and the closing
- * one a non-space character before it, so `costs $5 and $6` is prose. A `$`
- * doubled is display math (`$$`), never an inline delimiter, and one escaped
- * by a backslash is TeX's literal dollar -- `$a\$b$` is one formula.
+ * Pandoc's rule, as far as the text before the caret can tell it: the opening
+ * `$` has a non-space character after it and the closing one a non-space
+ * character before it, so `costs $5 and $6` is prose. Pandoc's third
+ * condition -- no digit straight after the closing `$`, which keeps `$5-$10`
+ * a price -- needs the character that has not been typed yet: the Markdown
+ * reader asks it, and the editor takes a typed formula back when a digit
+ * follows. A `$` doubled is display math (`$$`), never an inline delimiter,
+ * and one escaped by a backslash is TeX's literal dollar -- `$a\$b$` is one
+ * formula.
  *
  * The opener is the nearest unescaped `$` behind the closer: TeX cannot hold a
  * bare `$` (it ends math mode), so a formula can never contain one, and a
  * nearer `$` that fails as an opener means there is no formula here at all.
  * Walked back one character at a time and stopped at the first line break,
- * which no inline formula crosses, so this costs the distance to that `$`.
+ * which no inline formula crosses; that and the open-code-span test before
+ * the opener are each bounded by the window, as every rule here is.
  *
  * Not inside an open code span: `` `$x$` `` is code, the same precedence the
  * autolink and tag rules give a code span. Not around a finished formula
- * either: a formula holds TeX, not other formulas.
+ * either: a formula holds TeX, not other formulas. A finished code span's `$` is
+ * code, and both callers project it to `CODE_DOLLAR` (the Markdown reader as
+ * the span closes, typing in `matchInlineRuleInRuns`), which is the same
+ * barrier: so it opens nothing, stops the walk, and is no `$` to double the
+ * opener after it -- `` `x$`$y$ `` is code and then a formula.
  */
 function matchMath(window: string, offset: number): InlineRuleMatch | null {
   const close = window.length - 1;
@@ -490,7 +509,7 @@ function matchMath(window: string, offset: number): InlineRuleMatch | null {
   for (let at = close - 1; at >= 0; at -= 1) {
     const code = window.charCodeAt(at);
 
-    if (code === 10 || code === 13 || code === ATOM) {
+    if (code === 10 || code === 13 || code === ATOM || code === CODE_DOLLAR_CODE) {
       return null;
     }
 
@@ -845,9 +864,27 @@ export function matchInlineRule(
       // the real href from the content. Only there: typing applies this href
       // as it is, and a literal NUL in a block's text must not become a link
       // to a host the text does not hold.
+      // The reader projects a finished code span's `$` to `CODE_DOLLAR`,
+      // which in a destination is the `$` it stands for:
+      // `[x](https://`$`.test/)` is a link to that host. A formula's atom is
+      // not: a formula can close in an angled destination with a space in it
+      // (which `inOpenDestination` does not call open), and its TeX is no
+      // URL's characters -- read as a `$`, `[x](<https://a.test/p q $y$>)`
+      // linked to `…%20$`, and typed, to `…%20%EF%BF%BC`. So there is no link.
       const destination = match[2] ?? '';
+
+      if (destination.includes(String.fromCharCode(ATOM))) {
+        if (rule.angled) {
+          return null;
+        }
+
+        continue;
+      }
+
       const href = sanitizeUrl(
-        options.projection ? destination.replaceAll(ESCAPED_PLACEHOLDER, 'a') : destination,
+        options.projection
+          ? destination.replaceAll(ESCAPED_PLACEHOLDER, 'a').replaceAll(CODE_DOLLAR, '$')
+          : destination,
       );
 
       // An unsafe or unparseable URL leaves the literal text alone -- all of
@@ -886,7 +923,11 @@ export function matchInlineRule(
  * A code run's text as the rules see it: each character that is not
  * whitespace replaced by the placeholder, so nothing in it can open or close a
  * span, while offsets stay aligned and the whitespace a destination or a bare
- * URL stops at stays where it is.
+ * URL stops at stays where it is -- and each `$` by `CODE_DOLLAR`, which a
+ * formula treats as a barrier, as it does a finished formula: never a
+ * delimiter, and nothing it reaches back over. With `x$` formatted as code
+ * and `$y$` typed after it, the plain text read `$$` -- display math -- and
+ * no formula came, where pasting the same line made one.
  *
  * The Markdown reader does the same to a code span the moment it closes. Read
  * raw, a backtick inside an existing code run paired with the next one typed:
@@ -894,7 +935,7 @@ export function matchInlineRule(
  * `b and ` for its span and deleted the backtick out of the code.
  */
 export function projectCode(text: string): string {
-  return text.replace(/\S/g, ESCAPED_PLACEHOLDER);
+  return text.replace(/\S/g, (char) => (char === '$' ? CODE_DOLLAR : ESCAPED_PLACEHOLDER));
 }
 
 /**
@@ -936,7 +977,7 @@ export function matchTypedInlineRule(content: RichText, caret: number): InlineRu
   const innerEnd = match.end - match.closeLength;
   const closing = projected.slice(innerEnd, match.end);
 
-  if (!closing.includes(ESCAPED_PLACEHOLDER)) {
+  if (!closing.includes(ESCAPED_PLACEHOLDER) && !closing.includes(CODE_DOLLAR)) {
     return match;
   }
 
@@ -945,3 +986,6 @@ export function matchTypedInlineRule(content: RichText, caret: number): InlineRu
 
   return href ? { ...match, link: href } : null;
 }
+
+/** The math audit's name for {@link matchTypedInlineRule}, kept for its tests. */
+export const matchInlineRuleInRuns = matchTypedInlineRule;

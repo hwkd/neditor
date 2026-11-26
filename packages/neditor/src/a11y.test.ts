@@ -955,6 +955,39 @@ describe('a rejected URL is signalled by more than a colour', () => {
     expect(src.hasAttribute('aria-describedby')).toBe(false);
   });
 
+  test('a field that was never rejected has no description to read', () => {
+    const { input } = openLink();
+
+    expect(input.hasAttribute('aria-describedby')).toBe(false);
+  });
+
+  test('the image popover names its error only while it is shown', () => {
+    const editor = mount([block({ type: 'image' })]);
+    editor.element
+      .querySelector<HTMLElement>('.neditor-image__placeholder')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const popovers = document.querySelectorAll<HTMLElement>('.neditor-image-editor');
+    const src = popovers[popovers.length - 1]!.querySelector<HTMLInputElement>('input')!;
+
+    expect(src.hasAttribute('aria-describedby')).toBe(false);
+
+    src.value = 'javascript:alert(1)';
+    src.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+    const described = document.getElementById(src.getAttribute('aria-describedby') ?? '');
+    expect(src.getAttribute('aria-invalid')).toBe('true');
+    expect(described?.hidden).toBe(false);
+
+    // Reopened, the rejection is gone, and so is the description naming it.
+    src.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    editor.element
+      .querySelector<HTMLElement>('.neditor-image__placeholder')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(src.getAttribute('aria-invalid')).toBeNull();
+    expect(src.hasAttribute('aria-describedby')).toBe(false);
+  });
+
   test('forced colours restate the rejection, which they previously dropped', () => {
     expect(NEDITOR_STYLES).toMatch(
       /forced-colors: active[\s\S]*neditor-link-editor__input\[data-invalid='true'\]/,

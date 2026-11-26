@@ -73,7 +73,7 @@ function optionsFromQuery(): Partial<NEditorOptions> {
   // A real typesetter, so the atoms the specs drive hold KaTeX's own markup.
   if (params.get('math') === 'katex') {
     options.renderMath = (tex, { displayMode }) =>
-      katex.renderToString(tex, { displayMode, throwOnError: false });
+      katex.renderToString(tex, { displayMode, throwOnError: true });
   }
 
   return options;

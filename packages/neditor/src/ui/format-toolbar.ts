@@ -19,6 +19,8 @@ export interface ToolbarState {
 export interface FormatToolbarHooks {
   onToggleMark(mark: Mark): void;
   onEditLink(): void;
+  /** Turns the selection into an inline equation -- the way in without a keyboard. */
+  onEditMath(): void;
 }
 
 interface ToolbarButton {
@@ -96,7 +98,20 @@ export class FormatToolbar {
       this.#hooks.onEditLink();
     });
 
-    this.#element.append(this.#linkButton);
+    // Mod+Shift+E and `$…$` both need a keyboard; on a touch screen this is
+    // the only way to make the selection a formula.
+    const mathButton = doc.createElement('button');
+    mathButton.type = 'button';
+    mathButton.className = 'neditor-toolbar__button neditor-toolbar__button--math';
+    mathButton.textContent = '\u2211';
+    mathButton.tabIndex = -1;
+    mathButton.title = `${labels.inlineMath} (${shortcutLabel('Mod+Shift+E', doc)})`;
+    mathButton.setAttribute('aria-label', labels.inlineMath);
+    mathButton.addEventListener('click', () => {
+      this.#hooks.onEditMath();
+    });
+
+    this.#element.append(this.#linkButton, mathButton);
   }
 
   get element(): HTMLElement {

@@ -1326,3 +1326,79 @@ describe('a backtick fence has no backtick in its info string', () => {
     expect(matchInputRule('```', '```a`b\nc')).toBeNull();
   });
 });
+
+describe("a finished code span's dollar is code to a formula", () => {
+  const atom = '\uFFFC';
+
+  // Audit round 2: the span's `$` stayed a `$` to the rules, and against the
+  // opener of a formula straight after it read as `$$`.
+  test('a formula straight after a code span ending in a dollar is a formula', () => {
+    expect(parseInlineMarkdown('`x$`$y$')).toEqual([
+      { text: 'x$', marks: ['code'] },
+      { text: atom, math: 'y' },
+    ]);
+    expect(parseInlineMarkdown('<code>$</code>$y$ z')).toEqual([
+      { text: '$', marks: ['code'] },
+      { text: atom, math: 'y' },
+      { text: ' z' },
+    ]);
+  });
+
+  test('a $$ that is not code still opens no inline formula', () => {
+    expect(parseInlineMarkdown('x$$y$')).toEqual([{ text: 'x$$y$' }]);
+  });
+
+  test("the span's dollars open nothing and are not reached back over", () => {
+    expect(parseInlineMarkdown('`$a`,$b$')).toEqual([
+      { text: '$a', marks: ['code'] },
+      { text: ',' },
+      { text: atom, math: 'b' },
+    ]);
+    expect(parseInlineMarkdown('\\$b `a$`c$')).toEqual([
+      { text: '$b ' },
+      { text: 'a$', marks: ['code'] },
+      { text: 'c$' },
+    ]);
+  });
+
+  // A backtick that begins inside a destination is the URL's own character,
+  // as in CommonMark (inline-rules.ts: "A span whose opening run is inside a
+  // link destination is part of the URL"), so no code span forms there and
+  // the `$` between two of them is the URL's too -- in the path and in the
+  // host alike. The formula after the link is still a formula.
+  test('a link destination holding a dollar between backticks keeps its dollar', () => {
+    expect(parseInlineMarkdown('[x](https://a.test/`$`) $y$')).toEqual([
+      { text: 'x', link: 'https://a.test/%60$%60' },
+      { text: ' ' },
+      { text: atom, math: 'y' },
+    ]);
+    expect(parseInlineMarkdown('[x](https://`$`.test/)')).toEqual([
+      { text: 'x', link: 'https://`$`.test/' },
+    ]);
+  });
+
+  // Audit round 3: a formula closed inside an angled destination, and its
+  // atom, read back as a code span's `$`, made a link to
+  // `https://a.test/p%20q%20$`. A formula is no URL's characters: where the
+  // angled destination never closes there is no link and the formula
+  // stands; where it does close, the destination holds a space in the
+  // angled form (CommonMark, and `inOpenDestination`), so no formula closes
+  // inside it and the URL is the text as written -- never an atom.
+  test('a formula inside an angled destination is no part of a URL', () => {
+    expect(parseInlineMarkdown('[x](<https://a.test/p q $y$')).toEqual([
+      { text: '[x](<https://a.test/p q ' },
+      { text: atom, math: 'y' },
+    ]);
+    expect(parseInlineMarkdown('[x](<https://a.test/p q $y$>)')).toEqual([
+      { text: 'x', link: 'https://a.test/p%20q%20$y$' },
+    ]);
+    expect(parseInlineMarkdown('[x](<https://a.test/p q `$`>)')).toEqual([
+      { text: 'x', link: 'https://a.test/p%20q%20%60$%60' },
+    ]);
+    // The character a code span's `$` is projected to is the text's own
+    // where the text holds it: the href is read from the content.
+    expect(parseInlineMarkdown('[x](https://a.test/\uFFFF)')).toEqual([
+      { text: 'x', link: 'https://a.test/%EF%BF%BF' },
+    ]);
+  });
+});

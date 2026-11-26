@@ -81,8 +81,18 @@ A monorepo for a block-based rich-text editor, packaged as a reusable, framework
   TeX in `data-neditor-math`; `parseRichText` reads that attribute and never
   looks inside, which is what keeps renderer output -- and any pasted math
   markup -- out of the model. `view/selection.ts` counts the element as one
-  character; any new offset code must do the same, or every caret after a
-  formula lands hundreds of characters too far. A display equation is a `math`
+  character in a single walk (never through a Range's `toString()`, which
+  counts the drawing); any new offset code must do the same, or every caret
+  after a formula lands hundreds of characters too far. A formula that ends a
+  block is followed by an empty separator `<img>` and a filler `<br>`: without
+  them Firefox dropped what was typed after it and WebKit put it in front. The
+  separator is no text, so a deletion of it changes nothing the renderer sees:
+  `Backspace` after a formula and `Delete` before one -- and a word deletion
+  either way, the formula being the word -- are taken model-first
+  (`#deleteFormula`), or the first press deleted the separator and nothing else
+  (Firefox's word deletion, nothing at all). A deletion whose target ranges
+  reach past the formula, read in model offsets (`offsetAt`), is the
+  browser's: an IME taking back more than one character knows what it means. A display equation is a `math`
   block whose content is its TeX, literal like a code block's: `isLiteralType`
   is the test, `contentForType` is how anything enters one.
 - **Rendering math is the host's, through `renderMath`, and its output is
@@ -97,7 +107,21 @@ A monorepo for a block-based rich-text editor, packaged as a reusable, framework
   dollars (`openSources`), not from the projection, where escapes have lost
   their backslashes and rules that fired inside the span have eaten their
   delimiters. A `$` in prose is escaped, so the only unescaped dollars the
-  writer emits are formulas. The typing path cannot recover what an earlier
+  writer emits are formulas -- and, in URLs, an autolink's or a link
+  destination's, an autolink being safe only because the writer refuses that
+  spelling when a bare `$` follows in the block (`dollarAfter` in
+  `RunContext`) -- except in a code span, where a `$` stays bare
+  and both the reader (as the span closes) and typing (`matchInlineRuleInRuns`)
+  project it to `CODE_DOLLAR`, a barrier to a formula as the atom is, so it
+  neither opens a formula nor doubles the opener of one written straight after
+  it (`` `x$`$y$ ``); in a link destination it is read back as `$`, a real
+  formula there makes no link (so the writer percent-encodes the atom in a
+  link's destination, and `normalizeInlineTex` drops both barriers from TeX), and a `$` typed into a code run closes nothing. The reader follows Pandoc's rule that
+  no digit follows a closing `$` (so `$5-$10` is a price), the writer spells a
+  digit after a formula as a numeric reference, and typing refuses a closer
+  with a digit already after the caret and, since it cannot see a character
+  not yet typed, takes the formula back when a digit comes
+  (`#takeBackFormula`, which withdraws its history entry rather than adding one). The typing path cannot recover what an earlier
   rule took out of the text, and that divergence is documented rather than
   hidden. Invalid TeX the `$` spelling cannot carry is in the known-failure
   registry; the HTML path carries it in an attribute.

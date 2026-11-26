@@ -98,7 +98,7 @@ describe('slash menu commands', () => {
     });
   });
 
-  test('translating one entry leaves the other thirteen alone', () => {
+  test('translating one entry leaves the other fourteen alone', () => {
     const labels = frenchLabels();
 
     // Merged per entry, like the placeholders: overriding one command must not

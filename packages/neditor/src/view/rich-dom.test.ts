@@ -1,4 +1,9 @@
 // @vitest-environment happy-dom
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+
+import ts from 'typescript';
+
 import { describe, expect, test } from 'vitest';
 
 import type { Block } from '../model/document.ts';
@@ -13,6 +18,7 @@ import {
   renderRichText,
   richTextToHtml,
 } from './rich-dom.ts';
+import { LINEAR, growth, growthOf } from '../test-timing.ts';
 
 function render(content: RichText): string {
   const host = document.createElement('div');
@@ -7762,4 +7768,2039 @@ describe('math on the clipboard', () => {
 
     expect(table?.rows).toEqual(rows);
   });
+});
+
+describe('math audit round 3: MathJax 2 as pages serve it', () => {
+  const read = (html: string) =>
+    blocksFromHtml(document, html).map((block) => [block.type, block.depth, block.content]);
+  const m = (tex: string) => ({ text: '￼', math: tex });
+  const katex = (tex: string) =>
+    '<span class="katex"><span class="katex-mathml"><math><semantics>' +
+    `<mi>x</mi><annotation encoding="application/x-tex">${tex}</annotation></semantics></math></span>` +
+    '<span class="katex-html" aria-hidden="true">x</span></span>';
+  const katexDisplay = (tex: string) => `<span class="katex-display">${katex(tex)}</span>`;
+  const preview = '<span class="MathJax_Preview" style="color: inherit; display: none;"></span>';
+  // MathJax 2.7's CommonHTML output for `$$y=1$$`, as Math Stack Exchange
+  // serves it: the empty preview, the display wrapper, the TeX script.
+  const commonHtmlDisplay =
+    '<span class="mjx-chtml MJXc-display" style="text-align: center;">' +
+    '<span id="MathJax-Element-1-Frame" class="mjx-chtml MathJax_CHTML" tabindex="0"><span class="mjx-math">y</span>' +
+    '<span class="MJX_Assistive_MathML MJX_Assistive_MathML_Block" role="presentation"><math display="block"><mi>y</mi></math></span>' +
+    '</span></span><script type="math/tex; mode=display" id="MathJax-Element-1">y=1</script>';
+  // A frame with no script after it, naming its TeX in its assistive copy.
+  const annotatedFrame = (tex: string, display = false) =>
+    '<span class="mjx-chtml MathJax_CHTML"><span class="mjx-math">g</span>' +
+    `<span class="MJX_Assistive_MathML${display ? ' MJX_Assistive_MathML_Block' : ''}" role="presentation">` +
+    `<math${display ? ' display="block"' : ''}><semantics><mi>g</mi>` +
+    `<annotation encoding="application/x-tex">${tex}</annotation></semantics></math></span></span>`;
+
+  // The preview and the script are the formula's: left beside it, the script
+  // kept a paragraph from being the equation, and the preview was an inline
+  // sibling beside it in a list item.
+  test('a displayed formula that is the whole of its paragraph is an equation', () => {
+    const expected = [
+      ['paragraph', 0, [{ text: 'Text.' }]],
+      ['math', 0, [{ text: 'y=1' }]],
+      ['paragraph', 0, [{ text: 'More.' }]],
+    ];
+
+    expect(read(`<p>Text.</p><p>${preview}${commonHtmlDisplay}</p><p>More.</p>`)).toEqual(expected);
+    expect(read(`<p>Text.</p><p>${commonHtmlDisplay}</p><p>More.</p>`)).toEqual(expected);
+    expect(read(`<p>Text.</p>${preview}${commonHtmlDisplay}<p>More.</p>`)).toEqual(expected);
+  });
+
+  test('a displayed formula after a paragraph of a list item is nested under it', () => {
+    const expected = [
+      ['bulleted_list', 0, [{ text: 'Solve' }]],
+      ['math', 1, [{ text: 'y=1' }]],
+    ];
+
+    expect(read(`<ul><li><p>Solve</p>${preview}${commonHtmlDisplay}</li></ul>`)).toEqual(expected);
+    expect(read(`<ul><li><p>Solve</p><p>${preview}${commonHtmlDisplay}</p></li></ul>`)).toEqual(
+      expected,
+    );
+  });
+
+  // A `<br>` ends the line, as contenteditable and Google Docs leave one
+  // after the last thing in an item.
+  test('a line break after an equation in a list item leaves it standing apart', () => {
+    expect(read(`<ul><li>${katexDisplay('E')}<br></li></ul>`)).toEqual([
+      ['math', 1, [{ text: 'E' }]],
+    ]);
+    // (The item keeps the `<br>` as a line break, as after any block in it.)
+    expect(read(`<ul><li><p>text</p>${katexDisplay('E')}<br></li></ul>`).slice(1)).toEqual([
+      ['math', 1, [{ text: 'E' }]],
+    ]);
+    expect(
+      read(`<ul><li>text<br>${katexDisplay('E')}<br>${katexDisplay('F')}</li></ul>`).slice(1),
+    ).toEqual([
+      ['math', 1, [{ text: 'E' }]],
+      ['math', 1, [{ text: 'F' }]],
+    ]);
+    // Text beside it on its line, or after the break, keeps it in the item's
+    // text, in its place.
+    expect(read(`<ul><li>see ${katexDisplay('E')}<br></li></ul>`)).toHaveLength(1);
+    const before = read(`<ul><li>${katexDisplay('E')}<br>after</li></ul>`);
+
+    expect(before).toHaveLength(1);
+    expect(before[0]?.[2]).toEqual([
+      m('E'),
+      expect.objectContaining({ text: expect.stringMatching(/after$/) }),
+    ]);
+  });
+
+  // A `<br>` an inline wrapper draws at its edge ends the line as a bare one
+  // does: read only as a sibling, `<span><br></span>` after the equation kept
+  // it in the item with a "\n", and `<span>T<br></span>` before it kept it
+  // on T's line.
+  test('a line break at the edge of an inline wrapper is that line break', () => {
+    const bare = (inner: string) => read(`<ul><li>${inner}</li></ul>`);
+
+    expect(bare(`${katexDisplay('E')}<span><br></span>`)).toEqual(bare(`${katexDisplay('E')}<br>`));
+    expect(bare(`${katexDisplay('E')}<span> <b><br></b> </span>`)).toEqual(
+      bare(`${katexDisplay('E')}<br>`),
+    );
+    expect(bare(`<span>T<br></span>${katexDisplay('E')}`)).toEqual([
+      ['bulleted_list', 0, [{ text: 'T' }]],
+      ['math', 1, [{ text: 'E' }]],
+    ]);
+    expect(bare(`<span>T<i>u<br></i> </span>${katexDisplay('E')}`).slice(1)).toEqual([
+      ['math', 1, [{ text: 'E' }]],
+    ]);
+    // What follows the break inside the wrapper still decides, as after a
+    // bare one: text there keeps the equation in the item's text.
+    expect(bare(`${katexDisplay('E')}<span><br>after</span>`)).toHaveLength(1);
+    expect(bare(`${katexDisplay('E')}<span><br></span>after`)).toHaveLength(1);
+    expect(bare(`${katexDisplay('E')}<span><br><b>x</b></span>`)).toHaveLength(1);
+    // A break inside the wrapper but not at its edge is no edge.
+    expect(bare(`<span>T<br>u</span>${katexDisplay('E')}`)).toHaveLength(1);
+    expect(bare(`${katexDisplay('E')}<span>u<br></span>`)).toHaveLength(1);
+  });
+
+  // The annotation fallback is for one formula; a frame class around more
+  // than that is walked, as it was before there was a fallback.
+  test('a MathJax class around more than one formula is walked', () => {
+    expect(read(`<div class="MathJax"><p>Para one</p><p>Two ${katex('K')}</p></div>`)).toEqual([
+      ['paragraph', 0, [{ text: 'Para one' }]],
+      ['paragraph', 0, [{ text: 'Two ' }, m('K')]],
+    ]);
+    expect(
+      read(
+        `<p><span class="mjx-chtml MJXc-display">${annotatedFrame('A')} and ${annotatedFrame('B')}</span></p>`,
+      ),
+    ).toEqual([['paragraph', 0, [m('A'), { text: ' and ' }, m('B')]]]);
+  });
+
+  test('a scriptless display wrapper is an equation, its TeX from the annotation', () => {
+    expect(
+      read(
+        `<p>Text.</p><span class="mjx-chtml MJXc-display">${annotatedFrame('y=1', true)}</span><p>More.</p>`,
+      ),
+    ).toEqual([
+      ['paragraph', 0, [{ text: 'Text.' }]],
+      ['math', 0, [{ text: 'y=1' }]],
+      ['paragraph', 0, [{ text: 'More.' }]],
+    ]);
+    expect(
+      read(
+        `<div class="MathJax_Display"><span class="MathJax"><span>z</span>` +
+          '<span class="MJX_Assistive_MathML MJX_Assistive_MathML_Block"><math display="block"><semantics><mi>z</mi>' +
+          '<annotation encoding="application/x-tex">z</annotation></semantics></math></span></span></div>',
+      ),
+    ).toEqual([['math', 0, [{ text: 'z' }]]]);
+    // PreviewHTML's display wrapper is one too.
+    expect(
+      read(
+        `<div class="MathJax_PHTML_Display">${annotatedFrame('w', true)
+          .replace('mjx-chtml MathJax_CHTML', 'MathJax_PHTML')
+          .replace(
+            '<span class="mjx-math">g</span>',
+            '<span class="MJXp-math MJXp-display"><span class="MJXp-mi MJXp-italic">g</span></span>',
+          )}</div>`,
+      ),
+    ).toEqual([['math', 0, [{ text: 'w' }]]]);
+  });
+
+  // MathJax 2.7.9's `NativeMML/jax.js` (`preTranslate`) and
+  // `PreviewHTML/jax.js` (`preTranslate`) put these before the script.
+  test('NativeMML and PreviewHTML output is read from its script', () => {
+    expect(
+      read(
+        '<p>Let <span class="MathJax_MathML" id="MathJax-Element-1-Frame"><span class="MathJax_MathContainer">' +
+          '<span style="display: inline-block"><math><msup><mi>x</mi><mn>2</mn></msup></math></span></span></span>' +
+          '<script type="math/tex" id="MathJax-Element-1">x^2</script> be.</p>',
+      ),
+    ).toEqual([['paragraph', 0, [{ text: 'Let ' }, m('x^2'), { text: ' be.' }]]]);
+    expect(
+      read(
+        '<div class="MathJax_MathML" id="MathJax-Element-2-Frame"><span class="MathJax_MathContainer">' +
+          '<span style="display: inline-block"><math display="block"><mi>y</mi></math></span></span></div>' +
+          '<script type="math/tex; mode=display" id="MathJax-Element-2">y</script>',
+      ),
+    ).toEqual([['math', 0, [{ text: 'y' }]]]);
+    expect(
+      read(
+        '<p>Let <span class="MathJax_PHTML" id="MathJax-Element-3-Frame"><span class="MJXp-math" id="MJXp-Span-1">' +
+          '<span class="MJXp-msubsup" id="MJXp-Span-2"><span class="MJXp-mi MJXp-italic" id="MJXp-Span-3" ' +
+          'style="margin-right: 0.05em;">x</span><span class="MJXp-mn MJXp-script" id="MJXp-Span-4" ' +
+          'style="vertical-align: 0.5em;">2</span></span></span></span>' +
+          '<script type="math/tex" id="MathJax-Element-3">x^2</script> be.</p>',
+      ),
+    ).toEqual([['paragraph', 0, [{ text: 'Let ' }, m('x^2'), { text: ' be.' }]]]);
+    expect(
+      read(
+        '<div class="MathJax_PHTML_Display"><span class="MathJax_PHTML" id="MathJax-Element-4-Frame">' +
+          '<span class="MJXp-math MJXp-display" id="MJXp-Span-5"><span class="MJXp-mi MJXp-italic" id="MJXp-Span-6">y</span>' +
+          '</span></span></div><script type="math/tex; mode=display" id="MathJax-Element-4">y</script>',
+      ),
+    ).toEqual([['math', 0, [{ text: 'y' }]]]);
+  });
+
+  // Whether a frame is one formula is asked of its children, never searched
+  // for in its subtree, so frames in frames, or many in one wrapper, cost
+  // their size. Small sizes, because a search of each frame's
+  // subtree took 25 seconds at 1,600 nested frames.
+  test('reading frames and their scripts is linear in their number', () => {
+    const frame =
+      '<span class="mjx-chtml MathJax_CHTML"><span>g</span><span class="MJX_Assistive_MathML">' +
+      '<math><mi>g</mi></math></span></span>';
+    const shapes = [
+      (n: number) =>
+        `<p>${'<span class="MathJax_CHTML"><span class="MJX_Assistive_MathML">'.repeat(n)}x${'</span></span>'.repeat(n)}</p>`,
+      (n: number) => `<p><span class="mjx-chtml MJXc-display">${frame.repeat(n)}</span></p>`,
+      (n: number) => `<p>${`${preview}${frame}<script type="math/tex">a</script> `.repeat(n)}</p>`,
+    ];
+    for (const shape of shapes) {
+      expect(
+        growth((n) => {
+          blocksFromHtml(document, shape(n));
+        }, 25),
+      ).toBeLessThan(LINEAR);
+    }
+  }, 60_000);
+
+  // `AssistiveMML` appends one copy to a frame, around one `<math>`. Anything
+  // else is no frame of one formula, and is walked rather than read as the
+  // first annotation in it.
+  test('a frame is one formula only around exactly one assistive copy of one <math>', () => {
+    const copy = (inner: string) =>
+      `<span class="MJX_Assistive_MathML" role="presentation">${inner}</span>`;
+    const math = (tex: string) =>
+      `<math><semantics><mi>g</mi><annotation encoding="application/x-tex">${tex}</annotation></semantics></math>`;
+    const frame = (inner: string) =>
+      `<p>A <span class="mjx-chtml MathJax_CHTML"><span class="mjx-math">g</span>${inner}</span> B</p>`;
+
+    expect(read(frame(copy(math('K'))))).toEqual([
+      ['paragraph', 0, [{ text: 'A ' }, m('K'), { text: ' B' }]],
+    ]);
+
+    for (const inner of [
+      copy(math('K')) + copy(math('L')),
+      copy(math('K') + math('L')),
+      copy(`${math('K')}<span>L</span>`),
+      copy(`<span>${math('K')}</span>`),
+    ]) {
+      // Walked, as before the fallback: the drawing's text, copies skipped.
+      expect(read(frame(inner))).toEqual([['paragraph', 0, [{ text: 'A g B' }]]]);
+    }
+  });
+
+  // tex2jax's `createPreview` puts the preview before the script, and the
+  // output's `preTranslate` then the frame between them. An emptied preview
+  // is the formula's; one still holding fast preview's drawing is read.
+  test('a preview that still holds something is left to be read', () => {
+    const frame =
+      '<span class="mjx-chtml MathJax_CHTML" id="MathJax-Element-1-Frame"><span class="mjx-math">' +
+      '<span class="mjx-mi">x</span></span></span><script type="math/tex" id="MathJax-Element-1">x</script>';
+
+    expect(read(`<p>Let ${preview}${frame} be.</p>`)).toEqual([
+      ['paragraph', 0, [{ text: 'Let ' }, m('x'), { text: ' be.' }]],
+    ]);
+    expect(
+      read(
+        '<p>Let <span class="MathJax_Preview"><span class="MathJax_PHTML"><span class="MJXp-math">' +
+          `<span class="MJXp-mi MJXp-italic">z</span></span></span></span>${frame} be.</p>`,
+      ),
+    ).toEqual([['paragraph', 0, [{ text: 'Let z' }, m('x'), { text: ' be.' }]]]);
+  });
+
+  // MathJax 2.7.9's sixth output, `PlainSource/jax.js` (`preTranslate`): a
+  // `MathJax_PlainSource` span drawing the source as text, in a
+  // `MathJax_PlainSource_Display` div when displayed, before the script.
+  test('PlainSource output is read from its script', () => {
+    expect(
+      read(
+        '<p>Let <span class="MathJax_PlainSource" id="MathJax-Element-1-Frame" tabindex="0"><span>x^2</span></span>' +
+          '<script type="math/tex" id="MathJax-Element-1">x^2</script> be.</p>',
+      ),
+    ).toEqual([['paragraph', 0, [{ text: 'Let ' }, m('x^2'), { text: ' be.' }]]]);
+    expect(
+      read(
+        '<p>Text.</p><div class="MathJax_PlainSource_Display"><span class="MathJax_PlainSource" ' +
+          'id="MathJax-Element-2-Frame" tabindex="0"><span>y=1</span></span></div>' +
+          '<script type="math/tex; mode=display" id="MathJax-Element-2">y=1</script><p>More.</p>',
+      ),
+    ).toEqual([
+      ['paragraph', 0, [{ text: 'Text.' }]],
+      ['math', 0, [{ text: 'y=1' }]],
+      ['paragraph', 0, [{ text: 'More.' }]],
+    ]);
+    expect(
+      read(
+        `<ul><li><p>Solve</p>${preview}<div class="MathJax_PlainSource_Display"><span class="MathJax_PlainSource" ` +
+          'id="MathJax-Element-3-Frame"><span>y</span></span></div>' +
+          '<script type="math/tex; mode=display" id="MathJax-Element-3">y</script></li></ul>',
+      ),
+    ).toEqual([
+      ['bulleted_list', 0, [{ text: 'Solve' }]],
+      ['math', 1, [{ text: 'y' }]],
+    ]);
+  });
+});
+
+describe('math audit round 5: what stands beside a display equation in a list item', () => {
+  const read = (html: string) =>
+    blocksFromHtml(document, html).map((block) => [block.type, block.depth, block.content]);
+  const m = (tex: string) => ({ text: '￼', math: tex });
+  const eq =
+    '<span class="katex-display"><span class="katex"><span class="katex-mathml"><math><semantics>' +
+    '<mrow><mi>E</mi></mrow><annotation encoding="application/x-tex">E</annotation></semantics></math>' +
+    '</span></span></span>';
+  const li = (inner: string) => read(`<ul><li>${inner}</li></ul>`);
+  const nested = (text: string) => [
+    ['bulleted_list', 0, [{ text }]],
+    ['math', 1, [{ text: 'E' }]],
+  ];
+
+  // An element the reader keeps nothing of -- empty, or holding only
+  // whitespace -- is no text beside the equation, at the edge of a wrapper or
+  // as a sibling: the walk into it ended there and read it as text, so
+  // `<b></b>` kept the equation in the item's text where without it the
+  // equation nested. (Round 6 decides by what the reader keeps, not by what a
+  // browser draws.)
+  test('an element the reader keeps nothing of is passed over', () => {
+    expect(li(`<span>Text<br></span>${eq}`)).toEqual(nested('Text'));
+    expect(li(`<span>Text<br><b></b></span>${eq}`)).toEqual(nested('Text'));
+    // (The space after the break is the item's, as it is with no equation.)
+    expect(li(`<span>Text<br><span> </span></span>${eq}`)).toEqual(nested('Text '));
+    expect(li(`Text<br><b></b>${eq}`)).toEqual(li(`Text<br>${eq}`));
+    expect(li(`Text<br>${eq}<span><b></b><br></span>`)).toEqual(li(`Text<br>${eq}<br>`));
+    expect(li(`Text<br>${eq}<b></b>`)).toEqual(li(`Text<br>${eq}`));
+    expect(li(`<span></span>${eq}`)).toEqual(li(eq));
+    expect(li(eq)).toEqual([['math', 1, [{ text: 'E' }]]]);
+    // What the reader keeps without content still stands beside it.
+    expect(li(`<span>Text<br><input type="checkbox"></span>${eq}`)).toHaveLength(1);
+    expect(li(`Text<br>${eq}<span><img src="https://a.test/i.png"></span>`)[0]?.[2]).toContainEqual(
+      m('E'),
+    );
+  });
+
+  // A line-starting element ends the line it is in wherever it is: as a
+  // sibling before the equation it left it apart, and at the end of an inline
+  // wrapper it read as text on the equation's line.
+  test('a line-starting element at the end of a wrapper before the equation ends the line', () => {
+    expect(li(`<p>Text</p>${eq}`)).toEqual(nested('Text'));
+    expect(li(`<span><p>Text</p></span>${eq}`)).toEqual(nested('Text'));
+    expect(li(`<span>a<b><div>Text</div></b> </span>${eq}`).slice(1)).toEqual([
+      ['math', 1, [{ text: 'E' }]],
+    ]);
+  });
+
+  // After the equation only a block the item hands on is apart: anything else
+  // that starts a line -- a `<div>`, a `<section>` -- is the item's text, read
+  // in place, so handing the equation on moved it after that text.
+  test('a block the item does not hand on keeps the equation in its text, in order', () => {
+    expect(li(`<p>Text</p>${eq}<div>more</div>`)).toEqual([
+      ['bulleted_list', 0, [{ text: 'Text\n' }, m('E'), { text: '\nmore' }]],
+    ]);
+    expect(li(`<p>Text</p>${eq}<section>more</section>`)).toEqual([
+      ['bulleted_list', 0, [{ text: 'Text\n' }, m('E'), { text: '\nmore' }]],
+    ]);
+    expect(li(`Text<br>${eq}<span><br><div>more</div></span>`)).toEqual([
+      ['bulleted_list', 0, [{ text: 'Text\n' }, m('E'), { text: '\n\nmore' }]],
+    ]);
+    // Inside a wrapper even a paragraph is the item's text: only the item's
+    // own children are handed on.
+    expect(li(`Text<br>${eq}<span><br><p>more</p></span>`)).toHaveLength(1);
+    // An equation after it that stands apart is handed on; one that does not
+    // is the item's text.
+    expect(li(`Text<br>${eq}${eq.replace(/>E</g, '>F<')}`).slice(1)).toEqual([
+      ['math', 1, [{ text: 'E' }]],
+      ['math', 1, [{ text: 'F' }]],
+    ]);
+    expect(li(`Text<br>${eq}${eq.replace(/>E</g, '>F<')}<div>more</div>`)).toEqual([
+      [
+        'bulleted_list',
+        0,
+        [{ text: 'Text\n' }, m('E'), { text: '\n' }, m('F'), { text: '\nmore' }],
+      ],
+    ]);
+    // Blocks it does hand on, and a line-starting element that draws
+    // nothing, leave it apart.
+    for (const after of [
+      '<p>more</p>',
+      '<blockquote>more</blockquote>',
+      '<h3>more</h3>',
+      '<div> </div>',
+    ]) {
+      expect(li(`<p>Text</p>${eq}${after}`)[1]).toEqual(['math', 1, [{ text: 'E' }]]);
+    }
+  });
+
+  // Each node is visited a bounded number of times, by the walk on one side
+  // of one equation or the other.
+  test('deciding is linear in what stands between the equations', () => {
+    const shapes = [
+      (n: number) => `<ul><li>Text<br>${`${eq}<span><b></b><br></span>`.repeat(n)}</li></ul>`,
+      (n: number) =>
+        `<ul><li>Text<br>${`${eq}${'<b> </b>'.repeat(4)}<div> </div>`.repeat(n)}</li></ul>`,
+      (n: number) => `<ul><li>Text<br>${eq.repeat(n)}more</li></ul>`,
+      (n: number) =>
+        `<ul><li>${'<span>'.repeat(n)}Text<br>${'<b></b>'.repeat(n)}${'</span>'.repeat(n)}${eq}</li></ul>`,
+      (n: number) => `<ul><li>Text<br>${eq}<span>${'<i> </i>'.repeat(n)}<br></span></li></ul>`,
+    ];
+
+    for (const shape of shapes) {
+      expect(
+        growth((n) => {
+          blocksFromHtml(document, shape(n));
+        }, 25),
+      ).toBeLessThan(LINEAR);
+    }
+  }, 60_000);
+});
+
+describe('math audit round 6: a display equation in a list item changes no order', () => {
+  const read = (html: string) =>
+    blocksFromHtml(document, html).map((block) =>
+      block.type === 'image'
+        ? [block.type, block.depth, block.src]
+        : [block.type, block.depth, block.content],
+    );
+  const m = (tex: string) => ({ text: '￼', math: tex });
+  const katex = (tex: string) =>
+    '<span class="katex-display"><span class="katex"><span class="katex-mathml"><math><semantics>' +
+    `<mrow><mi>${tex}</mi></mrow><annotation encoding="application/x-tex">${tex}</annotation></semantics></math>` +
+    '</span></span></span>';
+  const eq = katex('E');
+  const eqF = katex('F');
+  const src = 'https://a.test/i.png';
+  const img = `<img src="${src}">`;
+  const linked = `<a href="https://a.test/">${img}</a>`;
+  const li = (inner: string) => read(`<ul><li>${inner}</li></ul>`);
+  const item = (...content: unknown[]) => ['bulleted_list', 0, content];
+  const math = (tex: string) => ['math', 1, [{ text: tex }]];
+  const image = ['image', 1, src];
+
+  // A child the item hands on ends the line before an equation as a line
+  // break does: it goes after the item's text, so nothing of the item's
+  // stands beside the equation. Asked only of a line start, E went into the
+  // item's text and F after the picture -- F came out before E.
+  test('a block the item hands on before the equation ends its line', () => {
+    for (const picture of [img, linked]) {
+      expect(li(`Text<br>${eq}${picture}${eqF}`)).toEqual([
+        item({ text: 'Text' }),
+        math('E'),
+        image,
+        math('F'),
+      ]);
+    }
+
+    expect(li(`T<br>${img}${eq}`)).toEqual([item({ text: 'T' }), image, math('E')]);
+  });
+
+  // The item's text is read before every block it hands on, so text after a
+  // block still comes before an equation handed on: it is apart only when
+  // nothing the item keeps follows it anywhere in the item.
+  test('text the item keeps after a block it hands on keeps the equation in its text', () => {
+    expect(li(`Text<br>${eq}${img}After`)).toEqual([
+      item({ text: 'Text\n' }, m('E'), { text: '\nAfter' }),
+      image,
+    ]);
+    expect(li(`${eq}${img}Text`)).toEqual([item(m('E'), { text: '\nText' }), image]);
+    expect(li(`<span> </span>${eq}<h2>H</h2>Tail`)).toEqual([
+      item({ text: ' \n' }, m('E'), { text: '\nTail' }),
+      ['heading2', 1, [{ text: 'H' }]],
+    ]);
+    expect(li(`Text<br>${eq}<p>More</p>After`)).toEqual([
+      item({ text: 'Text\n' }, m('E'), { text: '\nMore\nAfter' }),
+    ]);
+  });
+
+  // An item with no text of its own takes its first paragraph as its text,
+  // which reads before every block: an equation before that paragraph would
+  // move after it.
+  test('a paragraph the item takes as its text keeps the equation before it in its text', () => {
+    expect(li(`${eq}<p>More</p>`)).toEqual([item(m('E'), { text: '\nMore' })]);
+    expect(li(`${eq}<p>More</p>${eqF}`)).toEqual([item(m('E'), { text: '\nMore' }), math('F')]);
+    expect(li(`${img}${eq}<p>More</p>`)).toEqual([
+      item(m('E')),
+      image,
+      ['paragraph', 1, [{ text: 'More' }]],
+    ]);
+    // With text of its own the item takes no paragraph, and both nest.
+    expect(li(`Text<br>${eq}<p>More</p>`)).toEqual([
+      item({ text: 'Text' }),
+      math('E'),
+      ['paragraph', 1, [{ text: 'More' }]],
+    ]);
+    // A blank paragraph is not taken, and a paragraph before it changes nothing.
+    expect(li(`<p>Intro</p>${eq}<p>More</p>`)).toEqual([
+      item({ text: 'Intro' }),
+      math('E'),
+      ['paragraph', 1, [{ text: 'More' }]],
+    ]);
+  });
+
+  // What decides is what the reader keeps, not what a browser draws: a
+  // player, a field or a broken picture leaves nothing in the item.
+  test('an element the reader keeps nothing of is passed over', () => {
+    for (const nothing of [
+      '<video></video>',
+      '<audio></audio>',
+      '<canvas></canvas>',
+      '<embed>',
+      '<meter></meter>',
+      '<progress></progress>',
+      '<input type="hidden">',
+      '<input type="text">',
+      '<button></button>',
+      '<img src="">',
+      '<span><hr></span>',
+      '<span data-neditor-math=""></span>',
+      '<script>s</script>',
+      '<style>p{}</style>',
+    ]) {
+      // (Whether the break before it stays a line of the item's text is
+      // the text's own reading: a browser draws the element after it.)
+      expect(li(`Text<br>${eq}${nothing}`).slice(1)).toEqual([math('E')]);
+      expect(li(`Text<br><span>${nothing}</span>${eq}`).slice(1)).toEqual([math('E')]);
+    }
+  });
+
+  test('a formula, a picture after it or a to-do box the reader keeps stays beside it', () => {
+    expect(li(`Text<br>${eq}<span data-neditor-math="y"></span>`)).toEqual([
+      item({ text: 'Text\n' }, m('E'), { text: '\n' }, m('y')),
+    ]);
+    expect(li(`Text<br>${eq}<span>${img}</span>`)).toEqual([
+      item({ text: 'Text\n' }, m('E')),
+      image,
+    ]);
+    expect(li(`Text<br>${eq}<input type="checkbox">`)).toEqual([
+      ['todo', 0, [{ text: 'Text\n' }, m('E')]],
+    ]);
+    // On its line before it, too -- but not a picture, which is handed on
+    // after the item's text: there it ends the line, wrapped or bare, and the
+    // equation after it goes after it.
+    expect(li(`Text<br><span data-neditor-math="y"></span>${eq}`)).toHaveLength(1);
+    expect(li(`Text<br><span>${img}</span>${eq}`)).toEqual([
+      item({ text: 'Text' }),
+      image,
+      math('E'),
+    ]);
+  });
+
+  test('two equations around a wrapped picture keep their order', () => {
+    const second = eq.replace(/E/g, 'F');
+
+    for (const picture of [`<span>${img}</span>`, `<b>${linked}</b>`]) {
+      expect(li(`${eq}${picture}${second}`)).toEqual([item(m('E')), image, math('F')]);
+    }
+  });
+
+  // A paragraph after a picture is a block of the item whether the picture is
+  // bare or wrapped: asked of a bare one alone, a wrapped picture let the
+  // paragraph become the item's text and went after it.
+  test('a wrapped picture reads as a bare one does before a paragraph', () => {
+    const k = (tex: string) => eq.replace(/E/g, tex);
+    const tail = `${k('M0')} ${k('M1')}<p>w1</p><ul><li>w2</li></ul>`;
+
+    expect(read(`<ol><li><span>${img}</span>${tail}</li></ol>`)).toEqual(
+      read(`<ol><li>${img}${tail}</li></ol>`),
+    );
+    expect(read(`<ol><li><span>${img}</span>${tail}</li></ol>`).map((b) => b[0])).toEqual([
+      'numbered_list',
+      'image',
+      'paragraph',
+      'bulleted_list',
+    ]);
+  });
+
+  test('assistive copies in bulk read in linear time, and only a frame asks', () => {
+    const copy = '<span class="MJX_Assistive_MathML"> </span>';
+
+    // Outside a MathJax frame the class means nothing: it is text.
+    expect(read('<p>a <span class="MJX_Assistive_MathML">x</span> b</p>')).toEqual([
+      ['paragraph', 0, [{ text: 'a x b' }]],
+    ]);
+
+    expect(
+      growth((n) => blocksFromHtml(document, `<p>${`<svg></svg>${copy}`.repeat(n)}</p>`), 200),
+    ).toBeLessThan(LINEAR);
+    expect(
+      growth(
+        (n) =>
+          blocksFromHtml(
+            document,
+            `<p><span class="MathJax_SVG">${'<svg></svg>'.repeat(n)}${copy.repeat(n)}</span></p>`,
+          ),
+        200,
+      ),
+    ).toBeLessThan(LINEAR);
+  }, 60_000);
+
+  test('a copy split out around a glyph picture is judged where it stood', () => {
+    const frame = `<span class="MathJax"><nobr><span>y</span>${img}</nobr><span class="MJX_Assistive_MathML"><math><mi>x</mi></math></span></span>`;
+    const text = (html: string) =>
+      read(html)
+        .filter((block) => block[0] === 'paragraph')
+        .map((block) => richToPlainText(block[2] as RichText))
+        .join('|');
+
+    // Read once -- the drawing, its glyph picture, nothing of the copy -- and
+    // nothing of it lost.
+    for (const html of [`<p><b>a ${frame} b</b></p>`, `<p>a ${frame} b</p>`]) {
+      expect(read(html).map((block) => block[0])).toEqual(['paragraph', 'image', 'paragraph']);
+      expect(text(html)).toBe('a y|b');
+    }
+  });
+
+  test('a copy in a frame drawn as a block is judged where it stands', () => {
+    const frame =
+      '<div class="MathJax"><nobr><span>y</span></nobr><span class="MJX_Assistive_MathML"><math><mi>x</mi></math></span></div>';
+
+    expect(read(frame)).toEqual([['paragraph', 0, [{ text: 'y' }]]]);
+  });
+
+  test('frames nested in frames are read for their text once, not once a level', () => {
+    const copy = '<span class="MJX_Assistive_MathML"></span>';
+
+    // Depth and leaves grow together: each frame read the whole subtree below
+    // it, so the cost was their product -- with text at the bottom, and with
+    // none (pictures only), where nothing ends the search early.
+    for (const leaf of ['<b>z</b>', '<span><svg><text>s</text></svg></span>']) {
+      expect(
+        growth(
+          (n) =>
+            blocksFromHtml(
+              document,
+              `<p>${'<span class="MathJax">'.repeat(n)}${leaf.repeat(n * 16)}${`${copy}</span>`.repeat(n)}</p>`,
+            ),
+          25,
+        ),
+      ).toBeLessThan(LINEAR);
+    }
+  }, 60_000);
+
+  test("a frame's drawing is judged by what the reader keeps of it", () => {
+    const copy = (tex: string) =>
+      `<span class="MJX_Assistive_MathML"><math><mi>${tex}</mi></math></span>`;
+    const text = (html: string) => richToPlainText(read(html)[0]?.[2] as RichText);
+
+    // An SVG wrapped in a span draws no text either: the copy is read.
+    expect(
+      text(
+        `<p>a <span class="MathJax_SVG"><span><svg><text>s</text></svg></span>${copy('X')}</span> b</p>`,
+      ),
+    ).toBe('a X b');
+    // Nor does what the reader skips: a <noscript> is no drawing.
+    for (const skipped of ['<noscript>n</noscript>', '<span><noscript>n</noscript></span>']) {
+      expect(text(`<p>a <span class="MathJax">${skipped}${copy('X')}</span> b</p>`)).toBe('a X b');
+    }
+    // A nested frame drawing nothing has its copy read -- text the outer
+    // frame draws, so the outer copy is the duplicate.
+    expect(
+      text(
+        `<p>a <span class="MathJax"><span class="MathJax_SVG"><svg></svg>${copy('I')}</span>${copy('O')}</span> b</p>`,
+      ),
+    ).toBe('a I b');
+  });
+
+  test('frames nested 3,000 deep, each copy before the next frame, read without overflowing', () => {
+    const copy = '<span class="MJX_Assistive_MathML"><math><mi>x</mi></math></span>';
+    const n = 3000;
+    let blocks: Block[] = [];
+
+    expect(() => {
+      blocks = blocksFromHtml(
+        document,
+        `<p>${`<span class="MathJax">${copy}`.repeat(n)}<span>y</span>${'</span>'.repeat(n)}</p>`,
+      );
+    }).not.toThrow();
+    // Past the inline nesting bound the rest is read whole, and every frame
+    // here draws the "y": not one copy is read, there either.
+    expect(blocks.map((block) => blockText(block)).join('')).toBe('y');
+  });
+
+  test('frames nested 5,000 deep in MathJax order, copy last, read without overflowing', () => {
+    const copy = '<span class="MJX_Assistive_MathML"><math><mi>x</mi></math></span>';
+    const n = 5000;
+
+    expect(() =>
+      blocksFromHtml(
+        document,
+        `<p>${'<span class="MathJax"><span>y</span>'.repeat(n)}${`${copy}</span>`.repeat(n)}</p>`,
+      ),
+    ).not.toThrow();
+  });
+
+  test('a formula with no TeX in a <pre> is read once, as its drawing', () => {
+    const code = (html: string) => richToPlainText(read(`<pre>${html}</pre>`)[0]?.[2] as RichText);
+
+    expect(
+      code(
+        'a <span class="MathJax"><nobr>y</nobr><span class="MJX_Assistive_MathML"><math><mi>x</mi></math></span></span> b',
+      ),
+    ).toBe('a y b');
+    expect(
+      code(
+        'a <span class="katex"><span class="katex-mathml"><math><mi>x</mi></math></span><span class="katex-html">y</span></span> b',
+      ),
+    ).toBe('a y b');
+  });
+
+  test('a line break followed only by a copy the reader skips is filler, as in a <pre>', () => {
+    const lines = (html: string) => blockText(blocksFromHtml(document, html)[0]!);
+
+    expect(
+      lines(
+        '<p><span class="MathJax"><nobr>y<br></nobr><span class="MJX_Assistive_MathML"><math><mi>x</mi></math></span></span></p>',
+      ),
+    ).toBe('y');
+    expect(
+      lines(
+        '<p>a<br><span class="katex"><span class="katex-mathml"><math><mi>x</mi></math></span><span class="katex-html"></span></span></p>',
+      ),
+    ).toBe('a');
+  });
+
+  test('a linked picture beside a copy the reader skips is still only a picture', () => {
+    const katex =
+      '<span class="katex"><span class="katex-mathml"><math><mi>x</mi></math></span><span class="katex-html"></span></span>';
+    const item = (inner: string) =>
+      blocksFromHtml(document, `<ul><li><a href="https://a.test/">${inner}</a></li></ul>`).map(
+        (block) => [block.type, block.src ?? ''],
+      );
+
+    expect(item(`${img}${katex}`)).toEqual(item(img));
+  });
+
+  test('a line break before a formula that draws no text is a line break', () => {
+    const host = document.createElement('div');
+    host.innerHTML =
+      'a<br><span data-neditor-math="\\quad" contenteditable="false"><span class="katex"><span class="katex-mathml"><math><semantics><mspace width="1em"></mspace><annotation encoding="application/x-tex">\\quad</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="mspace"></span></span></span></span>';
+
+    expect(parseRichText(host)).toEqual([{ text: 'a\n' }, { text: '\uFFFC', math: '\\quad' }]);
+  });
+
+  test("KaTeX's skipped copy is nothing the item or the figure keeps", () => {
+    const tex = (inner: string) =>
+      `<span class="katex"><span class="katex-mathml"><math><mi>x</mi></math></span><span class="katex-html">${inner}</span></span>`;
+    const display = eq.replace(/E/g, 'D');
+    const shape = (html: string) =>
+      blocksFromHtml(document, html).map((block) => [block.type, block.depth, block.src ?? '']);
+
+    expect(
+      shape(`<ul><li>T<br>${tex('<span class="mspace"></span>')}${display}</li></ul>`),
+    ).toEqual(shape(`<ul><li>T<br>${display}</li></ul>`));
+    expect(shape(`<ul><li>${display}${tex('<span class="mspace"></span>')}</li></ul>`)).toEqual(
+      shape(`<ul><li>${display}</li></ul>`),
+    );
+    expect(
+      blocksFromHtml(document, `<figure>${img}${tex('')}<figcaption>cap</figcaption></figure>`).map(
+        (block) => [block.type, blockText(block)],
+      ),
+    ).toEqual([['image', 'cap']]);
+  });
+
+  test('a picture inside a copy the reader skips is no picture of the item', () => {
+    const inner = `t<span class="katex-mathml">${img}</span><span class="katex-html">h</span>`;
+
+    expect(blocksFromHtml(document, `<ul><li>${inner}</li></ul>`).map((b) => b.type)).toEqual([
+      'bulleted_list',
+    ]);
+
+    // Nor does it make the paragraph after it a block of the item.
+    const before = (copy: string) =>
+      blocksFromHtml(
+        document,
+        `<ol><li><span>T</span><span class="katex"><span class="katex-mathml">${copy}</span><span class="katex-html">h</span></span><p>w1</p></li></ol>`,
+      ).map((b) => [b.type, b.depth]);
+    expect(before(img)).toEqual(before(''));
+  });
+
+  test('a figure takes the picture it shows, not one inside what the reader skips', () => {
+    const j = '<img src="https://x.test/j.png" alt="j">';
+    const hidden = '<img src="https://x.test/i.png" alt="i">';
+
+    for (const skipped of [
+      `<span class="katex"><span class="katex-mathml">${hidden}</span><span class="katex-html"></span></span>`,
+      `<noscript>${hidden}</noscript>`,
+    ]) {
+      expect(
+        blocksFromHtml(document, `<figure>${skipped}${j}<figcaption>cap</figcaption></figure>`).map(
+          (block) => [block.type, block.src, blockText(block)],
+        ),
+      ).toEqual([['image', 'https://x.test/j.png', 'cap']]);
+    }
+  });
+
+  test('a loose copy holding a picture makes no paragraph after it a block', () => {
+    const item = (copy: string) =>
+      blocksFromHtml(
+        document,
+        `<ol><li><span>T</span><span class="katex-mathml">${copy}</span><span class="katex-html">h</span><p>w1</p></li></ol>`,
+      ).map((b) => [b.type, blockText(b)]);
+
+    expect(item(img)).toEqual(item(''));
+  });
+
+  test('a checkbox inside a copy the reader skips makes no to-do', () => {
+    expect(
+      blocksFromHtml(
+        document,
+        '<ul><li>t<span class="katex"><span class="katex-mathml"><input type="checkbox" checked></span><span class="katex-html">h</span></span></li></ul>',
+      ).map((b) => b.type),
+    ).toEqual(['bulleted_list']);
+  });
+
+  test('a formula is never entered when judging content: with no TeX it is nothing', () => {
+    const raw = (html: string) => {
+      const host = document.createElement('div');
+      host.innerHTML = html;
+      return richToPlainText(parseRichText(host));
+    };
+
+    expect(
+      raw(
+        'a<br><span class="katex"><span class="katex-mathml"><math><semantics><mi>x</mi><annotation encoding="application/x-tex"></annotation></semantics></math></span><span class="katex-html">x</span></span>',
+      ),
+    ).toBe('a');
+    expect(raw('a<br><math alttext=""><mi>x</mi></math>')).toBe('a');
+
+    // And never searched once a level: nested formulas whose TeX is empty --
+    // an empty annotation, an empty `alttext`, at the bottom of the chain --
+    // each a formula, each searched to the bottom when it was entered. The
+    // host is built outside the timing, which measures the read alone.
+    for (const [open, bottom] of [
+      [
+        '<span class="katex">',
+        '<math><semantics><mi>x</mi><annotation encoding="application/x-tex"></annotation></semantics></math>',
+      ],
+      ['<span class="mwe-math-element">', '<math alttext=""><mi>x</mi></math>'],
+    ] as const) {
+      expect(
+        growthOf((n) => {
+          const host = document.createElement('div');
+          host.innerHTML = `a<br>${open.repeat(n)}${bottom}${'</span>'.repeat(n)}z`;
+          return () => parseRichText(host);
+        }, 150),
+      ).toBeLessThan(LINEAR);
+    }
+  }, 60_000);
+
+  test('what the reader skips holds no break or block of its own', () => {
+    const shape = (html: string) =>
+      blocksFromHtml(document, html).map((b) => [b.type, blockText(b)]);
+
+    // A <br> in an <object> fallback is no line of the reader's.
+    expect(shape('<p>a</p><span><object data="v.swf"><br></object></span><p>b</p>')).toEqual(
+      shape('<p>a</p><span><object data="v.swf"></object></span><p>b</p>'),
+    );
+    // Nor is a block in one a block that splits the line.
+    expect(shape(`<p>a<span>x<object><div>d</div></object>${img}z</span></p>`)).toEqual(
+      shape(`<p>a<span>x<object></object>${img}z</span></p>`),
+    );
+    // And a picture in a skipped copy at a paste's start is no content there.
+    const edge = (inner: string) =>
+      blocksFromHtml(
+        document,
+        `<span class="x"><span class="katex-mathml">${inner}</span><span class="katex-html"> </span></span>Hello`,
+      ).map((b) => blockText(b));
+    expect(edge(img)).toEqual(edge(''));
+  });
+
+  test('a list item inside what the reader skips makes no wrapper of items', () => {
+    const runs = (html: string) => blocksFromHtml(document, html).map((b) => b.content);
+
+    expect(
+      runs('<ul><a href="https://e.test/">Docs<noscript><li>x</li></noscript></a><li>b</li></ul>'),
+    ).toEqual(runs('<ul><a href="https://e.test/">Docs<noscript></noscript></a><li>b</li></ul>'));
+    expect(runs('<ul><b>Bold<object><li>x</li></object></b><li>b</li></ul>')).toEqual(
+      runs('<ul><b>Bold<object></object></b><li>b</li></ul>'),
+    );
+    expect(
+      blocksFromHtml(
+        document,
+        '<ul><table><tr><td>cell<noscript><li>x</li></noscript></td></tr></table><li>a</li></ul>',
+      ).map((b) => b.type),
+    ).toContain('table');
+  });
+
+  test('a skipped element holding a block is no block itself', () => {
+    const runs = (inner: string) =>
+      blocksFromHtml(document, `<b><span>a</span>\n${inner}\n<span>b</span><div>c</div></b>`).map(
+        (b) => b.content,
+      );
+
+    expect(runs('<noscript><div>n</div></noscript>')).toEqual(runs('<noscript></noscript>'));
+  });
+
+  test('a quote or a <details> takes no list or summary from what the reader skips', () => {
+    const shape = (html: string) =>
+      blocksFromHtml(document, html).map((b) => [b.type, blockText(b)]);
+
+    expect(
+      shape('<blockquote>Quote<noscript><ul><li>Enable JS</li></ul></noscript></blockquote>'),
+    ).toEqual(shape('<blockquote>Quote<noscript></noscript></blockquote>'));
+    expect(
+      shape(
+        '<details><noscript><summary>JS off</summary></noscript><summary>Title</summary>Body</details>',
+      )[0],
+    ).toEqual(['toggle', 'Title']);
+    // After other content: a `<details>` on the paste's start edge with no
+    // summary the reader takes -- `<object>` is never read -- is a drag begun
+    // in its body, read as a container (`HEADLESS_DETAILS`).
+    expect(
+      shape('<p>x</p><details><object><summary>F</summary></object>Body</details>')[1],
+    ).toEqual(['toggle', '']);
+  });
+
+  test('whitespace TeX is no TeX anywhere', () => {
+    const shape = (html: string) =>
+      blocksFromHtml(document, html).map((b) => [b.type, b.depth, blockText(b)]);
+
+    expect(
+      shape(
+        `<figure>${img}<span data-neditor-math=" "></span><figcaption>cap</figcaption></figure>`,
+      ),
+    ).toEqual(shape(`<figure>${img}<figcaption>cap</figcaption></figure>`));
+    expect(
+      shape(
+        '<figure><b>w</b><figcaption>c</figcaption><span data-neditor-math=" "></span></figure>',
+      ),
+    ).toEqual(shape('<figure><b>w</b><figcaption>c</figcaption></figure>'));
+    expect(
+      shape(
+        '<ul><li><span data-neditor-math=" "></span><div data-neditor-math-block="x"></div></li></ul>',
+      ),
+    ).toEqual(
+      shape(
+        '<ul><li><span data-neditor-math=""></span><div data-neditor-math-block="x"></div></li></ul>',
+      ),
+    );
+  });
+
+  test("an empty formula at a paste's edge is nothing there", () => {
+    const shape = (html: string) => blocksFromHtml(document, html).map((b) => [b.type, b.content]);
+
+    expect(shape('<b><span data-neditor-math=""></span>\n</b>')).toEqual(
+      shape('<b><span></span>\n</b>'),
+    );
+    // Nor in a code block's text.
+    expect(shape('<pre>a<span data-neditor-math=""></span>b</pre>')).toEqual(
+      shape('<pre>ab</pre>'),
+    );
+  });
+
+  test('past the inline nesting bound an empty formula is nothing either', () => {
+    const deep = (inner: string) => `<p>${'<b>'.repeat(2100)}${inner}${'</b>'.repeat(2100)}</p>`;
+
+    expect(
+      blocksFromHtml(document, deep('a<span data-neditor-math=""></span>b')).map(blockText),
+    ).toEqual(blocksFromHtml(document, deep('ab')).map(blockText));
+  });
+
+  test('a formula with no TeX is nothing beside a picture', () => {
+    const empty =
+      '<span class="katex"><span class="katex-mathml"><math><semantics><mi>x</mi><annotation encoding="application/x-tex"></annotation></semantics></math></span><span class="katex-html">x</span></span>';
+    const shape = (html: string) =>
+      blocksFromHtml(document, html).map((b) => [b.type, b.depth, blockText(b)]);
+
+    expect(shape(`<figure>${img}${empty}<figcaption>cap</figcaption></figure>`)).toEqual(
+      shape(`<figure>${img}<span></span><figcaption>cap</figcaption></figure>`),
+    );
+    expect(shape(`<ul><li><a href="https://a.test/">${img}${empty}</a></li></ul>`)).toEqual(
+      shape(`<ul><li><a href="https://a.test/">${img}</a></li></ul>`),
+    );
+  });
+
+  test("a formula in a MathJax frame is the frame's drawing, bare or wrapped", () => {
+    for (const formula of [
+      '<span data-neditor-math="x"></span>',
+      '<span><span data-neditor-math="x"></span></span>',
+    ]) {
+      const host = document.createElement('div');
+      host.innerHTML = `a<span class="MathJax">${formula}<span class="MJX_Assistive_MathML"><math><mi>y</mi></math></span></span>b`;
+
+      expect(parseRichText(host)).toEqual([
+        { text: 'a' },
+        { text: '\uFFFC', math: 'x' },
+        { text: 'b' },
+      ]);
+    }
+  });
+
+  test("KaTeX's copy loose in a MathJax frame is no drawing either", () => {
+    const katex =
+      '<span class="katex-mathml"><math><mi>k</mi></math></span><span class="katex-html"></span>';
+    const copy = '<span class="MJX_Assistive_MathML"><math><mi>X</mi></math></span>';
+
+    for (const parts of [katex, `<span>${katex}</span>`]) {
+      expect(read(`<p>a <span class="MathJax">${parts}${copy}</span> b</p>`)[0]?.[2]).toEqual([
+        { text: 'a X b' },
+      ]);
+    }
+  });
+
+  test('a copy beside a wrapped <details> summary is read once', () => {
+    const blocks = read(
+      '<details open><span class="MathJax"><span><summary>y</summary></span><span class="MJX_Assistive_MathML"><math><mi>X</mi></math></span></span><p>b</p></details>',
+    );
+
+    expect(JSON.stringify(blocks)).not.toContain('"X"');
+    expect(blocks[0]?.[0]).toBe('toggle');
+  });
+
+  test('the summary left out of the body is the one read as the title', () => {
+    const shape = (html: string) =>
+      blocksFromHtml(document, html).map((b) => [b.type, b.depth, blockText(b)]);
+
+    // The first `katex-mathml` is no copy (no drawing follows it), so "Title"
+    // is the title. Searched for again in a copy that lacks the second one,
+    // the body lost "Second" and kept "Title".
+    expect(
+      shape(
+        '<details open><div class="katex-mathml"><summary>Title</summary></div><span class="katex-mathml">m</span><span class="katex-html">h</span><p>body</p><summary>Second</summary></details>',
+      ),
+    ).toEqual([
+      ['toggle', 0, 'Title'],
+      ['paragraph', 1, 'h'],
+      ['paragraph', 1, 'body'],
+      ['paragraph', 1, 'Second'],
+    ]);
+  });
+
+  test('a wrapped summary beside one the reader skips is read once', () => {
+    const shape = (html: string) =>
+      blocksFromHtml(document, html).map((b) => [b.type, b.depth, blockText(b)]);
+
+    // A summary in a `<noscript>` is no title, and no body either.
+    expect(
+      shape(
+        '<details open><span><noscript><summary>N</summary></noscript><summary>T</summary></span>body</details>',
+      ),
+    ).toEqual([
+      ['toggle', 0, 'T'],
+      ['paragraph', 1, 'body'],
+    ]);
+  });
+
+  test("a nested <details>' summary is its own title, never the outer one's", () => {
+    const shape = (html: string) =>
+      blocksFromHtml(document, html).map((b) => [b.type, b.depth, blockText(b)]);
+
+    // After other content, as above: on the paste's start edge the outer one
+    // has no summary of its own and is a drag begun in its body -- WebKit's
+    // content `<span>` around a nested one is this shape (`HEADLESS_DETAILS`).
+    expect(
+      shape(
+        '<p>x</p><details open><div><details open><summary>Inner</summary>ib</details></div>body</details>',
+      ),
+    ).toEqual([
+      ['paragraph', 0, 'x'],
+      ['toggle', 0, ''],
+      ['toggle', 1, 'Inner'],
+      ['paragraph', 2, 'ib'],
+      ['paragraph', 1, 'body'],
+    ]);
+    expect(
+      shape(
+        '<details open><details open><summary>Inner</summary>ib</details><summary>Outer</summary>body</details>',
+      ),
+    ).toEqual([
+      ['toggle', 0, 'Outer'],
+      ['toggle', 1, 'Inner'],
+      ['paragraph', 2, 'ib'],
+      ['paragraph', 1, 'body'],
+    ]);
+  });
+
+  test('and each <details> searches only its own part of the tree for one', () => {
+    // Searched past the <details> inside it, every level walked the whole
+    // subtree below it: quadratic in the nesting.
+    expect(
+      growth(
+        (n) =>
+          blocksFromHtml(document, `${'<details><p>x</p>'.repeat(n)}${'</details>'.repeat(n)}`),
+        60,
+      ),
+    ).toBeLessThan(LINEAR);
+  }, 60_000);
+
+  test('a <details> inside a copy keeps its own title, read once', () => {
+    const shape = (html: string) =>
+      blocksFromHtml(document, html).map((b) => [b.type, b.depth, blockText(b)]);
+    const nested = [
+      ['toggle', 0, 'A'],
+      ['toggle', 1, 'B'],
+      ['paragraph', 2, 'bb'],
+      ['paragraph', 1, 'aa'],
+    ];
+
+    expect(
+      shape(
+        '<details open><span><summary>A</summary><details open><span><summary>B</summary></span>bb</details></span>aa</details>',
+      ),
+    ).toEqual(nested);
+    expect(
+      shape(
+        '<details open><span><summary>A</summary><details open><summary>B</summary>bb</details></span>aa</details>',
+      ),
+    ).toEqual(nested);
+    expect(
+      shape(
+        '<details open><span><summary>A</summary></span><span><details open><b><summary>B</summary></b>bb</details></span></details>',
+      ),
+    ).toEqual([
+      ['toggle', 0, 'A'],
+      ['toggle', 1, 'B'],
+      ['paragraph', 2, 'bb'],
+    ]);
+    // Copied again, to carry the bold inward: the title noted for the first
+    // copy goes with the second.
+    expect(
+      shape(
+        '<details open><span><summary>A</summary></span><b><details open><span><summary>B</summary></span>bb</details></b></details>',
+      ),
+    ).toEqual([
+      ['toggle', 0, 'A'],
+      ['toggle', 1, 'B'],
+      ['paragraph', 2, 'bb'],
+    ]);
+  });
+
+  test("at the nesting bound a list's loose run is one remainder, and what the reader skips stays out", () => {
+    const deep = (inner: string) => `${'<div>'.repeat(1023)}${inner}${'</div>'.repeat(1023)}`;
+
+    expect(
+      blocksFromHtml(
+        document,
+        deep(
+          '<ul><li>a</li><script>var secret=1</script>x <b>y</b> z<style>p{color:red}</style></ul>',
+        ),
+      ).map(blockText),
+    ).toEqual(['a', 'x y z']);
+  });
+
+  test('a <details> whose wrapped summary is taken out reads as it does alone', () => {
+    // Taken out where it stands, what the readers had learned about the
+    // elements around it was still about the summary: the line break in the
+    // cell beside the picture it held was lost.
+    const shape = (html: string) =>
+      blocksFromHtml(document, html).map((b) => [b.type, b.depth, blockText(b)]);
+    const inner =
+      '<details open>k<td><summary><img src="https://e.x/a.png" alt="al"></summary><br></td></details>';
+
+    expect(shape(inner)).toEqual([
+      ['toggle', 0, ''],
+      ['paragraph', 1, 'k\n'],
+    ]);
+    expect(shape(`<details open><div>${inner}<summary>O</summary></div></details>`)).toEqual([
+      ['toggle', 0, 'O'],
+      ['toggle', 1, ''],
+      ['paragraph', 2, 'k\n'],
+    ]);
+    // Every element from the summary up to its <details>, not just its parent.
+    const wrapped = inner.replace(/<summary>.*<\/summary>/, '<b>$&</b>');
+
+    expect(shape(`<details open><div>${wrapped}<summary>O</summary></div></details>`)).toEqual([
+      ['toggle', 0, 'O'],
+      ['toggle', 1, ''],
+      ['paragraph', 2, 'k\n'],
+    ]);
+  });
+
+  test('a wrapped summary leaves the body reading as a direct one does', () => {
+    // Copied instead, the body lost what it inherited where it stood.
+    const shape = (html: string) =>
+      blocksFromHtml(document, html).map((b) => [b.type, b.depth, blockText(b)]);
+    const both = (direct: string) => [
+      direct,
+      direct.replace(/<summary>(.*?)<\/summary>/, '<i>$&</i>'),
+    ];
+
+    for (const direct of [
+      '<div style="white-space:pre-wrap"><details open><summary>T</summary>a\nb\tc</details></div>',
+      '<p>q</p><details open><summary>T</summary>x </details>',
+      '<details open><summary><div>T</div></summary><span>ab</span>y</details>',
+    ]) {
+      const [plain, wrapped] = both(direct);
+
+      expect(shape(wrapped!)).toEqual(shape(plain!));
+    }
+    expect(
+      shape(
+        '<div style="white-space:pre-wrap"><details open><i><summary>T</summary></i>a\nb\tc</details></div>',
+      ),
+    ).toEqual([
+      ['toggle', 0, 'T'],
+      ['paragraph', 1, 'a\nb\tc'],
+    ]);
+    // An edge of the paste the title held is none of the body's: the space
+    // after it is collapsed, as after a direct summary.
+    expect(shape('<details open><i><summary>T</summary> x</i>y</details>')).toEqual(
+      shape('<details open><summary>T</summary><i> x</i>y</details>'),
+    );
+    // A block in the summary, which the readers had found below its wrapper
+    // before it was taken out, splits nothing.
+    expect(
+      shape('<b><details open><span>a<summary><div>T</div></summary>b</span>y</details></b>'),
+    ).toEqual([
+      ['toggle', 0, 'T'],
+      ['paragraph', 1, 'aby'],
+    ]);
+  });
+
+  test("a formatting wrapper's blocks keep the white-space around it", () => {
+    expect(
+      blocksFromHtml(document, '<div style="white-space:pre-wrap"><b>a  b<p>c</p></b></div>').map(
+        blockText,
+      ),
+    ).toEqual(['a  b', 'c']);
+  });
+
+  test("a paste's edges in a toggle are judged in the order it is read: title, then body", () => {
+    const body = (html: string) => blocksFromHtml(document, html).slice(1).map(blockText);
+
+    for (const [wrapped, direct] of [
+      // The paste starts with the toggle, so no text of the body is at its
+      // start, even the text before a wrapped summary.
+      [
+        '<details open> x<span><summary>T</summary></span></details>',
+        '<details open><summary>T</summary> x<span></span></details>',
+      ],
+      [
+        '<details open><span> x<summary>T</summary></span>y </details>',
+        '<details open><summary>T</summary><span> x</span>y </details>',
+      ],
+      // A paste whose last text is in the title ends with the body's.
+      [
+        '<details open><i>x <summary>T</summary></i></details>',
+        '<details open><summary>T</summary><i>x </i></details>',
+      ],
+    ]) {
+      expect(body(wrapped!)).toEqual(body(direct!));
+    }
+    expect(body('<details open><summary></summary> x</details>')).toEqual(['x']);
+    expect(body('<details open>x <summary>T</summary></details>')).toEqual(['x ']);
+  });
+
+  test('a wrapped summary keeps the formatting of what wraps it, as a direct one does', () => {
+    const read = (html: string) => blocksFromHtml(document, html).map((b) => [b.type, b.content]);
+    const bold = [{ text: 'T', marks: ['bold'] }];
+
+    // A `<b>` around the whole toggle: its shell went around the `<span>`,
+    // above the summary the title is read from, and the title read plain.
+    expect(read('<b><details open><span><summary>T</summary></span> z</details></b>')).toEqual(
+      read('<b><details open><summary>T</summary> z</details></b>'),
+    );
+    expect(read('<b><details open><span><summary>T</summary></span> z</details></b>')[0]).toEqual([
+      'toggle',
+      bold,
+    ]);
+    expect(
+      read(
+        '<a href="https://x.test/"><details open><span><summary>T</summary></span></details></a>',
+      ),
+    ).toEqual([['toggle', [{ text: 'T', link: 'https://x.test/' }]]]);
+    // Written around the summary itself, by tag or by style.
+    expect(read('<details open><b><summary>T</summary></b> z</details>')).toEqual([
+      ['toggle', bold],
+      ['paragraph', [{ text: 'z' }]],
+    ]);
+    expect(
+      read('<details open><span style="font-weight:bold"><summary>T</summary></span></details>'),
+    ).toEqual([['toggle', bold]]);
+    // By the distribution's two rules, the title reads as the body text beside
+    // it under the same wrappers: a wrapper holding a block is taken up, the
+    // outermost winning; one holding none is read where it stands, the
+    // nearest winning; a structure element hands on nothing (a `<figure>` is
+    // one, though no block tag).
+    const formatOf = (blocks: ReturnType<typeof read>, text: string) => {
+      const run = blocks
+        .flatMap(([, content]) => content as RichText)
+        .find((candidate) => candidate.text.includes(text))!;
+
+      return [[...(run.marks ?? [])].sort(), run.link ?? null];
+    };
+
+    for (const [open, close] of [
+      ['<div style="font-weight:bold">', '</div>'],
+      ['<figure style="font-weight:bold">', '</figure>'],
+      ['<b><i style="font-weight:normal">', '</i></b>'],
+      ['<i style="font-weight:normal">', '</i>'],
+      ['<b><span style="font-weight:normal">', '</span></b>'],
+      ['<span style="font-weight:normal"><b>', '</b></span>'],
+      ['<span style="text-decoration:underline"><s>', '</s></span>'],
+      ['<a href="https://x.test/"><span style="font-style:normal">', '</span></a>'],
+      // A block on the way down to the summary: the wrapper above holds it.
+      ['<b><i style="font-weight:normal"><div>', '</div></i></b>'],
+    ]) {
+      // A summary that holds blocks of its own -- GitHub's READMEs write
+      // `<summary><h3>` -- says nothing about its wrappers: the body is read
+      // with the summary taken out, and the title by the same answer.
+      for (const title of [
+        'T',
+        '<p>T</p>',
+        '<h3>T</h3>',
+        'T<details open><summary>i</summary>q</details>',
+      ]) {
+        for (const body of [' z', '<p>z</p>']) {
+          const blocks = read(
+            `<details open>${open}<summary>${title}</summary>${body}${close}</details>`,
+          );
+
+          expect(formatOf(blocks, 'T'), `${open} ${title} ${body}`).toEqual(formatOf(blocks, 'z'));
+        }
+      }
+    }
+    // An assistive copy is no block to the reader, though written as a
+    // `<div>`: the wrapper holding it reads in place.
+    expect(
+      formatOf(
+        read(
+          '<details open><b><i style="font-weight:normal"><summary>T</summary><div class="katex-mathml">m</div><span class="katex-html">h</span> z</i></b></details>',
+        ),
+        'T',
+      ),
+    ).toEqual([['italic'], null]);
+    // The cases round 25 read wrong, taking the outermost of wrappers that
+    // hold no block: the title took a mark the browser does not draw.
+    expect(
+      read(
+        '<b><details open><span style="font-weight:400"><summary>Title</summary> body</span></details></b>',
+      ),
+    ).toEqual([
+      ['toggle', [{ text: 'Title' }]],
+      ['paragraph', [{ text: 'body' }]],
+    ]);
+    expect(
+      read('<details open><b><i style="font-weight:normal"><summary>T</summary></i></b></details>'),
+    ).toEqual([['toggle', [{ text: 'T', marks: ['italic'] }]]]);
+    expect(
+      read(
+        '<details open><span style="text-decoration:underline"><s><summary>T</summary></s></span></details>',
+      ),
+    ).toEqual([['toggle', [{ text: 'T', marks: ['underline', 'strikethrough'] }]]]);
+    // Round 26 asked whether a wrapper held a block with the summary still in
+    // it, so a block in the summary brought the outermost-first reading back.
+    expect(
+      read(
+        '<details open><span style="text-decoration:underline"><s><summary><h3>T</h3></summary> body</s></span></details>',
+      ),
+    ).toEqual([
+      ['toggle', [{ text: 'T', marks: ['underline', 'strikethrough'] }]],
+      ['paragraph', [{ text: 'body', marks: ['underline', 'strikethrough'] }]],
+    ]);
+    expect(
+      read(
+        '<details open><b><blockquote><span style="font-weight:normal"><summary><p>T</p></summary> z</span></blockquote></b></details>',
+      )[0],
+    ).toEqual(['toggle', [{ text: 'T' }]]);
+    // Holding a block, the `<b>` is taken up, and a wrapper that only turns a
+    // mark off is no wrapper to the distribution: bold, as its body is.
+    expect(
+      read(
+        '<details open><b><span style="font-weight:normal"><summary>T</summary><p>z</p></span></b></details>',
+      ),
+    ).toEqual([
+      ['toggle', [{ text: 'T', marks: ['bold'] }]],
+      ['paragraph', [{ text: 'z', marks: ['bold'] }]],
+    ]);
+    // An href is a link only through `sanitizeUrl`, as everywhere else.
+    expect(
+      read('<details open><a href="javascript:alert(1)"><summary>T</summary></a></details>'),
+    ).toEqual([['toggle', [{ text: 'T' }]]]);
+    // The title's own formatting wins over what wraps it.
+    expect(
+      read(
+        '<details open><b><summary><span style="font-weight:normal">T</span></summary></b></details>',
+      ),
+    ).toEqual([['toggle', [{ text: 'T' }]]]);
+    // A wrapper an outer shell has already spent has its formatting in the
+    // summary, run by run; given it again, the title took it where the
+    // distribution leaves none, on the space that starts it.
+    expect(
+      read(
+        '<div style="white-space:pre-wrap"><i><details open><b><summary> <span>T</span></summary><p>x</p></b></details></i></div>',
+      ),
+    ).toEqual(
+      read(
+        '<div style="white-space:pre-wrap"><i><details open><summary> <b><span>T</span></b></summary><b><p>x</p></b></details></i></div>',
+      ),
+    );
+    // Read where the summary stands: a shell inside it took a MathJax frame's
+    // assistive copy away from the frame, and the formula read twice.
+    expect(
+      read(
+        '<details open><b><summary class="MathJax"><span>y</span><span class="MJX_Assistive_MathML"><math><mi>X</mi></math></span></summary></b><p>z</p></details>',
+      ),
+    ).toEqual([
+      ['toggle', [{ text: 'y', marks: ['bold'] }]],
+      ['paragraph', [{ text: 'z' }]],
+    ]);
+  });
+
+  test("a formatting wrapper's copy keeps the paste's edge and the wrapper's layout", () => {
+    expect(blocksFromHtml(document, '<b><p>y</p>x </b>').map(blockText)).toEqual(['y', 'x ']);
+    // A shell of two wrappers, each of them at the edge.
+    expect(
+      blocksFromHtml(document, '<b><a href="https://x.test/"><p>y</p>x </a></b>').map(blockText),
+    ).toEqual(['y', 'x ']);
+    expect(
+      blocksFromHtml(document, '<b style="display:flex">a<span>x</span><p>b</p></b>').map(
+        blockText,
+      ),
+    ).toEqual(['a\nx', 'b']);
+  });
+
+  test('at the nesting bound a direct summary is read once', () => {
+    const deep = (inner: string) => `${'<div>'.repeat(1023)}${inner}${'</div>'.repeat(1023)}`;
+
+    expect(
+      blocksFromHtml(document, deep('<details open><summary>Title</summary>body</details>')).map(
+        blockText,
+      ),
+    ).toEqual(['Title', 'body']);
+  });
+
+  test('a copied <details> read as text keeps its wrapped title', () => {
+    const shape = (html: string) =>
+      blocksFromHtml(document, html).map((b) => [b.type, blockText(b)]);
+    const inner = (title: string, body: string) =>
+      `<details open><span><summary>${title}</summary></span>${body}</details>`;
+    // Read as text in the outer toggle's body, or in a formatting shell's copy.
+    const outer = (html: string) =>
+      `<details open><span><summary>Outer</summary></span>${html}</details>`;
+
+    expect(shape(outer(`<blockquote>${inner('Inner', 'body')}</blockquote>`))).toEqual([
+      ['toggle', 'Outer'],
+      ['quote', 'Inner\nbody'],
+    ]);
+    expect(shape(outer(`<table><tr><td>${inner('Cell title', 'c')}</td></tr></table>`))).toEqual([
+      ['toggle', 'Outer'],
+      ['table', 'Cell title\nc'],
+    ]);
+    expect(shape(outer(`<ul><li>${inner('Item title', 'c')}</li></ul>`))).toEqual([
+      ['toggle', 'Outer'],
+      ['bulleted_list', 'Item title\nc'],
+    ]);
+    expect(shape(outer(`<h2>${inner('Heading title', '')}</h2>`))).toEqual([
+      ['toggle', 'Outer'],
+      ['heading2', 'Heading title'],
+    ]);
+    expect(shape(outer(`<pre>${inner('Code title', 'code')}</pre>`))).toEqual([
+      ['toggle', 'Outer'],
+      ['code', 'Code title\ncode'],
+    ]);
+    expect(shape(`<b>x<blockquote>${inner('Inner', 'body')}</blockquote></b>`)).toEqual([
+      ['paragraph', 'x'],
+      ['quote', 'Inner\nbody'],
+    ]);
+  });
+
+  test('nested wrapped summaries and nested loose list content read in linear time', () => {
+    const shapes: ReadonlyArray<readonly [string, string]> = [
+      ['<details><span><summary>s</summary></span><p>x</p>', '</details>'],
+      ['<details><span><summary>s</summary><p>x</p>', '</span></details>'],
+      ['<ul><div>x', '</div></ul>'],
+      // A title after its body holds the paste's last text at every level, so
+      // each toggle looks for the end of its body again: walking the whole
+      // body to find it was quadratic in the nesting.
+      [`<details>${'<p>x</p>'.repeat(5)}`, '<summary>s</summary></details>'],
+      [`<details>${'<p>x</p>'.repeat(5)}`, '<span><summary>s</summary></span></details>'],
+      // A title asks of each wrapper around it whether it holds a block other
+      // than the summary: one question a child, wherever the summary is.
+      ['<details><span><summary><h3>s</h3></summary><p>x</p>', '</span></details>'],
+      [`<details><b>${'<i>y</i>'.repeat(5)}<summary><h3>s</h3></summary>`, '</b></details>'],
+    ];
+
+    for (const [open, close] of shapes) {
+      expect(
+        growth((n) => blocksFromHtml(document, `${open.repeat(n)}${close.repeat(n)}`), 25),
+      ).toBeLessThan(LINEAR);
+    }
+  }, 120_000);
+
+  test('a stand-in for a KaTeX drawing keeps the copy before it a copy', () => {
+    const read = (html: string) => blocksFromHtml(document, html).map((b) => [b.type, b.content]);
+
+    // A wrapped summary that was the drawing is read as the title and taken
+    // out behind a stand-in; judged by what now came next, the MathML copy
+    // before it turned into content, and the formula read twice.
+    expect(
+      read(
+        '<details open><span><span class="katex-mathml">m</span><summary class="katex-html">T</summary> z</span></details>',
+      ),
+    ).toEqual(
+      read(
+        '<details open><span class="katex-mathml">m</span><summary class="katex-html">T</summary> z</details>',
+      ),
+    );
+    // And a copy holding a block made each wrapper around the summary a
+    // holder of blocks to the body, though not to the title.
+    expect(
+      read(
+        '<details open><b><i style="font-weight:normal"><span class="katex-mathml"><div>m</div></span><summary class="katex-html">T</summary> z</i></b></details>',
+      ),
+    ).toEqual([
+      ['toggle', [{ text: 'T', marks: ['italic'] }]],
+      ['paragraph', [{ text: 'z', marks: ['italic'] }]],
+    ]);
+  });
+
+  test('a run put together around pictures judges a copy as it stood', () => {
+    const text = (html: string) =>
+      blocksFromHtml(document, html).map((b) => (b.type === 'image' ? 'IMG' : blockText(b)));
+
+    // Where it stands each `katex-mathml` is no copy: what comes next is a
+    // `<span>` or an `<img>`. Pieces from two levels of a wrapper holding a
+    // picture, or either side of a picture the reader cannot use, came
+    // together in one run, and the copy rule read the neighbour it now had.
+    expect(
+      text(
+        '<details open><span class="katex-mathml">m</span><span><summary class="katex-html">T</summary><img src="https://x.test/i.png"></span> z</details>',
+      ),
+    ).toEqual(['T', 'm', 'IMG', 'z']);
+    expect(
+      text(
+        '<span>a <span class="katex-mathml">m</span><span><script class="katex-html"></script><img src="https://x.test/i.png"></span></span>',
+      ),
+    ).toEqual(['a m', 'IMG']);
+    expect(
+      text(
+        '<p>a <span class="katex-mathml">m</span><img src="cid:x"><script class="katex-html"></script> z</p>',
+      ),
+    ).toEqual(['a m z']);
+    expect(
+      text(
+        '<details open><span class="katex-mathml">m</span><img src="cid:x"><summary class="katex-html">T</summary> z</details>',
+      ),
+    ).toEqual(['T', 'm z']);
+    expect(
+      text(
+        '<figure><span class="katex-mathml">m</span><img src="cid:x"><script class="katex-html"></script></figure>',
+      ),
+    ).toEqual(['m']);
+    // Inside a wrapper split around a picture as well as outside one.
+    expect(
+      text(
+        '<span>a <span class="katex-mathml">m</span><img src="cid:x"><span class="katex-html">D</span><img src="https://x.test/i.png"></span>',
+      ),
+    ).toEqual(['a mD', 'IMG']);
+    // A real drawing across the levels, before and after them.
+    expect(
+      text(
+        '<span>a <span class="katex-mathml">m</span><span><span class="katex-html">D</span><img src="https://x.test/i.png"></span></span>',
+      ),
+    ).toEqual(['a mD', 'IMG']);
+    expect(
+      text(
+        '<span><span><img src="https://x.test/i.png">a <span class="katex-mathml">m</span></span><span class="katex-html">D</span></span>',
+      ),
+    ).toEqual(['IMG', 'a mD']);
+    expect(
+      text(
+        '<p>a <span class="katex-mathml">m</span><img src="cid:x"><span class="katex-html">D</span> z</p>',
+      ),
+    ).toEqual(['a mD z']);
+  });
+
+  test('what the reader skips is nothing beside a space between blocks', () => {
+    const text = (html: string) =>
+      blocksFromHtml(document, html).map((b) => (b.type === 'image' ? 'IMG' : blockText(b)));
+
+    // Outlook's pictures arrive as `cid:` sources, which the reader cannot
+    // use; the stand-in it keeps for one kept the space beside it at the
+    // paste's edge, which a browser collapses against the block.
+    expect(text('<div> <img src="cid:image001.png"><center>Regards</center></div>')).toEqual([
+      'Regards',
+    ]);
+    expect(text('<div><center>Regards</center><img src="cid:image001.png"> </div>')).toEqual([
+      'Regards',
+    ]);
+    expect(text('<p> <img src="cid:x"><span style="display:block">B</span></p>')).toEqual(['B']);
+    expect(text(' <img src="cid:x"><span style="display:block">B</span>')).toEqual(['B']);
+    // A `<script>` beside the space, and a `<template>` in the source.
+    expect(text('<div> <script></script><center>B</center></div>')).toEqual(['B']);
+    expect(text('<div><center>A</center><script></script> </div>')).toEqual(['A']);
+    expect(text('<blockquote><p></p><template>t</template>  </blockquote>')).toEqual(['']);
+    // An assistive copy, as its stand-in: the space before it is the
+    // title's edge.
+    expect(
+      text(
+        '<details open><summary class="katex-html"> <span class="katex-mathml"></span><summary class="katex-html"></summary></summary></details>',
+      ),
+    ).toEqual(['']);
+    // In a flex or grid container every element is an item, the skipped one
+    // too, and whitespace between items is never drawn: stepping past it
+    // joined two such runs into text.
+    expect(
+      text(
+        '<blockquote><div style="display:grid"><img src="https://x.test/i.png">\n  <script></script> </div></blockquote>',
+      ),
+    ).toEqual(['IMG']);
+    expect(
+      blocksFromHtml(
+        document,
+        '<table><tr><td><div style="display:grid"><hr> <script></script>  </div></td></tr></table>',
+      )[0]!.rows,
+    ).toEqual([[[]]]);
+  });
+
+  test('pretty-printed source reads the same around what the reader skips', () => {
+    const text = (html: string) =>
+      blocksFromHtml(document, html).map((b) =>
+        b.type === 'table' ? JSON.stringify(b.rows) : blockText(b),
+      );
+
+    // A `<style>`, a `<script>` or a comment on a line of its own between two
+    // indented paragraphs: the whitespace either side of it is one run, and
+    // a browser collapses it between the blocks.
+    expect(
+      text('<blockquote>\n  <p>a</p>\n  <script></script>\n  <p>b</p>\n</blockquote>'),
+    ).toEqual(['a\nb']);
+    expect(
+      text('<ul>\n  <li>\n    <p>a</p>\n    <style>x{}</style>\n    <p>b</p>\n  </li>\n</ul>'),
+    ).toEqual(['a\nb']);
+    expect(text('<blockquote>\n  <p>a</p>\n  <!-- c -->\n  <p>b</p>\n</blockquote>')).toEqual([
+      'a\nb',
+    ]);
+    expect(text('<blockquote><p>a</p> <!-- c --></blockquote>')).toEqual(['a']);
+    // One the reader skips that is a block by its own display is still a
+    // block: stepping past it joined the indentation either side into text.
+    expect(
+      text(
+        '<blockquote>\n  <p>a</p>\n  <svg style="display:block"></svg>\n  <p>b</p>\n</blockquote>',
+      ),
+    ).toEqual(['a\nb']);
+    expect(
+      text(
+        '<ul>\n  <li>\n    <p>a</p>\n    <iframe style="display:block"></iframe>\n    <p>b</p>\n  </li>\n</ul>',
+      ),
+    ).toEqual(['a\nb']);
+    expect(
+      text(
+        '<table><tr><td>\n<p>a</p>\n<svg style="display:block"></svg>\n<p>b</p>\n</td></tr></table>',
+      ),
+    ).toEqual([JSON.stringify([[[{ text: 'a\nb' }]]])]);
+    expect(
+      blocksFromHtml(
+        document,
+        '<b><blockquote><object style="display:block"></object> <p></p></blockquote></b>',
+      ).map((b) => b.content),
+    ).toEqual([[]]);
+    // A no-break space is content, not part of the run either side: the
+    // reading is the one without the `<script>`.
+    expect(text('<blockquote><p>a</p> <script></script>&nbsp;</blockquote>')).toEqual(
+      text('<blockquote><p>a</p> &nbsp;</blockquote>'),
+    );
+    expect(text('<blockquote>&nbsp;<script></script> <p>a</p></blockquote>')).toEqual(
+      text('<blockquote>&nbsp; <p>a</p></blockquote>'),
+    );
+    // In a flex or grid container the skipped element is an item, and so a
+    // block: whitespace beside it between items is no text.
+    expect(
+      text('<blockquote><div style="display:grid"><hr> <script></script>b</div></blockquote>'),
+    ).toEqual(['b']);
+    expect(
+      text('<blockquote><div style="display:flex">a<script></script> <hr></div></blockquote>'),
+    ).toEqual(['a']);
+    // Word gaps beside one are untouched.
+    expect(text('a <svg></svg> b')).toEqual(['a b']);
+    expect(text('a<script></script> <b>b</b>')).toEqual(['a b']);
+    // A `<template>` changes nothing, beside a block or a preserved newline.
+    expect(
+      text(
+        '<li>  z <span style="white-space:pre-line"><svg style="display:block"></svg>\n<template>t</template></span>\n  w</li>',
+      ),
+    ).toEqual(
+      text(
+        '<li>  z <span style="white-space:pre-line"><svg style="display:block"></svg>\n</span>\n  w</li>',
+      ),
+    );
+  });
+
+  test('no list a paste can make long is spread into the arguments of one call', () => {
+    // An engine caps a call's arguments (V8 near 120,000, JavaScriptCore at
+    // 65,536): `run.push(...ahead)` threw on a paste of 150,000 comments under
+    // a `<b>`, and the paste did nothing. Read straight from the source because
+    // the shape that shows it costs seconds in happy-dom, which moves each node
+    // in time linear in its siblings; a browser does not. Parsed, not matched
+    // line by line: a line-by-line match missed a spread the formatter put on
+    // a line of its own, and one after an argument holding parentheses
+    // (`splice(Math.min(i, n), 0, ...copies)`). An offender is, exactly:
+    //   - a spread passed to a call or a `new`;
+    //   - a member named `apply`, read by dot or by a literal key, that is
+    //     called or is the object of `.call`, `.bind` or `.apply` -- through
+    //     any parentheses, `as`, `satisfies`, `!` or `<T>` around it, as this
+    //     package writes `(listener as Handler)(payload)`;
+    //   - `Reflect.construct`, read and used the same way;
+    //   - `apply` destructured, in a variable declaration, from `Reflect` or
+    //     from something ending in `.prototype`;
+    // unless it is named here as bounded: a table's head and body, and a choice
+    // of two argument lists. Not seen: a key computed at run time
+    // (`f[name](...)`), an alias (`const ap = Reflect.apply`), `Reflect` spelled
+    // any other way (`globalThis.Reflect`), any other destructuring. This is a
+    // tripwire for the forms this code writes, not a proof that none is left.
+    const bounded = new Set([
+      'view/rich-dom.ts: element.append(...tableSections(doc, block.rows ?? []))',
+      'view/selection.ts: composed?.apply(selection, args)',
+      // A selection's boxes are the one or two lines a caret can be drawn on
+      // (`selectionBoxes`), never a paste's length.
+      'editor.ts: Math.min(...boxes.map((box) => box.top))',
+      'editor.ts: Math.max(...boxes.map((box) => box.bottom))',
+      'editor.ts: Math.min(...boxes.map((box) => box.left))',
+      'editor.ts: Math.max(...boxes.map((box) => box.right))',
+      // `ends` answers a pair.
+      'view/selection.ts: settle(before, after, start, first, false, ...ends(first))',
+      'view/selection.ts: settle(before, after, start, from, false, ...ends(startAt))',
+      'view/selection.ts: settle(before, after, end, to, true, ...ends(endAt))',
+    ]);
+    // Paths, not URLs: under happy-dom `URL` is the DOM's, which `fs` refuses.
+    const root = join(import.meta.dirname, '..');
+    const offenders: string[] = [];
+
+    for (const file of readdirSync(root, { recursive: true }) as string[]) {
+      if (!file.endsWith('.ts') || file.endsWith('.test.ts') || /(^|\/)test-/.test(file)) {
+        continue;
+      }
+
+      const source = ts.createSourceFile(
+        file,
+        readFileSync(join(root, file), 'utf8'),
+        ts.ScriptTarget.Latest,
+        true,
+      );
+      // The member a node names, by dot, by string key or in a destructuring.
+      const member = (node: ts.Node): string | null => {
+        if (ts.isPropertyAccessExpression(node)) {
+          return node.name.text;
+        }
+
+        if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)) {
+          return node.argumentExpression.text;
+        }
+
+        // Taken apart, only from where a function's `apply` lives: a label of
+        // that name is a string (`labels.apply`, a popover's button).
+        if (
+          ts.isBindingElement(node) &&
+          ts.isObjectBindingPattern(node.parent) &&
+          ts.isVariableDeclaration(node.parent.parent) &&
+          /^(Reflect|.*\.prototype)$/.test(node.parent.parent.initializer?.getText(source) ?? '')
+        ) {
+          const key = node.propertyName ?? node.name;
+
+          return ts.isIdentifier(key) || ts.isStringLiteralLike(key) ? key.text : null;
+        }
+
+        return null;
+      };
+      // The expression a member stands as, past the parentheses, casts and
+      // assertions around it, which change nothing about what is called.
+      const outermost = (node: ts.Node): ts.Node => {
+        let at = node;
+
+        while (
+          (ts.isParenthesizedExpression(at.parent) ||
+            ts.isAsExpression(at.parent) ||
+            ts.isSatisfiesExpression(at.parent) ||
+            ts.isNonNullExpression(at.parent) ||
+            ts.isTypeAssertionExpression(at.parent)) &&
+          at.parent.expression === at
+        ) {
+          at = at.parent;
+        }
+
+        return at;
+      };
+      // The call a member makes, where it is called.
+      const callOf = (node: ts.Node): ts.CallExpression | null => {
+        const at = outermost(node);
+
+        return ts.isCallExpression(at.parent) && at.parent.expression === at ? at.parent : null;
+      };
+      // Whether a member expression is used as a function: called, or the
+      // object of a `.call`, `.bind` or `.apply`.
+      const usedAsFunction = (node: ts.Node): boolean => {
+        const at = outermost(node);
+
+        return (
+          ts.isBindingElement(node) ||
+          callOf(node) !== null ||
+          ((ts.isPropertyAccessExpression(at.parent) || ts.isElementAccessExpression(at.parent)) &&
+            at.parent.expression === at &&
+            ['call', 'bind', 'apply'].includes(member(at.parent) ?? ''))
+        );
+      };
+      const visit = (node: ts.Node): void => {
+        const name = member(node);
+        const reflected =
+          name === 'construct' &&
+          (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+          node.expression.getText(source) === 'Reflect';
+        // Reported as the call it makes, where it is one, so the bounded
+        // names read as the code does.
+        const call =
+          ts.isSpreadElement(node) &&
+          (ts.isCallExpression(node.parent) || ts.isNewExpression(node.parent))
+            ? node.parent
+            : (name === 'apply' || reflected) && usedAsFunction(node)
+              ? (callOf(node) ?? node)
+              : null;
+
+        if (call) {
+          const text = `${file}: ${call.getText(source).replace(/\s+/g, ' ')}`;
+          const { line } = source.getLineAndCharacterOfPosition(node.getStart(source));
+
+          if (!bounded.has(text)) {
+            offenders.push(`${text} (line ${line + 1})`);
+          }
+        }
+
+        ts.forEachChild(node, visit);
+      };
+
+      visit(source);
+    }
+
+    expect(offenders).toEqual([]);
+  });
+
+  test('long runs of what draws nothing read in linear time', () => {
+    // Each whitespace text in the run looked past the whole of it both ways.
+    const shapes: ReadonlyArray<(n: number) => string> = [
+      (n) => `<p>a</p>${'<!---->\n'.repeat(n)}<p>b</p>`,
+      (n) => `<p>a</p>${'<script></script> '.repeat(n)}<p>b</p>`,
+      (n) => `a${'<!----> '.repeat(n)}b`,
+      (n) => `<blockquote>${' <!---->'.repeat(n)}</blockquote>`,
+    ];
+
+    for (const shape of shapes) {
+      expect(growth((n) => blocksFromHtml(document, shape(n)), 100)).toBeLessThan(LINEAR);
+    }
+  }, 120_000);
+
+  test('what a read settles about a run of whitespace is forgotten after it', () => {
+    // The editor reads its live editing hosts again on every input: an answer
+    // kept past the read went on describing a tree the user had since edited.
+    const host = document.createElement('div');
+    host.innerHTML = '<p>a</p> <!----> <p>b</p>';
+    expect(richToPlainText(parseRichText(host))).toBe('a\nb');
+    host.lastElementChild!.replaceWith(document.createTextNode('b'));
+    const fresh = document.createElement('div');
+    fresh.innerHTML = '<p>a</p> <!----> b';
+    expect(richToPlainText(parseRichText(host))).toBe(richToPlainText(parseRichText(fresh)));
+  });
+
+  test('a formatting wrapper around pretty-printed blocks reads as without it', () => {
+    const text = (html: string) =>
+      blocksFromHtml(document, html).map((b) =>
+        b.type === 'table'
+          ? JSON.stringify(b.rows?.map((row) => row.map(richToPlainText)))
+          : blockText(b),
+      );
+
+    // A comment or a `<script>` started the run a `<b>` shell went around, and
+    // the indentation either side of the shell was read as text.
+    for (const inner of ['<!-- c -->', '<script></script>', '<style>x{}</style>']) {
+      expect(
+        text(`<b><blockquote>\n  <p>a</p>\n  ${inner}\n  <p>b</p>\n</blockquote></b>`),
+      ).toEqual(text(`<blockquote>\n  <p>a</p>\n  ${inner}\n  <p>b</p>\n</blockquote>`));
+    }
+    expect(text('<b><ul>\n  <li><p>a</p>\n  <!-- c -->\n  <p>b</p></li>\n</ul></b>')).toEqual([
+      'a\nb',
+    ]);
+    expect(
+      text('<b><table><tr><td>\n<p>a</p>\n<!-- c -->\n<p>b</p>\n</td></tr></table></b>'),
+    ).toEqual([JSON.stringify([['a\nb']])]);
+    expect(text('<b><blockquote>\n  <p>a</p>\n  <!-- c -->\n</blockquote></b>')).toEqual(['a']);
+    // A run that goes on to content keeps all of it: the space before the
+    // content is formatted as it is without what draws nothing beside it, and
+    // a no-break space is content.
+    const runs = (html: string) => blocksFromHtml(document, html).map((b) => b.content);
+    expect(
+      runs('<a href="https://x.test/"><noscript></noscript>  <script></script>T<hr></a>'),
+    ).toEqual(runs('<a href="https://x.test/">  T<hr></a>'));
+    expect(runs('<b><blockquote><p>a</p> <!-- c --> <i>x</i></blockquote></b>')).toEqual(
+      runs('<b><blockquote><p>a</p>  <i>x</i></blockquote></b>'),
+    );
+    expect(runs('<b><script></script> <!-- c -->x<hr></b>')).toEqual(runs('<b> x<hr></b>'));
+    // What waited before a block is never carried past it.
+    expect(text('<b><!-- c --> <p>x</p>y</b>')).toEqual(['x', 'y']);
+    expect(runs('<b><script></script>&nbsp;<hr></b>')).toEqual(runs('<b>&nbsp;<hr></b>'));
+  });
+
+  test('what the reader skips keeps its neighbours apart on every path', () => {
+    // Where it stands, the first `katex-mathml` is no copy: the element after
+    // it is the second, not the drawing. A path that dropped the second and
+    // put the rest together again made the first the copy, and "extra" went.
+    const katex =
+      '<span class="katex-mathml">extra</span><span class="katex-mathml">m</span><span class="katex-html">h</span>';
+    const noscript =
+      '<span class="katex-mathml">extra</span><noscript>n</noscript><span class="katex-html">h</span>';
+    const pic = '<img src="https://e.x/a.png">';
+    const text = (html: string) => blocksFromHtml(document, html).map(blockText).join('|');
+
+    expect(text(`<p>q${katex}</p>`)).toBe('qextrah');
+    expect(text(`q${katex}`)).toBe('qextrah');
+    expect(text(`q${noscript}`)).toBe('qextrah');
+    expect(text(`q<span>${katex}</span>`)).toBe('qextrah');
+    expect(text(`<p>q${katex}${pic} z</p>`)).toBe('qextrah||z');
+    expect(text(`<span>q${katex}${pic} z</span>`)).toBe('qextrah||z');
+    expect(text(`<ul><li>a</li>${katex}</ul>`)).toBe('a|extrah');
+    expect(text(`<ul><li>a</li>${noscript}</ul>`)).toBe('a|extrah');
+    expect(
+      text(
+        '<ul><li>a</li><div class="katex-mathml">extra</div><span class="katex-mathml">m</span><span class="katex-html">h</span></ul>',
+      ),
+    ).toBe('a|extra|h');
+    expect(text(`<details open><summary>T</summary>${katex}</details>`)).toBe('T|extrah');
+    expect(text(`<details open><span><summary>T</summary></span>${katex}</details>`)).toBe(
+      'T|extrah',
+    );
+    // The summary the body leaves out keeps its place too, direct or wrapped,
+    // nested or not.
+    expect(
+      text(
+        '<details open><span><summary>O</summary></span><details open><div><span class="katex-mathml">e</span><summary>T</summary><span class="katex-html">h</span></div></details></details>',
+      ),
+    ).toBe('O|T|eh');
+    expect(
+      text(
+        '<details open><div><span class="katex-mathml">e</span><summary>T</summary><span class="katex-html">h</span></div></details>',
+      ),
+    ).toBe('T|eh');
+    expect(
+      text(
+        '<details open><span class="katex-mathml">e</span><summary>T</summary><span class="katex-html">h</span></details>',
+      ),
+    ).toBe('T|eh');
+  });
+
+  test('a copy moved before it is read -- loose list content, a formatting shell -- is still a copy', () => {
+    const copy = '<span class="MJX_Assistive_MathML"><math><mi>x</mi></math></span>';
+    const text = (html: string) =>
+      read(html)
+        .map((block) => richToPlainText(block[2] as RichText))
+        .join('|');
+
+    expect(text(`<ol class="MathJax"><nobr><span>y</span></nobr>${copy}</ol>`)).toBe('y');
+    expect(
+      text(`<b><span class="MathJax"><nobr><span>y</span></nobr>${copy}<div>z</div></span></b>`),
+    ).toBe('y|z');
+  });
+
+  test('a long class beside many copies is split once, not once a copy', () => {
+    // Both grow with the input -- the class's length and the copies beside
+    // it -- since the cost was their product.
+    for (const frame of ['', ' MathJax_SVG']) {
+      expect(
+        growth(
+          (n) =>
+            blocksFromHtml(
+              document,
+              `<p><span class="${'c '.repeat(n)}${frame}">${'<span class="MJX_Assistive_MathML"></span>'.repeat(n)}</span></p>`,
+            ),
+          150,
+        ),
+      ).toBeLessThan(LINEAR);
+    }
+  }, 60_000);
+
+  test('a picture the reader never takes makes no paragraph after it a block', () => {
+    for (const hidden of [
+      `<noscript>${img}</noscript>`,
+      `<span><noscript>${img}</noscript></span>`,
+      '<span><img src=""></span>',
+    ]) {
+      expect(read(`<ol><li><span>T</span>${hidden}<p>w1</p><p>w2</p></li></ol>`)).toEqual([
+        ['numbered_list', 0, [{ text: 'T\nw1\nw2' }]],
+      ]);
+    }
+  });
+
+  test("MathJax's hidden MathML copy is read only where nothing else draws the formula", () => {
+    const copy = '<span class="MJX_Assistive_MathML"><math><mi>x</mi></math></span>';
+    // Drawn in text (HTML-CSS): the copy is the duplicate, and skipped.
+    const html = `<span class="MathJax"><span>x</span>${copy}</span>`;
+    // Drawn as SVG: no text a reader keeps, so the copy is the formula's only
+    // reading -- left out, `a <svg> b` read "a  b".
+    const svg = `<span class="MathJax_SVG"><svg><text>s</text></svg>${copy}</span>`;
+
+    expect(read(`<p>a ${html} b</p>`)[0]?.[2]).toEqual([{ text: 'a x b' }]);
+    expect(read(`<p>a ${svg} b</p>`)[0]?.[2]).toEqual([{ text: 'a x b' }]);
+    // Either way the formula's reading is text beside the equation before it.
+    expect(li(`Text<br>${eq}${html}`)).toHaveLength(1);
+    expect(li(`Text<br>${eq}${svg}`)).toHaveLength(1);
+  });
+
+  // Round 5's accepted change: a picture after the equation is a block of
+  // the item, and the equation goes before it.
+  test('a picture after the equation leaves it apart', () => {
+    for (const picture of [img, linked]) {
+      expect(li(`Text<br>${eq}${picture}`)).toEqual([item({ text: 'Text' }), math('E'), image]);
+    }
+
+    // A line break beside the picture changes nothing of the order.
+    for (const picture of [`${img}<br>`, `<br>${linked}`]) {
+      expect(li(`Text<br>${eq}${picture}`).slice(1)).toEqual([math('E'), image]);
+    }
+  });
+
+  // Shapes the differential fuzzer found moving an equation in round 5.
+  test('fuzzer-found items keep their order', () => {
+    expect(li(`<span>w0<br></span>${eq}<figure>${img}</figure><div>w2</div>`)).toEqual([
+      item({ text: 'w0\n' }, m('E'), { text: '\nw2' }),
+      image,
+    ]);
+    expect(li(`${eq}<ul><li>w0</li></ul><p>w1</p>`)).toEqual([
+      item(m('E')),
+      ['bulleted_list', 1, [{ text: 'w0' }]],
+      ['paragraph', 1, [{ text: 'w1' }]],
+    ]);
+    expect(li(`w0<br>${eq}<table><tr><td>w1</td></tr></table><b>w2</b>`)).toEqual([
+      item({ text: 'w0\n' }, m('E'), { text: '\n' }, { text: 'w2', marks: ['bold'] }),
+      ['table', 1, []],
+    ]);
+    expect(li(`<p>w0</p>${eq}<hr>${eqF}<pre>w1</pre>`)).toEqual([
+      item({ text: 'w0' }),
+      math('E'),
+      ['divider', 1, []],
+      math('F'),
+      ['code', 1, [{ text: 'w1' }]],
+    ]);
+  });
+
+  // Each child of the item is looked into once, last to first, and each
+  // equation's line is walked back to the block before it.
+  test('deciding is linear in the item', () => {
+    const shapes = [
+      (n: number) => `<ul><li>Text<br>${`${eq}${img}`.repeat(n)}</li></ul>`,
+      (n: number) =>
+        `<ul><li>Text<br>${`${eq}${'<b> </b>'.repeat(4)}${linked}`.repeat(n)}tail</li></ul>`,
+      (n: number) => `<ul><li>${eq.repeat(n)}<p>More</p></li></ul>`,
+      (n: number) => `<ul><li>Text<br>${eq}<span>${'<video></video>'.repeat(n)}</span></li></ul>`,
+    ];
+
+    for (const shape of shapes) {
+      expect(
+        growth((n) => {
+          blocksFromHtml(document, shape(n));
+        }, 25),
+      ).toBeLessThan(LINEAR);
+    }
+  }, 60_000);
 });

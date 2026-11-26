@@ -20,9 +20,12 @@ import {
   MATH_BLOCK_ATTR,
   canonicalizeMath,
   drawMath,
-  isUnannotatedKatexMathml,
+  isAssistiveMathCopy,
+  keepDrawingClass,
   mathSourceOf,
+  readingMath,
 } from './math.ts';
+import { SKIP_TAGS } from './skipped.ts';
 
 /**
  * The bridge between runs and the DOM.
@@ -42,26 +45,6 @@ const MARK_ELEMENTS: ReadonlyArray<readonly [Mark, string]> = [
   ['strikethrough', 's'],
   ['underline', 'u'],
 ];
-
-/**
- * Elements whose contents are not document text.
- *
- * A pasted `<script>` never executes here — it is parsed into an inert
- * template — but its source would otherwise be read out as visible text.
- */
-const SKIP_TAGS = new Set([
-  'SCRIPT',
-  'STYLE',
-  'NOSCRIPT',
-  'TEMPLATE',
-  'HEAD',
-  'TITLE',
-  'META',
-  'LINK',
-  'OBJECT',
-  'IFRAME',
-  'SVG',
-]);
 
 /**
  * Elements that end a line.
@@ -287,10 +270,7 @@ function renderMathRun(doc: Document, tex: string, options: RenderOptions): Node
 
   span.className = 'neditor-math';
   span.contentEditable = 'false';
-
-  if (!drawMath(span, tex, false, options.renderMath)) {
-    span.dataset.neditorMathSource = '';
-  }
+  drawMath(span, tex, false, options.renderMath);
 
   return span;
 }
@@ -376,7 +356,24 @@ export function renderRichText(
   //
   // It is filler, not content, and `parseRichText` already reads a trailing
   // <br> back as nothing, so the newline is never counted twice on the way in.
-  if (last?.text.endsWith('\n')) {
+  //
+  // A formula at the very end needs the same filler for another reason: an
+  // uneditable element with nothing after it leaves no text position past it,
+  // so Firefox dropped what was typed after the last formula of a block and
+  // WebKit put it in front of the formula. The <br> is a position after it.
+  // Only in the editor; the clipboard has no caret to place.
+  //
+  // WebKit needs more than the <br>: it settles a click past the formula, and
+  // End, on the position before it, which a <br> does not change. An empty
+  // image after the formula is a place it will put the caret -- ProseMirror's
+  // separator, for the same bug. It is no text: the parser reads nothing
+  // from it, and `view/selection.ts` counts it as no offset.
+  if (options.editing && isMathRun(last)) {
+    const separator = doc.createElement('img');
+    separator.className = 'neditor-math__separator';
+    separator.alt = '';
+    fragment.append(separator, doc.createElement('br'));
+  } else if (last?.text.endsWith('\n')) {
     fragment.append(doc.createElement('br'));
   }
 
@@ -440,19 +437,21 @@ export function richTextToHtml(
       continue;
     }
 
-    const parts: Node[] = [];
+    // One fragment, not a spread: a copy can hold more lines than the engine
+    // takes arguments in one call.
+    const parts = doc.createDocumentFragment();
 
     lines.forEach((line, index) => {
       if (index > 0) {
-        parts.push(doc.createElement('br'));
+        parts.append(doc.createElement('br'));
       }
 
       if (line.length > 0) {
-        parts.push(doc.createTextNode(line));
+        parts.append(doc.createTextNode(line));
       }
     });
 
-    text.replaceWith(...parts);
+    text.replaceWith(parts);
   }
 
   return host.outerHTML;
@@ -497,10 +496,23 @@ function hasContentAfter(node: Node, root: Node, skip?: SkipPredicate): boolean 
     acceptNode: (candidate) => {
       const tag = tagNameOf(candidate);
 
-      return SKIP_TAGS.has(tag) ||
-        (candidate.nodeType === ELEMENT_NODE && skip?.(candidate as Element, tag) === true)
-        ? FILTER_REJECT
-        : FILTER_ACCEPT;
+      // An assistive MathML copy too, as the walk skips one: counted here, a
+      // `<br>` followed only by a copy kept its newline. And a formula is never
+      // entered, as the walk never enters one: one with TeX is content (below),
+      // one with none is nothing -- read for its glyphs, it kept a stray line
+      // break, and nested ones searched their subtrees once a level.
+      if (
+        SKIP_TAGS.has(tag) ||
+        (candidate.nodeType === ELEMENT_NODE &&
+          (skip?.(candidate as Element, tag) === true || isAssistiveMathCopy(candidate as Element)))
+      ) {
+        return FILTER_REJECT;
+      }
+
+      const formula =
+        candidate.nodeType === ELEMENT_NODE ? mathSourceOf(candidate as Element) : null;
+
+      return formula !== null && formula.tex.trim().length === 0 ? FILTER_REJECT : FILTER_ACCEPT;
     },
   });
 
@@ -540,6 +552,17 @@ function hasContentAfter(node: Node, root: Node, skip?: SkipPredicate): boolean 
     ) {
       return true;
     }
+
+    // A formula is content, as the walk reads it -- an atom it never looks
+    // inside. Judged by the text inside it instead, one that draws none
+    // (`\quad`, `\rule`) read the line break before it as filler, once its
+    // MathML copy was no longer taken for text.
+    if (
+      current.nodeType === ELEMENT_NODE &&
+      (mathSourceOf(current as Element)?.tex.trim().length ?? 0) > 0
+    ) {
+      return true;
+    }
   }
 
   return false;
@@ -560,11 +583,85 @@ function isBetweenBlocks(node: Node): boolean {
   const isBlock = (sibling: Node | null): boolean =>
     sibling !== null && sibling.nodeType === ELEMENT_NODE && startsLine(sibling as Element);
   const edge = (sibling: Node | null): boolean => sibling === null || isBlock(sibling);
-  const previous = node.previousSibling;
-  const next = node.nextSibling;
+  const [previous, next] = runEnds(node);
 
   return (isBlock(previous) || isBlock(next)) && edge(previous) && edge(next);
 }
+
+/**
+ * Whether a node draws nothing in a line: a comment, or an element the reader
+ * skips that does not start a line of its own. A `<script>`, an assistive copy,
+ * the `<template>` a run keeps in the place of a node it left out -- but not a
+ * block by its own display (`<svg style="display:block">`), nor any element of
+ * a flex or grid container, which is an item and so a block (`startsLine`).
+ */
+function drawsNothingInLine(node: Node): boolean {
+  return (
+    node.nodeType === COMMENT_NODE ||
+    (node.nodeType === ELEMENT_NODE && readerSkips(node as Element) && !startsLine(node as Element))
+  );
+}
+
+/** Whitespace-only text, as `walk` asks: a no-break space is content. */
+function isWhitespaceText(node: Node): boolean {
+  return node.nodeType === TEXT_NODE && !/[^ \t\n\r\f]/.test(node.nodeValue ?? '');
+}
+
+/**
+ * The siblings either side of the run of whitespace `node` stands in: past
+ * whatever draws nothing in a line, and past the whitespace on its far side.
+ * What the reader skips is nothing beside a space: taken for a neighbour, the
+ * stand-in for an unusable picture kept a space beside a block that a browser
+ * collapses (a paste's edge read ` Regards`), and a `<style>` on a line of its
+ * own between two indented paragraphs left a blank line and the indentation as
+ * text. A comment is nothing either (`<!--StartFragment-->` is in every Windows
+ * clipboard). The runs either side of one of them collapse into one.
+ *
+ * Settled once a run, for the length of a read (`readRichText`): every
+ * whitespace text in a run of thousands of comments scanned the whole of it
+ * both ways, quadratic in its length.
+ */
+function runEnds(node: Node): readonly [Node | null, Node | null] {
+  const known = settledRuns?.get(node);
+
+  if (known) {
+    return known;
+  }
+
+  const passable = (sibling: Node): boolean =>
+    drawsNothingInLine(sibling) || isWhitespaceText(sibling);
+  let previous: Node | null = node.previousSibling;
+  let next: Node | null = node.nextSibling;
+
+  while (previous !== null && passable(previous)) {
+    previous = previous.previousSibling;
+  }
+
+  while (next !== null && passable(next)) {
+    next = next.nextSibling;
+  }
+
+  const ends = [previous, next] as const;
+
+  if (settledRuns) {
+    const stop = next;
+
+    for (
+      let at: Node | null = previous ? previous.nextSibling : (node.parentNode?.firstChild ?? node);
+      at && at !== stop;
+      at = at.nextSibling
+    ) {
+      if (isWhitespaceText(at)) {
+        settledRuns.set(at, ends);
+      }
+    }
+  }
+
+  return ends;
+}
+
+/** `runEnds`' answers for the read under way; see `readRichText`. */
+let settledRuns: WeakMap<Node, readonly [Node | null, Node | null]> | null = null;
 
 /**
  * Breaks that only stand if text follows them: `parseRichText` drops one with
@@ -726,9 +823,22 @@ let legacyOwnHtml = false;
  * and the salvage step blew up instead. A TreeWalker steps, so it does not.
  */
 function subtreeText(node: Node): string {
+  // The root is judged as its descendants are: a remainder that is a
+  // `<script>` read its source into the document, and a text node read as
+  // nothing.
+  if (node.nodeType === TEXT_NODE) {
+    return node.nodeValue ?? '';
+  }
+
+  if (node.nodeType === ELEMENT_NODE && readsAsNothing(node as Element)) {
+    return '';
+  }
+
   const walker = node.ownerDocument?.createTreeWalker(node, SHOW_TEXT | SHOW_ELEMENT, {
+    // An assistive MathML copy too, as the walk skips one: read here, a
+    // formula with no TeX in a `<pre>`, or past the nesting bound, read twice.
     acceptNode: (candidate) =>
-      SKIP_TAGS.has(tagNameOf(candidate))
+      candidate.nodeType === ELEMENT_NODE && readsAsNothing(candidate as Element)
         ? FILTER_REJECT
         : candidate.nodeType === TEXT_NODE
           ? FILTER_ACCEPT
@@ -794,7 +904,7 @@ function codeText(root: Element): string {
     acceptNode: (candidate) => {
       const tag = tagNameOf(candidate);
 
-      return SKIP_TAGS.has(tag)
+      return candidate.nodeType === ELEMENT_NODE && readsAsNothing(candidate as Element)
         ? FILTER_REJECT
         : candidate.nodeType === TEXT_NODE || tag === 'BR'
           ? FILTER_ACCEPT
@@ -871,7 +981,7 @@ function codeText(root: Element): string {
  * read as a `<br>` and stand (R4-FMT-6c).
  */
 function sourceWhitespace(raw: string, mode: WhiteSpace, converted: boolean): string {
-  const value = raw.replace(/[\uFDD0-\uFDD5]/g, (char) => LITERAL + char);
+  const value = raw.replace(/[\uFDD0-\uFDD6]/g, (char) => LITERAL + char);
   const laid = (
     mode === 'pre'
       ? value.replace(/[ \t\n]/g, (char) => PRESERVED[char]!)
@@ -988,23 +1098,7 @@ function walk(
     const element = child as Element;
     const tag = tagNameOf(element);
 
-    // A formula is its TeX. Whatever draws it -- the editor's renderer, KaTeX
-    // on the page it was copied from -- is never read: that subtree holds the
-    // formula twice over (MathML for assistive technology, HTML for the eye)
-    // and none of it is text anyone typed. A display equation met inside a
-    // line is read as a formula in that line.
-    const math = mathSourceOf(element);
-
-    if (math) {
-      if (math.tex.length > 0) {
-        out.push({ text: MATH_ATOM, math: math.tex });
-        solidTexts += 1;
-      }
-
-      continue;
-    }
-
-    if (SKIP_TAGS.has(tag) || isUnannotatedKatexMathml(element)) {
+    if (SKIP_TAGS.has(tag) || isAssistiveMathCopy(element)) {
       continue;
     }
 
@@ -1021,6 +1115,47 @@ function walk(
         // An inline one -- an image link -- keeps the space its whitespace
         // made in the sentence, or the words either side of it join.
         wordGap(out, marks, link);
+      }
+
+      continue;
+    }
+
+    // A formula is its TeX. Whatever draws it -- the editor's renderer, KaTeX
+    // on the page it was copied from -- is never read: that subtree holds the
+    // formula twice over (MathML for assistive technology, HTML for the eye)
+    // and none of it is text anyone typed. A display equation met inside a
+    // line is read as a formula in that line.
+    const math = mathSourceOf(element);
+
+    if (math) {
+      // A displayed one met here stands on a line of its own, as it is drawn:
+      // the line breaks the block it was would have made are kept, so
+      // `Consider <div class="math">…</div> where k` keeps three lines.
+      if (math.display) {
+        // While a browser's whitespace is collapsed, source whitespace alone
+        // before it is no line to end -- except the paste's edge space,
+        // which `readBlockText` keeps, and whose line this then ends
+        // ({@link EDGE_LINE_END}): kept beside it, the space drew the
+        // equation inline.
+        if (collapsingSource && out.length > 0 && lastSolidRun(out) === undefined) {
+          const run = { text: EDGE_LINE_END, marks: [...marks], link };
+
+          DEFERRED_BREAKS.add(run);
+          out.push(run);
+        } else {
+          breakLine(out, marks, link, true);
+        }
+      }
+
+      // Whitespace TeX is none: normalised away as a run, it must not count as
+      // content anywhere either.
+      if (math.tex.trim().length > 0) {
+        out.push({ text: MATH_ATOM, math: math.tex });
+        solidTexts += 1;
+      }
+
+      if (math.display) {
+        breakLine(out, marks, link, true);
       }
 
       continue;
@@ -1159,8 +1294,28 @@ function wordGap(out: TextRun[], marks: Mark[], link: string | undefined): void 
 
 /** Reads a rendered (or pasted) subtree back into canonical runs. */
 export function parseRichText(root: Node, skip?: SkipPredicate): RichText {
+  return readRichText(root, [], undefined, skip);
+}
+
+/** `parseRichText`, as if `root`'s contents stood inside the given formatting. */
+function readRichText(
+  root: Node,
+  marks: Mark[],
+  link: string | undefined,
+  skip?: SkipPredicate,
+): RichText {
   const out: TextRun[] = [];
-  walk(root, [], undefined, root, out, skip);
+  // A read sees one tree: the readers edit theirs only between reads.
+  const outer = settledRuns;
+  settledRuns = new WeakMap();
+
+  try {
+    readingMath(() => {
+      walk(root, marks, link, root, out, skip);
+    });
+  } finally {
+    settledRuns = outer;
+  }
 
   // Only the deferred breaks after the last text can lack text after them.
   // Dropped in one pass: a splice each was quadratic in how many there were.
@@ -1632,9 +1787,9 @@ const STRUCTURE_TAGS = new Set([
  * what `pushFormattingInward` exists to provide.
  *
  * `<details>` is here for a different reason with the same answer: its body is
- * re-visited as a copy of itself with the summary taken out, so a wrapper
- * inside is reached again there and pushed inward then — and the summary, read
- * from the original, never sees it at all.
+ * visited again once the summary is taken out, so a wrapper inside is reached
+ * there and pushed inward then — and the summary, read whole first, never sees
+ * it at all.
  *
  * The elements the visitor descends *through* — `<div>`, `<section>`, a
  * `<figure>` that is not one image (`isImageFigure`) — are deliberately
@@ -1673,22 +1828,30 @@ const SEALED_TAGS = new Set([
  * this file's back. The moves made while distributing formatting keep the
  * answers true as well: a run only ever moves into a fresh shell beside it,
  * which adds no element any of the questions looks for and reorders nothing.
- * The one removal, {@link detachSummary}, can falsify answers, and forgets the
- * ones it can.
+ * The one removal, {@link detachSummary} -- `visitDetails` taking a wrapped
+ * summary out of its `<details>` -- can falsify answers, and forgets the ones
+ * it can, from the summary up to the `<details>`; the elements above the
+ * `<details>` have been read by then, and keep their answers.
  *
  * A `SKIP_TAGS` element is never matched and never entered, exactly as the
  * walker rejects it, and one asked directly holds nothing: Chromium and WebKit
  * parse a `<noscript>` in the inert paste document into elements, and the
  * image, summary or list a query found in one was read as content.
  *
+ * @param prune What the search neither matches nor enters (`readerSkips`). Its
+ * verdict depends on the element and, for an assistive copy, on the frame it
+ * stands in: a run moving into a shell never makes a copy of a non-copy or a
+ * frame of a non-frame, and `cloneDeep` drops the copies it judges before
+ * anything is distributed.
  * @param enters Whether the search goes below a child that is not itself a
- * match. Every call sharing one `seen` map must pass the same predicate, since
- * the memo records answers to that search and no other.
+ * match. Every call sharing one `seen` map must pass the same predicates,
+ * since the memo records answers to that search and no other.
  */
 function firstDescendant(
   element: Element,
   matches: (candidate: Element) => boolean,
   seen: WeakMap<Element, Element | null>,
+  prune?: (candidate: Element) => boolean,
   enters: (candidate: Element) => boolean = () => true,
 ): Element | null {
   if (SKIP_TAGS.has(tagNameOf(element))) {
@@ -1737,7 +1900,8 @@ function firstDescendant(
 
     frame.index += 1;
 
-    if (SKIP_TAGS.has(tagNameOf(child))) {
+    // Neither matched nor entered: what the reader never takes.
+    if (SKIP_TAGS.has(tagNameOf(child)) || prune?.(child) === true) {
       continue;
     }
 
@@ -1764,22 +1928,52 @@ const BLOCK_LEVEL_DESCENDANTS = new WeakMap<Element, Element | null>();
 const IMAGE_DESCENDANTS = new WeakMap<Element, Element | null>();
 
 function containsBlockLevel(element: Element): boolean {
+  // Asked of a skipped element itself, too: the prune only reaches its
+  // children, and a `<noscript>` holding a `<div>` split a bold run around it.
+  if (readerSkips(element)) {
+    return false;
+  }
+
   return (
     firstDescendant(
       element,
       (candidate) => BLOCK_LEVEL_TAGS.has(tagNameOf(candidate)),
       BLOCK_LEVEL_DESCENDANTS,
+      readerSkips,
     ) !== null
   );
 }
 
 /**
- * The first `<img>` in document order, remembered per element. For the
- * picture a `<figure>` shows, which may come after its caption, ask
- * `pictureOf`.
+ * The first picture the reader could take, in document order, remembered per
+ * element -- never one inside what it skips: a `<noscript>` fallback, or an
+ * assistive MathML copy. Found there, a figure took that picture for its own
+ * and lost the one it showed. For the picture a `<figure>` shows, which may
+ * come after its caption, ask `pictureOf`.
  */
 function firstImage(element: Element): Element | null {
-  return firstDescendant(element, (candidate) => tagNameOf(candidate) === 'IMG', IMAGE_DESCENDANTS);
+  return firstDescendant(
+    element,
+    (candidate) => tagNameOf(candidate) === 'IMG',
+    IMAGE_DESCENDANTS,
+    readerSkips,
+  );
+}
+
+/** What the reader takes nothing of: `SKIP_TAGS`, and an assistive copy it skips. */
+function readerSkips(element: Element): boolean {
+  return SKIP_TAGS.has(tagNameOf(element)) || isAssistiveMathCopy(element);
+}
+
+/**
+ * `readerSkips`, and a formula with no TeX, which the reader drops: the
+ * canonical span's `$$` text is no text of the reader's. (A formula with TeX
+ * is entered and its `$TeX$` read as the text it stands for.)
+ */
+function readsAsNothing(element: Element): boolean {
+  const tex = element.getAttribute(MATH_ATTR) ?? element.getAttribute(MATH_BLOCK_ATTR);
+
+  return readerSkips(element) || (tex !== null && tex.trim().length === 0);
 }
 
 /**
@@ -1811,7 +2005,12 @@ function pictureOf(element: Element): Element | null {
   const caption = ownCaption(element);
 
   for (const child of element.children) {
-    const found = child === caption ? null : tagNameOf(child) === 'IMG' ? child : firstImage(child);
+    const found =
+      child === caption || readerSkips(child)
+        ? null
+        : tagNameOf(child) === 'IMG'
+          ? child
+          : firstImage(child);
 
     if (found) {
       return found;
@@ -1836,13 +2035,15 @@ const SUMMARY_DESCENDANTS = new WeakMap<Element, Element | null>();
  * over one, made every level search the whole subtree under it -- or in a
  * nested `<details>`, whose title the outer toggle then took while the inner
  * one was left with none. Remembered per element, a chain of toggles costs one
- * walk, and the walk enters neither.
+ * walk, and the walk enters neither -- nor an `<object>` fallback or an
+ * assistive math copy, which the reader never takes either (`readerSkips`).
  */
 function firstSummary(element: Element): Element | null {
   return firstDescendant(
     element,
     (candidate) => tagNameOf(candidate) === 'SUMMARY',
     SUMMARY_DESCENDANTS,
+    readerSkips,
     (candidate) => tagNameOf(candidate) !== 'DETAILS',
   );
 }
@@ -2013,8 +2214,9 @@ function sealsFormatting(element: Element, tag: string): boolean {
   // an inline wrapper happened to reach it first. `FIGURE` already carried this
   // qualification; these two needed the same one.
   // A `<summary>` is not among them, despite holding blocks the same way: it is
-  // never reached by `visitBlocks` at all, because `visitDetails` skips it, or
-  // takes it out of the tree, and reads it whole with `parseRichText`. Unsealing it
+  // never reached by `visitBlocks` at all, because `visitDetails` reads it whole
+  // (`titleOf`) and skips it, or takes it out of the tree, leaving it out of the
+  // body. Unsealing it
   // split a toggle's title into marked / plain / marked around its own
   // indentation — the discontinuity the seal exists to prevent.
   if (tag === 'FIGCAPTION') {
@@ -2135,6 +2337,7 @@ function holdsDisplayBlock(element: Element): boolean {
       element,
       (candidate) => DISPLAY_BLOCK_TAGS.has(tagNameOf(candidate)),
       DISPLAY_BLOCK_DESCENDANTS,
+      readerSkips,
     ) !== null
   );
 }
@@ -2274,8 +2477,36 @@ function pushFormattingInward(doc: Document, wrapper: Element): DocumentFragment
 
   // Copied without recursion: the depth is the pasted document's to choose,
   // and a list's wrapped items reach this once per wrapper.
-  fragment.append(...[...(cloneDeep(wrapper) as Element).childNodes]);
-  distributeFormatting(doc, fragment, format, false);
+  const copy = cloneDeep(wrapper, doc) as Element;
+
+  // Taken out of the wrapper, the copy no longer inherits its `white-space`,
+  // or that of anything around it (`a  b` in a `pre-wrap` block read `a b`),
+  // nor the flex or grid layout that made each child of the wrapper a block of
+  // its own (`a` and `x` ran together). Both go with it, in a holder that adds
+  // no formatting, and the formatting is distributed inside it, where each
+  // child is still an item. (The paste's edges go with every copy.)
+  const mode = whiteSpaceOf(wrapper);
+  const display = displayOf(wrapper);
+  const style = [
+    mode === 'normal' ? '' : `white-space: ${mode === 'pre' ? 'pre-wrap' : 'pre-line'}`,
+    display.items ? `display: ${display.outer === 'inline' ? 'inline-flex' : 'flex'}` : '',
+  ].filter((part) => part.length > 0);
+  let parent: ParentNode = fragment;
+
+  if (style.length > 0) {
+    const holder = doc.createElement('span');
+
+    holder.setAttribute('style', style.join('; '));
+    fragment.append(holder);
+    parent = holder;
+  }
+
+  // One at a time: spread into one call, a wrapper of a hundred thousand
+  // children passed the engine's limit on arguments and the paste threw.
+  for (const child of [...copy.childNodes]) {
+    parent.appendChild(child);
+  }
+  distributeFormatting(doc, parent as Node, format, false);
 
   return fragment;
 }
@@ -2366,6 +2597,8 @@ function distributeFormatting(
 ): void {
   /** The inline nodes waiting for a copy of the formatting around them. */
   let run: Node[] = [];
+  /** What came before the run started: see where it is filled. */
+  let ahead: Node[] = [];
 
   // One copy around the whole run, not one per node: a space between two
   // elements would read as separating blocks once it had a copy of its own,
@@ -2407,6 +2640,20 @@ function distributeFormatting(
     for (const node of nodes) {
       shell.inner.append(node);
     }
+
+    // The shell stands where its run stood, at the paste's edges too: read as
+    // the run, it decides whether a space at an edge stays.
+    for (const edge of [pasteFirst, pasteLast]) {
+      if (nodes.some((node) => edge.has(node))) {
+        for (let at: Node | null = shell.inner; at; at = at.parentNode) {
+          edge.add(at);
+
+          if (at === shell.outer) {
+            break;
+          }
+        }
+      }
+    }
   };
 
   for (const child of [...parent.childNodes]) {
@@ -2415,6 +2662,7 @@ function distributeFormatting(
 
     if (element && (STRUCTURE_TAGS.has(tag) || containsBlockLevel(element))) {
       wrapRun(startsBlock(element, tag));
+      ahead = [];
 
       // A wrapper of its own hands its formatting to the chain here and is
       // marked as spent — unless the walk is sealed, where it is read where it
@@ -2438,10 +2686,28 @@ function distributeFormatting(
     }
 
     // Indentation between two blocks joins a run already under way, but never
-    // starts one — on its own it is source formatting, not content.
-    if (run.length === 0 && isSourceWhitespace(child)) {
+    // starts one — on its own it is source formatting, not content. Nor does
+    // what draws nothing in a line: they wait, and what comes next decides.
+    // Text takes them into its run, as without what draws nothing the
+    // whitespace would be part of that text; anything else leaves them where
+    // they are, as it leaves whitespace standing before it. Put in a shell of
+    // their own, a comment on a line of its own between two indented blocks
+    // and the indentation after it cut the indentation either side off from
+    // the blocks, and both were read as text.
+    if (run.length === 0 && (isSourceWhitespace(child) || drawsNothingInLine(child))) {
+      ahead.push(child);
       continue;
     }
+
+    if (run.length === 0 && child.nodeType === TEXT_NODE) {
+      // Not spread into one call: a hundred thousand comments waiting before
+      // the text passed the engine's limit on arguments, and the paste threw.
+      for (const node of ahead) {
+        run.push(node);
+      }
+    }
+
+    ahead = [];
 
     // A flex or grid item takes a copy of its own: one copy around them all
     // took them out of their container, and they ran together.
@@ -2500,7 +2766,7 @@ function findWithin(
   for (let element = stack.pop(); element; element = stack.pop()) {
     const tag = tagNameOf(element);
 
-    if (SKIP_TAGS.has(tag) || skip(element, tag)) {
+    if (SKIP_TAGS.has(tag) || skip(element, tag) || isAssistiveMathCopy(element)) {
       continue;
     }
 
@@ -2516,16 +2782,75 @@ function findWithin(
   return null;
 }
 
-/** A deep copy made without recursion, for the same reason. */
-function cloneDeep(node: Node): Node {
-  const copy = node.cloneNode(false);
+/**
+ * What a reader puts where it leaves a node out of a sequence it puts together
+ * again: an empty `<template>`, which every reader skips. Without it the nodes
+ * on either side became neighbours, and a KaTeX `katex-mathml` that stood
+ * before a skipped one -- no copy where it stood -- was taken for the copy of
+ * the drawing that now came next, and its text was lost. For the same reason
+ * it keeps the class a copy before it judges its source by
+ * (`keepDrawingClass`): where the source was the drawing, the copy is still
+ * the copy.
+ *
+ * Made by the reader's own inert document where the caller has it: the
+ * source's owner is the template's contents document in a browser, but
+ * happy-dom builds a template's content with the window's document, and the
+ * rule that no reader makes a node in the live document is pinned there
+ * (`parse-safety.test.ts`).
+ */
+function standIn(source: Node, doc: Document = source.ownerDocument!): Element {
+  const made = doc.createElement('template');
+
+  keepDrawingClass(source, made);
+
+  return made;
+}
+
+/**
+ * A deep copy made without recursion, for the same reason.
+ *
+ * An assistive MathML copy the reader skips is left out, judged where it
+ * stands: cloned away from its frame -- into a formatting shell or a run split
+ * around a picture -- it had no drawing beside it, and the formula read twice.
+ * Every path that moves content before reading it clones it through here. A
+ * stand-in keeps its place.
+ *
+ * A `<template>` -- a stand-in, or one pasted, which every reader skips -- is
+ * copied as a fresh stand-in made by `doc`, the reader's inert document: a
+ * cloned one builds its contents in the document that owns it, which under
+ * happy-dom is the window's (see {@link standIn}).
+ */
+function cloneDeep(node: Node, doc: Document): Node {
+  // A copy stands where its original stood, at the paste's edges too.
+  const copyOf = (source: Node): Node => {
+    const made =
+      source.nodeType === ELEMENT_NODE && tagNameOf(source) === 'TEMPLATE'
+        ? standIn(source, doc)
+        : source.cloneNode(false);
+
+    if (pasteFirst.has(source)) {
+      pasteFirst.add(made);
+    }
+
+    if (pasteLast.has(source)) {
+      pasteLast.add(made);
+    }
+
+    return made;
+  };
+  const copy = copyOf(node);
   const stack: Array<readonly [Node, Node]> = [[node, copy]];
 
   for (let pair = stack.pop(); pair; pair = stack.pop()) {
     const [source, target] = pair;
 
     for (const child of source.childNodes) {
-      const childCopy = child.cloneNode(false);
+      if (child.nodeType === ELEMENT_NODE && isAssistiveMathCopy(child as Element)) {
+        target.appendChild(standIn(child, doc));
+        continue;
+      }
+
+      const childCopy = copyOf(child);
 
       target.appendChild(childCopy);
       stack.push([child, childCopy]);
@@ -3252,6 +3577,14 @@ function readBlockText(element: Element, skip?: SkipPredicate): RichText {
       } else if (char === STANDS) {
         // A `<br>` after a preserved break: that break is a line of its own.
         lastBreak = -1;
+      } else if (char === EDGE_LINE_END) {
+        if (space !== -1) {
+          chars[space]!.push(' ');
+          space = -1;
+          lineStart = true;
+          lastBreak = -1;
+          chars[index]!.push('\n');
+        }
       } else if (char === ' ') {
         if (space === -1 && !lineStart) {
           space = index;
@@ -4208,8 +4541,11 @@ function pushCallout(out: Block[], element: Element, depth: number, icon: string
 }
 
 /** Everything left below the bound, as one block rather than none. */
-function pushRemainder(out: Block[], node: Node, depth: number): void {
-  const text = normalizeControlCharacters(subtreeText(node));
+function pushRemainder(out: Block[], node: Node | readonly Node[], depth: number): void {
+  // A run of a list's loose content is one remainder, as it is one block.
+  const text = normalizeControlCharacters(
+    'nodeType' in node ? subtreeText(node) : node.map(subtreeText).join(''),
+  );
 
   if (text.trim().length > 0) {
     out.push(createBlock('paragraph', text, depth));
@@ -4217,23 +4553,102 @@ function pushRemainder(out: Block[], node: Node, depth: number): void {
 }
 
 /**
- * Takes a wrapped `summary` out of the tree below `details`.
+ * A toggle's title: its summary's text, in the formatting of what wraps the
+ * summary inside its `<details>`. A direct summary has nothing there; a
+ * wrapped one has whatever wraps it -- a `<b>` written around it, or the shell
+ * a `<b>` around the whole toggle left around the `<span>` holding it -- and
+ * read from the summary alone, the title lost it and read plain where the
+ * direct form reads bold. By the rules the body beside the summary is read by,
+ * which are `distributeFormatting`'s two. A wrapper that holds a block is
+ * taken up into the shells it puts around runs, the outermost winning; one
+ * that holds none stays inside the run its shell goes around, and is read
+ * where it stands, the nearest winning. Holding a block is asked of the
+ * wrapper as the body will find it, with the summary taken out: a heading in
+ * the summary (`<summary><h3>`, as GitHub's READMEs write it) made every
+ * wrapper around it a holder of blocks, and the title took the outermost of
+ * wrappers the body reads nearest-first. A wrapper already spent hands on
+ * nothing more -- an outer distribution has put its formatting inside the
+ * summary already -- and nor does a structure element, which is descended
+ * into, never taken up (`<div style="font-weight:bold"><p>` reads plain).
+ *
+ * Read in place, as the summary stands: given a shell of its own instead,
+ * the summary's content moved under it, and an assistive copy taken from its
+ * MathJax frame was read as a second reading of the formula.
+ */
+function titleOf(summary: Element, details: Element): RichText {
+  // From the summary outwards: each wrapper, and whether it holds a block
+  // besides what the summary holds -- one of its other children does, or the
+  // child it holds the summary in is a block or holds one. Each element is
+  // asked about once, as a child of its parent, and the answers below are
+  // remembered (`containsBlockLevel`).
+  const chain: Array<{ wrapper: Element; holdsBlock: boolean }> = [];
+  let below: Element = summary;
+  let belowHolds = false;
+
+  for (let at = summary.parentElement; at && at !== details; at = at.parentElement) {
+    let holdsBlock: boolean =
+      belowHolds || (below !== summary && BLOCK_LEVEL_TAGS.has(tagNameOf(below)));
+
+    for (const child of at.children) {
+      if (holdsBlock) {
+        break;
+      }
+
+      holdsBlock =
+        child !== below &&
+        !readerSkips(child) &&
+        (BLOCK_LEVEL_TAGS.has(tagNameOf(child)) || containsBlockLevel(child));
+    }
+
+    chain.push({ wrapper: at, holdsBlock });
+    below = at;
+    belowHolds = holdsBlock;
+  }
+
+  let format: InlineFormatting = { link: null, marks: new Map(), soft: new Set() };
+
+  for (const { wrapper, holdsBlock } of chain.reverse()) {
+    if (STRUCTURE_TAGS.has(tagNameOf(wrapper)) || DISTRIBUTED.has(wrapper)) {
+      continue;
+    }
+
+    if (!holdsBlock) {
+      format = nearestFormatting(format, wrapper);
+    } else if (isInlineWrapper(wrapper)) {
+      format = formattingWithin(format, wrapper);
+    }
+  }
+
+  const marks = [...format.marks].filter(([, on]) => on).map(([mark]) => mark);
+  const link = format.link === null ? undefined : (sanitizeUrl(format.link) ?? undefined);
+
+  return readRichText(summary, marks, link);
+}
+
+/**
+ * Takes a wrapped `summary` out of the tree below `details`, leaving a
+ * stand-in where it stood (`standIn`), so the nodes on either side do not
+ * become neighbours.
  *
  * What {@link firstDescendant} remembers about each element from the summary
  * up to `details` may name something inside it -- a wrapper holding a block,
  * or an image, only because the summary did -- so those answers are forgotten
- * and asked afresh of the tree as it now stands. Nothing else below `details`
- * holds the summary, so nothing else can be affected; the elements above it
- * have already been answered and acted on.
+ * and asked afresh of the tree as it now stands: read again in the body, a
+ * block or a picture the summary held split the body's text. Nothing else
+ * below `details` holds the summary, so nothing else can be affected; the
+ * elements above it have already been answered and acted on.
  *
- * Only the block answer is observable today, and it is pinned: an inline
- * wrapper outside the toggle asks whether the elements below it hold a block
- * before the toggle is reached. Every other memo built on `firstDescendant`
- * is forgotten too, though nothing asks those questions of these elements
- * first, so that a question added earlier later cannot be answered with a
- * node that has left the tree.
+ * The block and image answers are the observable ones: an inline wrapper
+ * outside the toggle asks whether the elements below it hold a block before
+ * the toggle is reached, and a cell beside the picture the summary held is
+ * asked whether it holds one. Every other memo built on `firstDescendant` is
+ * forgotten too, though nothing asks those questions of these elements first,
+ * so that a question added earlier later cannot be answered with a node that
+ * has left the tree. `math.ts`'s answers about a MathJax frame are not among
+ * them: they are judged as the frame stood (`contentEdges` asks of every one
+ * before anything is edited), as `cloneDeep` judges an assistive copy.
  */
-function detachSummary(summary: Element, details: Element): void {
+function detachSummary(doc: Document, summary: Element, details: Element): void {
   for (let at = summary.parentElement; at !== null; at = at.parentElement) {
     BLOCK_LEVEL_DESCENDANTS.delete(at);
     IMAGE_DESCENDANTS.delete(at);
@@ -4246,26 +4661,41 @@ function detachSummary(summary: Element, details: Element): void {
     }
   }
 
-  summary.remove();
+  summary.replaceWith(standIn(summary, doc));
 }
 
 /**
- * A `<details>` becomes a toggle whose `<summary>` is its text.
+ * A `<details>` becomes a toggle whose `<summary>` is its text (`titleOf`).
  *
  * Whatever else it contains is nested one level deeper, so a `<details>` from
  * anywhere else keeps its structure rather than collapsing into one block.
  */
 function visitDetails(doc: Document, element: Element, depth: number, out: Block[]): void {
+  // The first summary the reader could take: one in a `<noscript>` or an
+  // `<object>` fallback is no title, and nor is a nested `<details>`' own.
   const summary = firstSummary(element);
-  const title = summary ? parseRichText(summary) : [];
+  const title = summary ? titleOf(summary, element) : [];
   passPlain(richToPlainText(title));
   const block = createBlock('toggle', title, depthOf(element, depth));
   block.collapsed = !element.hasAttribute('open');
   out.push(block);
 
-  // The summary is skipped by identity rather than removed from a copy: a
-  // <details> holds every nested <details> below it, so cloning one per level
-  // was quadratic in the nesting depth exactly as the list case was.
+  // The paste's edges, in the order the toggle is read: its title, then its
+  // body. A paste that starts in it starts with the toggle, so nothing in the
+  // body is at its start, whatever comes first in the markup; one whose last
+  // text is in the title ends with the body's last text, wherever the title
+  // stood.
+  if (pasteFirst.has(element)) {
+    pasteFirst = new Set();
+  }
+
+  if (summary && pasteLast.has(summary)) {
+    pasteLast = lastContentEdge(element, summary);
+  }
+
+  // A direct summary is skipped by identity: a <details> holds every nested
+  // <details> below it, so copying one per level was quadratic in the nesting
+  // depth exactly as the list case was.
   //
   // Identity only reaches a direct child, though: `visitBlocksInner` tests it
   // against its own children, and the descents into lists, quotes and blocks
@@ -4274,17 +4704,19 @@ function visitDetails(doc: Document, element: Element, depth: number, out: Block
   // `<li>` around it produces, and what a hostile paste can repeat at will --
   // was therefore read as the title *and* again as body content, in the list
   // case concatenated into that item's own text. So that summary is taken out
-  // of the tree instead, which works at any depth. Its text has already been
-  // read, and the tree is the detached parse `blocksFromHtml` made, which the
-  // formatting moves rearrange already.
+  // where it stands, behind a stand-in (`detachSummary`), which works at any
+  // depth: every element read here is the reader's own, parsed by
+  // `blocksFromHtml` into a detached template or copied by `cloneDeep`. Its
+  // text has already been read.
   //
   // It used to be taken out of a copy of the whole element, and a <details>
   // holds every one nested below it, so wrapped summaries nested 180 deep
-  // copied the document 180 times and ran out of heap. The copy also removed
-  // its first `<summary>` by query, which could be a hidden one in a
-  // `<noscript>` rather than the one just read as the title.
+  // copied the document 180 times and ran out of heap. The copy also lost what
+  // the body inherited where it stood (its `white-space`, the paste's edges),
+  // and removed its first `<summary>` by query, which could be a hidden one in
+  // a `<noscript>` rather than the one just read as the title.
   if (summary && summary.parentElement !== element) {
-    detachSummary(summary, element);
+    detachSummary(doc, summary, element);
     visitBlocks(doc, element, block.depth + 1, out);
 
     return;
@@ -4378,7 +4810,11 @@ function pushTable(out: Block[], element: Element, depth: number): void {
       const tag = tagNameOf(cell);
 
       if ((tag === 'TH' || tag === 'TD') && containsImage(cell)) {
-        images.push(...textImages(cell, () => false).filter(hasUsableImage));
+        for (const image of textImages(cell, () => false)) {
+          if (hasUsableImage(image)) {
+            images.push(image);
+          }
+        }
       }
     }
   }
@@ -4448,12 +4884,12 @@ function outermostLists(element: Element): Element[] {
     // A list is taken and not descended into, so each quote reads only its own
     // content. Querying the whole subtree instead read every level below once
     // per level, which a quote in a list item, nested, made quadratic.
+    // Never into what the reader skips: a `<noscript>` list in a quote was
+    // read as the quote's own items.
     acceptNode: (candidate) => {
       const tag = tagNameOf(candidate);
 
-      // Nor into anything the walker skips: a list in a `<noscript>` was
-      // added after the quote as an item the page never showed.
-      if (SKIP_TAGS.has(tag)) {
+      if (readerSkips(candidate as Element)) {
         return FILTER_REJECT;
       }
 
@@ -4555,6 +4991,137 @@ function isItemBlock(element: Element): boolean {
 }
 
 /**
+ * What the reader keeps of an element whatever it holds, where that is
+ * decided by the element itself: nothing of what no reader takes (MathJax's
+ * `<script>`); a formula's TeX, from its attribute and never its text (an
+ * empty one is nothing); a picture `pushImage` takes; a to-do's box. Any
+ * other element is what it holds (`undefined`): a player, a field, a broken
+ * picture or a rule inside a wrapper hold nothing the reader keeps, though a
+ * browser draws them.
+ */
+function keptOfElement(element: Element, tag: string): boolean | undefined {
+  // An assistive copy the reader skips is nothing kept. (A MathJax copy is
+  // skipped only beside a drawing in text, which is kept anyway; KaTeX's is
+  // skipped beside its HTML half even when that half draws nothing -- `\quad`
+  // with its TeX stripped -- and counted, it kept an equation inline.)
+  if (SKIP_TAGS.has(tag) || isAssistiveMathCopy(element)) {
+    return false;
+  }
+
+  const tex = element.getAttribute(MATH_ATTR) ?? element.getAttribute(MATH_BLOCK_ATTR);
+
+  if (tex !== null) {
+    return tex.trim().length > 0;
+  }
+
+  if (tag === 'IMG') {
+    return hasUsableImage(element);
+  }
+
+  return tag === 'INPUT' && element.getAttribute('type') === 'checkbox' ? true : undefined;
+}
+
+/** Whether the reader keeps anything of a node as text: walked, left at the first. */
+function keepsAnything(node: Node): boolean {
+  if (node.nodeType === TEXT_NODE) {
+    return /[^ \t\n\r\f]/.test(node.nodeValue ?? '');
+  }
+
+  if (node.nodeType !== ELEMENT_NODE) {
+    return false;
+  }
+
+  const own = keptOfElement(node as Element, tagNameOf(node));
+
+  if (own !== undefined) {
+    return own;
+  }
+
+  const walker = node.ownerDocument!.createTreeWalker(node, SHOW_TEXT | SHOW_ELEMENT, {
+    acceptNode: (candidate) =>
+      candidate.nodeType === ELEMENT_NODE &&
+      keptOfElement(candidate as Element, tagNameOf(candidate)) === false
+        ? FILTER_REJECT
+        : FILTER_ACCEPT,
+  });
+
+  for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
+    if (
+      found.nodeType === TEXT_NODE
+        ? /[^ \t\n\r\f]/.test(found.nodeValue ?? '')
+        : keptOfElement(found as Element, tagNameOf(found)) === true
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Whether nothing the item keeps as its own text stands before a display
+ * equation on its line. (After it is `itemBlocks`' question.)
+ *
+ * Walked in document order back from the equation -- into every element on
+ * the way, past whitespace and whatever the reader keeps nothing of
+ * (`keptOfElement`) -- to the first thing that decides. A line break, a
+ * line-starting element (at the top or at the end of an inline wrapper:
+ * `<span>T<br></span>`, `<span><p>T</p></span>`) or a child the item hands on
+ * as a block (`handedOn`: a picture too, which goes after the item's text)
+ * ends the line, and what precedes it stays before the equation either way.
+ * Anything else the reader keeps stands beside it.
+ */
+function opensLine(element: Element, handedOn: (child: Element) => boolean): boolean {
+  const top = element.parentNode;
+  let node: Node | null = element.previousSibling;
+
+  while (node !== null) {
+    if (node.nodeType === TEXT_NODE) {
+      if (/[^ \t\n\r\f]/.test(node.nodeValue ?? '')) {
+        return false;
+      }
+    } else if (node.nodeType === ELEMENT_NODE) {
+      const child = node as Element;
+      const tag = tagNameOf(child);
+
+      if (tag === 'BR' || startsLine(child) || (child.parentNode === top && handedOn(child))) {
+        return true;
+      }
+
+      const own = keptOfElement(child, tag);
+
+      // A picture at any depth is handed on after the item's text, so it ends
+      // the line as a handed-on child does; wrapped, it read as text beside
+      // the equation, and two equations around it swapped order.
+      if (own === true) {
+        return tag === 'IMG';
+      }
+
+      if (own === undefined && child.lastChild !== null) {
+        node = child.lastChild;
+        continue;
+      }
+    }
+
+    // The node before one whose subtree is done, past the start of each
+    // element the walk went into, never past the equation's parent.
+    while (node.previousSibling === null) {
+      const parent: Node | null = node.parentNode;
+
+      if (parent === null || parent === top) {
+        return true;
+      }
+
+      node = parent;
+    }
+
+    node = node.previousSibling;
+  }
+
+  return true;
+}
+
+/**
  * The images in an element's own text, past whatever `skip` hides. `pushImage`
  * refuses any whose source is unusable.
  */
@@ -4564,7 +5131,12 @@ function textImages(root: Element, skip: SkipPredicate): Element[] {
     acceptNode: (candidate) => {
       const tag = tagNameOf(candidate);
 
-      return SKIP_TAGS.has(tag) || skip(candidate as Element, tag) ? FILTER_REJECT : FILTER_ACCEPT;
+      // Nor a picture inside a copy the reader skips.
+      return SKIP_TAGS.has(tag) ||
+        skip(candidate as Element, tag) ||
+        isAssistiveMathCopy(candidate as Element)
+        ? FILTER_REJECT
+        : FILTER_ACCEPT;
     },
   });
 
@@ -4593,7 +5165,10 @@ function isImageFigure(figure: Element): boolean {
   const caption = ownCaption(figure);
   const walker = figure.ownerDocument.createTreeWalker(figure, SHOW_TEXT | SHOW_ELEMENT, {
     acceptNode: (candidate) =>
-      SKIP_TAGS.has(tagNameOf(candidate)) || candidate === caption ? FILTER_REJECT : FILTER_ACCEPT,
+      candidate === caption ||
+      (candidate.nodeType === ELEMENT_NODE && readsAsNothing(candidate as Element))
+        ? FILTER_REJECT
+        : FILTER_ACCEPT,
   });
 
   // Left at the first text or the second image, either of which settles it.
@@ -4627,7 +5202,9 @@ function holdsOnlyImage(element: Element, strict: boolean): boolean {
 
   const walker = element.ownerDocument.createTreeWalker(element, SHOW_TEXT | SHOW_ELEMENT, {
     acceptNode: (candidate) =>
-      SKIP_TAGS.has(tagNameOf(candidate)) ? FILTER_REJECT : FILTER_ACCEPT,
+      candidate.nodeType === ELEMENT_NODE && readsAsNothing(candidate as Element)
+        ? FILTER_REJECT
+        : FILTER_ACCEPT,
   });
 
   for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
@@ -4652,19 +5229,101 @@ function holdsOnlyImage(element: Element, strict: boolean): boolean {
  * children, in order; everything else is its text, read in place. So bare text
  * after a block is still the item's, and the item -- its to-do, its number --
  * survives a block in front of its text.
+ *
+ * A display equation is one of its blocks only where that changes no order,
+ * since the item's text is read before every block it hands on: nothing the
+ * item keeps stands before it on its line (`opensLine`), and nothing the item
+ * keeps follows it anywhere in the item -- only blocks it hands on, or
+ * nothing. Otherwise it is the item's text, in place, on a line of its own.
+ *
+ * @param keepsParagraphs Whether a paragraph counts as text the item keeps
+ * after an equation: the one it takes as its text when it has none
+ * (`visitListItemInner`) is read before every block.
  */
-function itemBlocks(item: Element): Set<Element> {
+function itemBlocks(item: Element, keepsParagraphs = false): Set<Element> {
+  // Display equations first, last to first: whether one is a block turns on
+  // everything after it, an equation included. Once anything after it is
+  // the item's text, no equation before it is a block either.
+  const apartMath = new Set<Element>();
+  const handedOn = (child: Element): boolean => {
+    const tag = tagNameOf(child);
+
+    return (
+      tag === 'UL' ||
+      tag === 'OL' ||
+      (tag === 'P' && !keepsParagraphs) ||
+      (child.hasAttribute(MATH_BLOCK_ATTR) ? apartMath.has(child) : isItemBlock(child))
+    );
+  };
+
+  for (let node = item.lastChild; node !== null; node = node.previousSibling) {
+    const child = node.nodeType === ELEMENT_NODE ? (node as Element) : null;
+
+    if (child?.hasAttribute(MATH_BLOCK_ATTR) === true && opensLine(child, handedOn)) {
+      apartMath.add(child);
+    } else if ((child === null || !handedOn(child)) && keepsAnything(node)) {
+      break;
+    }
+  }
+
   const blocks = new Set<Element>();
+  // A picture the item hands on, wrapped or bare: after one, a paragraph is a
+  // block too, as after any other. Asked of a bare `<img>` alone, a wrapped
+  // picture let the paragraph after it become the item's text, and the
+  // picture went after it and after every equation it stood before.
+  let pictured = false;
 
   for (const child of item.children) {
     const tag = tagNameOf(child);
 
-    if (tag === 'UL' || tag === 'OL' || isItemBlock(child) || (tag === 'P' && blocks.size > 0)) {
+    if (
+      tag === 'UL' ||
+      tag === 'OL' ||
+      (child.hasAttribute(MATH_BLOCK_ATTR) ? apartMath.has(child) : isItemBlock(child)) ||
+      (tag === 'P' && (blocks.size > 0 || pictured))
+    ) {
       blocks.add(child);
+    }
+
+    // Only until the first block, after which every paragraph is one anyway --
+    // so each child is searched by its own item alone, and nested lists,
+    // always blocks, are never searched by the items above them.
+    if (!pictured && blocks.size === 0 && tag !== 'P') {
+      pictured = holdsUsablePicture(child);
     }
   }
 
   return blocks;
+}
+
+/**
+ * Whether an element is, or holds, a picture the reader takes. Walked, not
+ * queried: `getElementsByTagName` recursed through a chain 5,000 deep.
+ */
+function holdsUsablePicture(element: Element): boolean {
+  if (readerSkips(element)) {
+    return false;
+  }
+
+  // Not into what the reader skips: a `<noscript>` fallback picture, never
+  // taken, made the paragraphs after it blocks.
+  const walker = element.ownerDocument.createTreeWalker(element, SHOW_ELEMENT, {
+    acceptNode: (node) =>
+      SKIP_TAGS.has(tagNameOf(node as Element)) || isAssistiveMathCopy(node as Element)
+        ? FILTER_REJECT
+        : FILTER_ACCEPT,
+  });
+  let node: Node | null = element;
+
+  while (node !== null) {
+    if (tagNameOf(node as Element) === 'IMG' && hasUsableImage(node as Element)) {
+      return true;
+    }
+
+    node = walker.nextNode();
+  }
+
+  return false;
 }
 
 /**
@@ -4702,9 +5361,10 @@ function visitListItemInner(
   depth: number,
   out: Block[],
   declared: boolean,
+  keepsParagraphs = false,
 ): void {
   const itemDepth = depthOf(item, depth);
-  const blocks = itemBlocks(item);
+  const blocks = itemBlocks(item, keepsParagraphs);
   // Read in place, never copied: an item holds the whole list below it.
   // Only what is visited as a block is skipped: a list the item does not hold
   // directly -- inside a wrapper, a paragraph, a toggle -- is never visited, so
@@ -4759,12 +5419,25 @@ function visitListItemInner(
   // a text paragraph inside the item. The paragraph reads before the block,
   // as bare text after a block does.
   if (!declared && isRichEmpty(runs)) {
+    let afterMath = false;
+
     for (const block of blocks) {
+      afterMath ||= block.hasAttribute(MATH_BLOCK_ATTR);
+
       if (tagNameOf(block) === 'P') {
         const text = readBlockText(block);
 
         // The first that holds text: a blank one is a blank line, and stays.
         if (richToPlainText(text).trim().length > 0) {
+          // Taken past an equation handed on, it moved before it: read again
+          // with the paragraph as the text it is, which keeps every equation
+          // before it in the item's text -- and then there is no paragraph
+          // to take. Nothing has been written out yet.
+          if (afterMath && !keepsParagraphs) {
+            visitListItemInner(item, fallback, depth, out, declared, true);
+            return;
+          }
+
           blocks.delete(block);
           runs = text;
           break;
@@ -4830,19 +5503,19 @@ function visitListChildren(
   const doc = parent.ownerDocument!;
   let loose: Node[] = [];
 
+  // Read where it stands, as a run of the list's own children: copied into a
+  // wrapper, a loose run holding a list with loose content of its own was
+  // copied again at every level (quadratic in the nesting), and the nodes
+  // beside what the reader skips became neighbours.
   const flushLoose = (): void => {
-    const content = loose.some(
-      (node) => node.nodeType === ELEMENT_NODE || /[^ \t\n\r\f]/.test(node.nodeValue ?? ''),
+    const content = loose.some((node) =>
+      node.nodeType === ELEMENT_NODE
+        ? !readerSkips(node as Element)
+        : /[^ \t\n\r\f]/.test(node.nodeValue ?? ''),
     );
 
     if (content) {
-      const wrapper = doc.createElement('div');
-
-      for (const node of loose) {
-        wrapper.append(cloneDeep(node));
-      }
-
-      visitBlocks(doc, wrapper, depth, out);
+      visitBlocks(doc, parent, depth, out, undefined, undefined, loose);
     }
 
     loose = [];
@@ -4855,12 +5528,11 @@ function visitListChildren(
       continue;
     }
 
-    if (SKIP_TAGS.has(tag)) {
-      continue;
-    }
-
+    // What the reader skips goes with the run it stands in, which skips it
+    // in turn: it is no list item, and it keeps its neighbours apart.
     if (
       child.nodeType === TEXT_NODE ||
+      readerSkips(child as Element) ||
       (tag !== 'LI' && tag !== 'UL' && tag !== 'OL' && !holdsListItem(child as Element))
     ) {
       loose.push(child);
@@ -4919,6 +5591,7 @@ function holdsListItem(element: Element): boolean {
       element,
       (candidate) => tagNameOf(candidate) === 'LI',
       LIST_ITEM_DESCENDANTS,
+      readerSkips,
     ) !== null
   );
 }
@@ -4940,7 +5613,11 @@ function holdsBreak(node: Node): boolean {
     return false;
   }
 
-  const walker = node.ownerDocument!.createTreeWalker(node, SHOW_ELEMENT);
+  // Not inside what the reader skips: a `<br>` in an `<object>` fallback or a
+  // MathML copy is no break of the reader's.
+  const walker = node.ownerDocument!.createTreeWalker(node, SHOW_ELEMENT, {
+    acceptNode: (candidate) => (readerSkips(candidate as Element) ? FILTER_REJECT : FILTER_ACCEPT),
+  });
 
   for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
     if (tagNameOf(found) === 'BR') {
@@ -4977,6 +5654,12 @@ const LINE_BREAK = '\uFDD4';
 const LITERAL = '\uFDD3';
 /** A `<br>` after a preserved break: that break stands rather than ends the text. */
 const STANDS = '\uFDD5';
+/**
+ * A display equation's line break with only source whitespace before it: a
+ * line break where that whitespace is the paste's edge space, which stays,
+ * and nothing where it collapses away.
+ */
+const EDGE_LINE_END = '\uFDD6';
 
 type WhiteSpace = 'normal' | 'pre' | 'pre-line';
 
@@ -5344,7 +6027,7 @@ function collapseWhitespace(
   const walker = root.ownerDocument.createTreeWalker(root, SHOW_TEXT);
 
   for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
-    const value = (found.nodeValue ?? '').replace(/[\uFDD0-\uFDD5]/g, (char) => LITERAL + char);
+    const value = (found.nodeValue ?? '').replace(/[\uFDD0-\uFDD6]/g, (char) => LITERAL + char);
     const mode = whiteSpaceOf(found.parentElement);
 
     // What a style preserves is marked, so the pass below keeps it.
@@ -5450,6 +6133,8 @@ function collapseWhitespace(
  *
  * @param include Which children to visit, where only some are blocks: a list
  * item's, whose text the item has already read in place.
+ * @param children The children to visit, where they are a run of `node`'s:
+ * loose content in a list, read where it stands rather than copied out.
  */
 function visitBlocks(
   doc: Document,
@@ -5458,9 +6143,18 @@ function visitBlocks(
   out: Block[],
   exclude?: Node,
   include?: (child: Node) => boolean,
+  children?: readonly Node[],
 ): void {
   if (blockNesting >= MAX_BLOCK_NESTING) {
-    for (const rest of include ? [...node.childNodes].filter(include) : [node]) {
+    // What the reader skips stays out here too: an excluded summary was read
+    // into the body as well as the title.
+    for (const rest of children
+      ? [children]
+      : include
+        ? [...node.childNodes].filter(include)
+        : exclude
+          ? [[...node.childNodes].filter((child) => child !== exclude)]
+          : [node]) {
       pushRemainder(out, rest, depth);
     }
 
@@ -5470,7 +6164,7 @@ function visitBlocks(
   blockNesting += 1;
 
   try {
-    visitBlocksInner(doc, node, depth, out, exclude, include);
+    visitBlocksInner(doc, node, depth, out, exclude, include, children);
   } finally {
     blockNesting -= 1;
   }
@@ -5483,8 +6177,26 @@ function visitBlocksInner(
   out: Block[],
   exclude?: Node,
   include?: (child: Node) => boolean,
+  children?: readonly Node[],
 ): void {
   let buffer: Node[] = [];
+
+  /**
+   * Keeps the place of a node the run leaves out (see `standIn`), or of a
+   * level it leaves (`source` absent: an empty `<template>`). Not at the head
+   * of the run, where nothing before it is judged by what comes next, nor
+   * straight after another: two in a row keep nothing apart that one does
+   * not, and the second is judged by nobody -- a `<template>` is no copy.
+   * Every level a picture split walked through left several, each cloned
+   * again when the run was read.
+   */
+  const holdPlace = (source?: Node): void => {
+    const last = buffer[buffer.length - 1];
+
+    if (last !== undefined && tagNameOf(last) !== 'TEMPLATE') {
+      buffer.push(source ? standIn(source, doc) : doc.createElement('template'));
+    }
+  };
 
   // A block ends the line it is on; it is applied once the block has been
   // visited, since what the block holds may have opened one of its own.
@@ -5500,24 +6212,49 @@ function visitBlocksInner(
    */
   const splitAroundImages = (wrapper: Element): void => {
     const empty: InlineFormatting = { link: null, marks: new Map(), soft: new Set() };
-    const stack: Array<{ node: Node; format: InlineFormatting }> = [
+    // `end` marks where an element's children end in the stack.
+    const stack: Array<{ node: Node; format: InlineFormatting; end?: true }> = [
       { node: wrapper, format: empty },
     ];
 
     while (stack.length > 0) {
-      const { node, format } = stack.pop()!;
+      const { node, format, end } = stack.pop()!;
       const tag = tagNameOf(node);
 
-      if (node !== wrapper && SKIP_TAGS.has(tag)) {
+      // The pieces of every level go into one run, so an element's first and
+      // last children would stand beside what stood beside the element, and
+      // an assistive copy is judged by what stands next to it: a `katex-mathml`
+      // before the element, no copy where it stood, became the copy of a
+      // drawing inside it, and its text was lost. An empty `<template>` keeps
+      // the levels apart on both sides. (One before a `katex-html` element was
+      // a copy where it stood, so it was left out, and never asks.)
+      if (end) {
+        holdPlace();
+
         continue;
       }
 
-      // An image the reader cannot use is no block, so it splits nothing.
+      // Asked where it stands: cloned out alone, an assistive MathML copy has
+      // no drawing beside it to judge by, and the formula was read twice.
+      if (
+        node !== wrapper &&
+        (SKIP_TAGS.has(tag) ||
+          (node.nodeType === ELEMENT_NODE && isAssistiveMathCopy(node as Element)))
+      ) {
+        holdPlace(node);
+
+        continue;
+      }
+
+      // An image the reader cannot use is no block, so it splits nothing --
+      // and it keeps its place in the run, as anything left out of one does.
       if (tag === 'IMG') {
         if (hasUsableImage(node as Element)) {
           flushInline(true);
           pushImage(out, node as Element, depth);
           lineOpen = true;
+        } else {
+          holdPlace(node);
         }
 
         continue;
@@ -5526,6 +6263,10 @@ function visitBlocksInner(
       if (node === wrapper || (node.nodeType === ELEMENT_NODE && containsImage(node as Element))) {
         const inner = nearestFormatting(format, node as Element);
         const children = node.childNodes;
+
+        holdPlace();
+
+        stack.push({ node, format, end: true });
 
         for (let index = children.length - 1; index >= 0; index -= 1) {
           stack.push({ node: children[index]!, format: inner });
@@ -5536,7 +6277,7 @@ function visitBlocksInner(
 
       // The piece is read detached, so what it inherited where it stood goes
       // with it: its `white-space`, and whether it is the paste's edge.
-      let piece = cloneDeep(node);
+      let piece = cloneDeep(node, doc);
       const mode = whiteSpaceOf(node.parentElement);
 
       if (mode !== 'normal') {
@@ -5624,7 +6365,7 @@ function visitBlocksInner(
         continue;
       }
 
-      let copy: Node = cloneDeep(inline);
+      let copy: Node = cloneDeep(inline, doc);
       // A style on an ancestor outside the run still governs it.
       const mode = whiteSpaceOf(inline.parentElement);
 
@@ -5722,13 +6463,19 @@ function visitBlocksInner(
     }
   };
 
-  for (const child of [...node.childNodes]) {
+  for (const child of children ?? [...node.childNodes]) {
     if (closeAfter) {
       lineOpen = false;
       closeAfter = false;
     }
 
-    if (child === exclude || (include && !include(child))) {
+    if (child === exclude) {
+      holdPlace(child);
+
+      continue;
+    }
+
+    if (include && !include(child)) {
       continue;
     }
 
@@ -5748,7 +6495,13 @@ function visitBlocksInner(
     const element = child as Element;
     const tag = tagNameOf(element);
 
-    if (SKIP_TAGS.has(tag)) {
+    // A copy is judged where it stands, as in `walk` and `splitAroundImages`:
+    // buffered and cloned into a wrapper of its own, it had no frame around
+    // it, and a formula drawn in a block frame read twice. A stand-in keeps
+    // its place in the run.
+    if (SKIP_TAGS.has(tag) || isAssistiveMathCopy(element)) {
+      holdPlace(element);
+
       continue;
     }
 
@@ -5830,11 +6583,13 @@ function visitBlocksInner(
     // `<figure>` is a block.
     if (tag === 'IMG') {
       // One the reader cannot use (Outlook's `cid:`, Word's `file:`) is no
-      // block, so it splits no sentence.
+      // block, so it splits no sentence; a stand-in keeps its place in it.
       if (hasUsableImage(element)) {
         flushInline(true);
         pushImage(out, element, depth);
         lineOpen = true;
+      } else {
+        holdPlace(element);
       }
 
       continue;
@@ -6355,18 +7110,167 @@ const DRAWN_WITHOUT_TEXT: ReadonlySet<string> = new Set([
 /** What a browser writes around a copied fragment that holds no content. */
 const NON_CONTENT_EDGE_TAGS: ReadonlySet<string> = new Set(['meta', 'style', 'link', 'title']);
 
+/** The text a paste starts and ends with, each with its ancestors; see `contentEdges`. */
+interface ContentEdges {
+  first: Set<Node>;
+  last: Set<Node>;
+}
+
+/**
+ * The first and last content below `root` -- text that is not layout, a line
+ * break, an image -- each as the set of it and its ancestors. Only text is an
+ * edge: content that starts or ends with a break or a picture does not start
+ * or end mid-line in its text. Nor does a block before the first text that
+ * does not hold it -- a divider, an empty paragraph -- or any block after the
+ * last: each starts a line there.
+ *
+ * One walk for each end. The last edge's stops at the content it is looking
+ * for, from the end: `visitDetails` asks for the end of a toggle's body again
+ * at every toggle whose title held it, and walking the whole body each time
+ * was quadratic in the nesting.
+ *
+ * The first edge's walks the whole paste, though it finds the edge long
+ * before the end, because of what else it does: it asks of every element
+ * whether the reader skips it, and that is what judges every MathJax frame
+ * (`math.ts` remembers the answer for the read) as the paste stood, before
+ * `visitDetails` takes a summary out of one. Judged only after, a frame whose
+ * drawing had been the summary drew nothing, and its assistive copy was read
+ * as a second reading of the formula.
+ */
+function contentEdges(root: Node): ContentEdges {
+  return { first: firstContentEdge(root), last: lastContentEdge(root) };
+}
+
+/** Whether `contentEdges` passes over `node` and everything it holds. */
+function outOfContent(node: Node, leave: Node | undefined): boolean {
+  return (
+    node === leave ||
+    SKIP_TAGS.has(tagNameOf(node)) ||
+    (node.nodeType === ELEMENT_NODE && readsAsNothing(node as Element))
+  );
+}
+
+/** Whether `node` is content to `contentEdges`: one end of a paste. */
+function isEdgeContent(node: Node): boolean {
+  const tag = tagNameOf(node);
+
+  return (node.nodeType === TEXT_NODE && !isLayoutText(node)) || tag === 'BR' || tag === 'IMG';
+}
+
+/** The text with its ancestors, or nothing when the content is not text. */
+function edgeWithAncestors(node: Node | null): Set<Node> {
+  const nodes = new Set<Node>();
+
+  for (let at = node?.nodeType === TEXT_NODE ? node : null; at; at = at.parentNode) {
+    nodes.add(at);
+  }
+
+  return nodes;
+}
+
+/**
+ * `contentEdges`' first edge: a walk in document order over everything below
+ * `root` (see there for why it never stops early), over each node's children
+ * by index -- stepping siblings costs the node's index in some DOMs, and a
+ * wide paste paid it once per node.
+ */
+function firstContentEdge(root: Node): Set<Node> {
+  let first: Node | null = null;
+  const blocksBeforeFirst: Node[] = [];
+  const stack: Node[] = [root];
+
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+
+    if (node !== root) {
+      if (outOfContent(node, undefined)) {
+        continue;
+      }
+
+      if (first === null && isEdgeContent(node)) {
+        first = node;
+      } else if (first === null && BLOCK_LEVEL_TAGS.has(tagNameOf(node))) {
+        blocksBeforeFirst.push(node);
+      }
+    }
+
+    const children = node.childNodes;
+
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      stack.push(children[index]!);
+    }
+  }
+
+  const edge = edgeWithAncestors(first);
+
+  return blocksBeforeFirst.some((block) => !edge.has(block)) ? new Set() : edge;
+}
+
+/**
+ * `contentEdges`' last edge: the same document order read backwards -- each
+ * node after everything it holds -- stopping at the last content. A block met
+ * on the way starts after it, and then nothing is at the paste's end. `leave`
+ * is left out, with all it holds: a toggle's title, when it asks for its body.
+ */
+function lastContentEdge(root: Node, leave?: Node): Set<Node> {
+  const stack: Node[] = [root];
+  // Whether the entry at the same index is a node whose children are done.
+  const left: boolean[] = [false];
+
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    const done = left.pop()!;
+
+    if (done) {
+      if (isEdgeContent(node)) {
+        return edgeWithAncestors(node);
+      }
+
+      if (BLOCK_LEVEL_TAGS.has(tagNameOf(node))) {
+        return new Set();
+      }
+
+      continue;
+    }
+
+    if (node !== root) {
+      if (outOfContent(node, leave)) {
+        continue;
+      }
+
+      stack.push(node);
+      left.push(true);
+    }
+
+    const children = node.childNodes;
+
+    for (let index = 0; index < children.length; index += 1) {
+      stack.push(children[index]!);
+      left.push(false);
+    }
+  }
+
+  return new Set();
+}
+
 /** Parses an HTML string into blocks, for a multi-block paste. */
 export function blocksFromHtml(
   doc: Document,
   html: string,
   options: HtmlReadOptions = {},
 ): Block[] {
+  // One read: what the math readers learn about the fragment is shared by
+  // every block's walk over it, and forgotten afterwards.
+  return readingMath(() => readBlocksFromHtml(doc, html, options));
+}
+
+function readBlocksFromHtml(doc: Document, html: string, options: HtmlReadOptions): Block[] {
   // Never `doc`: every scratch node a reader makes is made by the document
   // threaded through it, and one the live document makes loads what it holds.
   const inert = inertDocument(doc);
   const template = inert.createElement('template');
   template.innerHTML = html;
-  canonicalizeMath(doc, template.content, html);
+  canonicalizeMath(inert, template.content, html);
 
   const out: Block[] = [];
   // Reset rather than trust the last run: an exception thrown out of a walk
@@ -6393,66 +7297,7 @@ export function blocksFromHtml(
   plainArbiter =
     options.plain !== undefined && !legacyOwnHtml ? plainArbiterFor(options.plain) : null;
 
-  // The paste's first and last content -- text that is not layout, a line
-  // break, an image. Only text is an edge: a paste that starts or ends with a
-  // break or a picture does not start or end mid-line in its text. Nor does a
-  // block before the first text that does not hold it -- a divider, an empty
-  // paragraph -- or any block after the last: each starts a line there.
-  //
-  // One walk in document order, over each node's children by index: stepping
-  // siblings costs the node's index in some DOMs, and a wide paste paid it
-  // once per node.
-  let first: Node | null = null;
-  let last: Node | null = null;
-  const blocksBeforeFirst: Node[] = [];
-  let blockAfterLast = false;
-  const stack: Node[] = [template.content];
-
-  while (stack.length > 0) {
-    const node = stack.pop()!;
-    const tag = tagNameOf(node);
-
-    if (node !== template.content) {
-      if (SKIP_TAGS.has(tag)) {
-        continue;
-      }
-
-      if ((node.nodeType === TEXT_NODE && !isLayoutText(node)) || tag === 'BR' || tag === 'IMG') {
-        first ??= node;
-        last = node;
-        blockAfterLast = false;
-      } else if (BLOCK_LEVEL_TAGS.has(tag)) {
-        if (first === null) {
-          blocksBeforeFirst.push(node);
-        }
-
-        blockAfterLast = true;
-      }
-    }
-
-    const children = node.childNodes;
-
-    for (let index = children.length - 1; index >= 0; index -= 1) {
-      stack.push(children[index]!);
-    }
-  }
-
-  const withAncestors = (node: Node | null): Set<Node> => {
-    const nodes = new Set<Node>();
-
-    for (let at = node?.nodeType === TEXT_NODE ? node : null; at; at = at.parentNode) {
-      nodes.add(at);
-    }
-
-    return nodes;
-  };
-
-  pasteFirst = withAncestors(first);
-  pasteLast = blockAfterLast ? new Set() : withAncestors(last);
-
-  if (blocksBeforeFirst.some((block) => !pasteFirst.has(block))) {
-    pasteFirst = new Set();
-  }
+  ({ first: pasteFirst, last: pasteLast } = contentEdges(template.content));
 
   try {
     visitBlocks(inert, template.content, 0, out);
@@ -6481,9 +7326,12 @@ export function blocksFromHtml(
 /** Parses an HTML string, for clipboard payloads. */
 export function parseRichTextFromHtml(doc: Document, html: string): RichText {
   // An inert document's template, as in `blocksFromHtml`.
-  const template = inertDocument(doc).createElement('template');
+  const inert = inertDocument(doc);
+  const template = inert.createElement('template');
   template.innerHTML = html;
-  canonicalizeMath(doc, template.content, html);
 
-  return parseRichText(template.content);
+  return readingMath(() => {
+    canonicalizeMath(inert, template.content, html);
+    return parseRichText(template.content);
+  });
 }

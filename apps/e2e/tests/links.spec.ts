@@ -160,4 +160,19 @@ test.describe('07 · links', () => {
     await expect(editor.portal('link-editor')).toBeHidden();
     await expect(page.locator('#after')).toBeFocused();
   });
+
+  test('L4b undo after a link puts the caret back where the link was made, not at the top', async ({
+    editor,
+    page,
+  }) => {
+    await editor.load({ doc: 'paragraphs' });
+    await editor.placeCaret('p3', 0, 7);
+    await page.keyboard.press(`${MOD}+k`);
+    await editor.portal('link-editor').getByRole('textbox').fill('https://x.y/');
+    await page.keyboard.press('Enter');
+
+    await page.keyboard.press(`${MOD}+z`);
+    expect((await editor.blockData('p3'))?.content).toEqual([{ text: 'Charlie three' }]);
+    expect(await editor.focusedBlock()).toBe('p3');
+  });
 });

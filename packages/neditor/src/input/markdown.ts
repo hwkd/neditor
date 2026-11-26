@@ -17,7 +17,7 @@ import {
   richToPlainText,
 } from '../model/rich-text.ts';
 import type { DestinationAhead } from './inline-rules.ts';
-import { INLINE_SPAN_LIMIT, matchInlineRule, projectCode } from './inline-rules.ts';
+import { CODE_DOLLAR, INLINE_SPAN_LIMIT, matchInlineRule, projectCode } from './inline-rules.ts';
 import { normalizeControlCharacters, normalizeLineBreaks } from './line-breaks.ts';
 
 export { normalizeLineBreaks };
@@ -499,9 +499,10 @@ function joinSoftBreaks(lines: readonly string[]): string[] {
   // soft-broken paragraph.
   let pending: string[] = [];
   let fence = 0;
-  // A display equation's lines are TeX, where a trailing `\\` is a row
-  // break, not this writer's soft break: they pass through untouched, as a
-  // code fence's do.
+  // A display equation's lines are TeX and pass through untouched, as a code
+  // fence's do. An even run of backslashes at a line's end -- TeX's `\\` row
+  // break -- would be left alone anyway; an odd one would not, and TeX ends a
+  // line with one for a control space (`a\` then the line break).
   let math = false;
 
   const flush = (): void => {
@@ -702,6 +703,12 @@ export function parseInlineMarkdown(source: string): RichText {
   let openFrom = 0;
   let origin = 0;
   let retired = false;
+  /**
+   * Where a numeric reference stands that the writer put straight after a
+   * formula's closing `$` to spell a digit, the one place outside a block's
+   * edges it writes one (see `richToMarkdown`).
+   */
+  let afterFormula = -1;
 
   const flush = (): void => {
     if (pending.length > 0) {
@@ -762,7 +769,12 @@ export function parseInlineMarkdown(source: string): RichText {
     return -1;
   };
 
-  /** Forgets the delimiters in a range of `matchable` that can no longer open. */
+  /**
+   * Forgets the delimiters in a range of `matchable` that can no longer open,
+   * keeping `openSources` index for index with `opens`: left behind, every
+   * later formula's TeX was read from the source of the wrong opener --
+   * `` `x$`$y$ `` gave the formula `` `$y ``.
+   */
   const dropOpens = (start: number, end: number): void => {
     const from = start + origin;
     const to = end + origin;
@@ -777,11 +789,13 @@ export function parseInlineMarkdown(source: string): RichText {
     for (let read = first; read < opens.length; read += 1) {
       if (opens[read]! >= to) {
         opens[write] = opens[read]!;
+        openSources[write] = openSources[read]!;
         write += 1;
       }
     }
 
     opens.length = write;
+    openSources.length = write;
   };
 
   /**
@@ -920,14 +934,14 @@ export function parseInlineMarkdown(source: string): RichText {
       index += 1;
       literal = next;
       projected = ESCAPED;
-    } else if (char === '&' && decodable.length > 0) {
+    } else if (char === '&' && (decodable.length > 0 || index === afterFormula)) {
       // Visited in order, so the span lookup is a pointer that only moves on.
       while (span < decodable.length && decodable[span]![1] <= index) {
         span += 1;
       }
 
       const reference =
-        span < decodable.length && decodable[span]![0] <= index
+        index === afterFormula || (span < decodable.length && decodable[span]![0] <= index)
           ? NUMERIC_REFERENCE.exec(text.slice(index, index + 12))
           : null;
       const decoded = reference ? decodeReference(reference) : null;
@@ -994,6 +1008,13 @@ export function parseInlineMarkdown(source: string): RichText {
     // in `$a*b*c$` -- has eaten its delimiters. The writer puts TeX between
     // the dollars exactly as it stands, so this is the inverse of that.
     if (match.math !== undefined) {
+      // Pandoc's third condition, which typing cannot ask because the next
+      // character has not arrived: a closing `$` is not followed by a digit,
+      // so `$5-$10` and `US$10 to US$20` are prices, not a formula `5-`.
+      if (/[0-9]/.test(text[index + 1] ?? '')) {
+        continue;
+      }
+
       const open = sourceOf(match.start);
       const formula = open === -1 ? [] : richMath(text.slice(open + 1, index));
 
@@ -1003,6 +1024,7 @@ export function parseInlineMarkdown(source: string): RichText {
 
       flush();
       recall(match.start);
+      afterFormula = index + 1;
       content = richInsert(
         richDelete(content, match.start - base, match.end - base),
         match.start - base,
@@ -1034,8 +1056,11 @@ export function parseInlineMarkdown(source: string): RichText {
     // CommonMark reads a destination, so the href is taken from there -- and
     // only now, with the whole span recalled: a destination can hold more
     // finished code spans than are kept to hand, and read any earlier it was
-    // whatever tail was left, which could name another host.
+    // whatever tail was left, which could name another host. A code span's
+    // `$` is a placeholder there too, and the text may hold that character
+    // itself: the content says which.
     let link = match.link;
+    const tail = matchable.slice(innerEnd, match.end);
 
     //
     // Which form the destination has is asked of the projection, never of the
@@ -1047,25 +1072,21 @@ export function parseInlineMarkdown(source: string): RichText {
     // a destination: CommonMark escapes all of it there, where in prose only
     // what the writer protects is honoured (see `ESCAPABLE`). Such a backslash
     // is still a backslash in the projection, so `?q=a\$b` kept it.
-    const projectedClosing = matchable.slice(innerEnd, match.end);
-
     if (
       link !== undefined &&
-      (projectedClosing.includes(ESCAPED) || DESTINATION_ESCAPE.test(projectedClosing))
+      (tail.includes(ESCAPED) || tail.includes(CODE_DOLLAR) || DESTINATION_ESCAPE.test(tail))
     ) {
       const raw = richToPlainText(content).slice(innerEnd - base, match.end - base);
       let closing = '';
 
       for (let at = 0; at < raw.length; at += 1) {
-        if (
-          !(projectedClosing[at] === '\\' && ASCII_PUNCTUATION.test(projectedClosing[at + 1] ?? ''))
-        ) {
+        if (!(tail[at] === '\\' && ASCII_PUNCTUATION.test(tail[at + 1] ?? ''))) {
           closing += raw[at];
         }
       }
 
       const href = sanitizeUrl(
-        projectedClosing.startsWith('](<') ? closing.slice(3, -2) : closing.slice(2, -1),
+        tail.startsWith('](<') ? closing.slice(3, -2) : closing.slice(2, -1),
       );
 
       // Nothing has been changed yet: flushing and recalling only move runs.

@@ -459,8 +459,6 @@ function clampOffset(node: Node, offset: number): number {
  * Enter split the block somewhere else entirely. Every conversion here counts
  * the atom as one and never looks inside it.
  */
-const ATOM_SELECTOR = '[data-neditor-math]';
-
 const SHOW_ELEMENT = 0x1;
 const SHOW_TEXT = 0x4;
 const FILTER_ACCEPT = 1;
@@ -487,6 +485,20 @@ function atomAround(element: HTMLElement, node: Node): Element | null {
 }
 
 /**
+ * Character offset of a DOM position within `element` -- the reading every
+ * caret and range read here uses, so a position the browser names in its own
+ * terms (an input's target range) is compared in the model's.
+ */
+export function offsetAt(
+  element: HTMLElement,
+  container: Node,
+  offset: number,
+  bias: 'start' | 'end' = 'start',
+): number {
+  return offsetOf(element, container, offset, bias);
+}
+
+/**
  * Character offset of a DOM position within `element`.
  *
  * A position inside a formula -- a browser can put one there on a double
@@ -507,29 +519,58 @@ function offsetOf(
     container = atom.parentNode;
   }
 
-  const probe = element.ownerDocument.createRange();
-  probe.selectNodeContents(element);
-  probe.setEnd(container, clampOffset(container, offset));
+  // A stale offset WebKit reports past its node's end is that end (`clampOffset`).
+  offset = clampOffset(container, offset);
 
-  let length = probe.toString().length;
+  // Where counting stops: the text node the position is in (part-way), or the
+  // node the position stands before -- for the end of a container, the first
+  // node after its subtree, or the end of the host.
+  const inText = container.nodeType === 3;
+  let stop: Node | null = inText ? container : (container.childNodes[offset] ?? null);
 
-  for (const found of element.querySelectorAll(ATOM_SELECTOR)) {
-    const parent = found.parentNode;
+  // A node the walk never visits (a comment) cannot be where it stops; the
+  // position is equally before whatever follows it.
+  for (;;) {
+    if (!inText && stop === null) {
+      for (
+        let at: Node | null = container;
+        at && at !== element && stop === null;
+        at = at.parentNode
+      ) {
+        stop = at.nextSibling;
+      }
+    }
 
-    // Wholly before the position: its drawn text was counted, and one
-    // character stands for it instead.
-    if (parent && probe.isPointInRange(parent, indexIn(parent, found) + 1)) {
-      length += 1 - rangeAround(found).toString().length;
+    if (stop === null || stop.nodeType === 1 || stop.nodeType === 3) {
+      break;
+    }
+
+    container = stop;
+    stop = stop.nextSibling;
+  }
+
+  // One walk in document order: text counts its length, a formula one, and
+  // nothing inside a formula is visited. Counting a Range's `toString()`
+  // instead counted every formula's drawing, and asking the range about each
+  // formula afterwards cost a pass over its siblings apiece.
+  const walker = element.ownerDocument.createTreeWalker(element, SHOW_TEXT | SHOW_ELEMENT, {
+    acceptNode: (node) => (isAtom(node.parentNode) ? FILTER_REJECT : FILTER_ACCEPT),
+  });
+  let counted = 0;
+
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    if (node === stop) {
+      return counted + (inText ? offset : 0);
+    }
+
+    if (isAtom(node)) {
+      counted += 1;
+    } else if (node.nodeType === 3) {
+      counted += (node as Text).length;
     }
   }
 
-  return length;
-}
-
-function rangeAround(node: Node): Range {
-  const range = node.ownerDocument!.createRange();
-  range.selectNodeContents(node);
-  return range;
+  return counted;
 }
 
 /** Resolves a character offset to the DOM position that holds it. */
@@ -592,7 +633,12 @@ export function getSelectionRange(element: HTMLElement): OffsetRange | null {
   }
 
   const start = offsetOf(element, range.startContainer, range.startOffset);
-  const end = offsetOf(element, range.endContainer, range.endOffset, 'end');
+  // A caret is one position, and it snaps to one edge: read as a range, a
+  // caret the browser left inside a formula became a selection of it, and
+  // Enter there deleted the formula.
+  const end = range.collapsed
+    ? start
+    : offsetOf(element, range.endContainer, range.endOffset, 'end');
 
   return start <= end ? { start, end } : { start: end, end: start };
 }
