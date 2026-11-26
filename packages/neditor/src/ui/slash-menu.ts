@@ -156,6 +156,16 @@ export class SlashMenu {
     this.setQuery('');
   }
 
+  /** Moves an open menu to a new anchor, keeping its query and highlight. */
+  reposition(anchor: DOMRect): void {
+    if (!this.#open) {
+      return;
+    }
+
+    this.#anchor = anchor;
+    positionPortal(this.#element, anchor, { prefer: 'below' });
+  }
+
   close(): void {
     if (!this.#open) {
       return;

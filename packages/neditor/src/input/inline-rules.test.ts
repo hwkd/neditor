@@ -1,7 +1,16 @@
 import { describe, expect, test } from 'vitest';
 
-import { INLINE_SPAN_LIMIT, matchInlineRule } from './inline-rules.ts';
-import { blocksFromMarkdown } from './markdown.ts';
+import type { RichText } from '../model/rich-text.ts';
+import {
+  richDelete,
+  richConcat,
+  richFromPlainText,
+  richSetLink,
+  richSetMark,
+  richToPlainText,
+} from '../model/rich-text.ts';
+import { INLINE_SPAN_LIMIT, matchInlineRule, matchTypedInlineRule } from './inline-rules.ts';
+import { blocksFromMarkdown, parseInlineMarkdown } from './markdown.ts';
 
 /** Reproduces what the editor does with a match: strip delimiters, keep inner. */
 function apply(input: string): { text: string; mark?: string; link?: string } | null {
@@ -511,5 +520,305 @@ describe('pasted prose behind a destination that never closes keeps its marks', 
     const large = time(40000);
 
     expect(large / small, `${Math.round(small)}ms -> ${Math.round(large)}ms`).toBeLessThan(25);
+  });
+});
+
+/**
+ * What the editor does with each typed character: append it to the runs as
+ * plain text (a finished span arms an empty mark set, so what follows is
+ * plain) and apply whatever {@link matchTypedInlineRule} says.
+ */
+function typeInto(start: RichText, typed: string): RichText {
+  let content = start;
+
+  for (const char of typed) {
+    const caret = richToPlainText(content).length;
+
+    content = richConcat(content, richFromPlainText(char));
+    const match = matchTypedInlineRule(content, caret + 1);
+
+    if (!match) {
+      continue;
+    }
+
+    const innerStart = match.start + match.openLength;
+    const innerEnd = match.end - match.closeLength;
+
+    content = richDelete(content, innerEnd, match.end);
+    content = richDelete(content, match.start, innerStart);
+    const end = match.start + (innerEnd - innerStart);
+
+    content = match.link
+      ? richSetLink(content, match.start, end, match.link)
+      : richSetMark(content, match.start, end, match.mark!, true);
+  }
+
+  return content;
+}
+
+describe('nothing closes inside a code span left open', () => {
+  /**
+   * Only the HTML tag rules refused to close while a backtick run was open, so
+   * the emphasis rules fired inside code before its closing backtick arrived:
+   * `__init__` became bold `init` and `f(*a*)` lost its asterisks, typed and
+   * pasted alike. A code span binds tighter than emphasis and links in
+   * CommonMark; every rule now asks, as the tag rules did.
+   */
+  test("the auditor's line, pasted", () => {
+    expect(parseInlineMarkdown('The `__init__` method and `f(*a*)`')).toEqual([
+      { text: 'The ' },
+      { text: '__init__', marks: ['code'] },
+      { text: ' method and ' },
+      { text: 'f(*a*)', marks: ['code'] },
+    ]);
+  });
+
+  test('and typed', () => {
+    expect(typeInto([], 'The `__init__` method and `f(*a*)`')).toEqual(
+      parseInlineMarkdown('The `__init__` method and `f(*a*)`'),
+    );
+  });
+
+  test.each([
+    ['`__init__', null],
+    ['`f(*a*', null],
+    ['`**b**', null],
+    ['`~~s~~', null],
+    ['`[x](https://a.test/)', null],
+    ['`<u>x</u>', null],
+  ])('%s closes nothing', (text, expected) => {
+    expect(matchInlineRule(text)).toBe(expected);
+  });
+
+  test.each([
+    'Use `[text](https://x.test)` to link.',
+    'Write `**bold**` for bold and `_it_` for italics.',
+    'Images are `![alt](https://x.test/a.png)`.',
+    'Run `npm i` then `[x](y)`.',
+    'Use `<u>x</u>` for underline.',
+    'Use `*args, **kwargs` here',
+  ])('%s keeps its code literal', (line) => {
+    const runs = parseInlineMarkdown(line);
+    const code = /`([^`]+)`/g;
+
+    expect(runs.filter((run) => run.marks?.includes('code')).map((run) => run.text)).toEqual(
+      [...line.matchAll(code)].map((found) => found[1]),
+    );
+    expect(runs.every((run) => run.link === undefined)).toBe(true);
+    expect(typeInto([], line)).toEqual(runs);
+  });
+
+  test('a closed code span opens the line again', () => {
+    expect(apply('`a` **b**')).toMatchObject({ mark: 'bold' });
+    expect(apply('`a` [x](https://a.test/)')).toMatchObject({ link: 'https://a.test/' });
+  });
+});
+
+describe('an angled destination is not ended by a space', () => {
+  /**
+   * The `](<` form admits a space -- its rule's destination is `[^<>\n]*` --
+   * but the test for "the caret is in an open destination" stopped at the
+   * first one, so whatever followed it was prose: typing
+   * `[t](<https://a.test/a b/**y**>)` linked to `…/a%20b/y`, and pasting
+   * `__init__.py` behind a space lost both pairs of underscores. The 6 Nov
+   * audit fixed this and the merge of `main` dropped it.
+   */
+  test('typing a destination does not fire a rule partway', () => {
+    expect(matchInlineRule('[t](https://a.test/#object.__init__')).toBeNull();
+    expect(matchInlineRule('[t](<https://a.test/a b/**y**')).toBeNull();
+  });
+
+  test('typed, the link keeps its asterisks', () => {
+    expect(typeInto([], '[t](<https://a.test/a b/**y**>)')).toEqual([
+      { text: 't', link: 'https://a.test/a%20b/**y**' },
+    ]);
+  });
+
+  test.each(['https://a.test/(a)/__x__', 'https://a.test/a b/*y*'])(
+    'in angle brackets: %s',
+    (url) => {
+      const href = blocksFromMarkdown(`[t](<${url}>)`)[0]?.content.find((run) => run.link)?.link;
+
+      expect(href).toBe(url.replace(' ', '%20'));
+    },
+  );
+
+  test("the auditor's paste", () => {
+    expect(
+      blocksFromMarkdown('See [docs](<https://a.test/my docs/__init__.py>)')[0]?.content,
+    ).toEqual([{ text: 'See ' }, { text: 'docs', link: 'https://a.test/my%20docs/__init__.py' }]);
+  });
+
+  test('a "](<" that does close keeps its destination literal', () => {
+    expect(blocksFromMarkdown('[t](<https://a.test/a b/**y**>) and **z**')[0]?.content).toEqual([
+      { text: 't', link: 'https://a.test/a%20b/**y**' },
+      { text: ' and ' },
+      { text: 'z', marks: ['bold'] },
+    ]);
+  });
+
+  test('a line break, a ">" or a "<" still ends it', () => {
+    expect(apply('[a](<b c\n**d**')).toMatchObject({ mark: 'bold' });
+    expect(apply('[a](<b c> **d**')).toMatchObject({ mark: 'bold' });
+    expect(apply('[a](<b c <**d**')).toMatchObject({ mark: 'bold' });
+  });
+});
+
+describe('a backtick inside an existing code run is not a delimiter', () => {
+  /**
+   * The literal scenario: type ``Use a`b``, select ``a`b``, Mod+E, then type
+   * `` and `c` ok``. The code rule read the block's plain text, paired the
+   * backtick inside the code run with the first one typed after it, and
+   * deleted it: `ab and ` came out as code and `c` ok` as text.
+   */
+  const formatted: RichText = [{ text: 'Use ' }, { text: 'a`b', marks: ['code'] }];
+
+  test('the first backtick typed after it closes nothing', () => {
+    const content = [...formatted, { text: ' and `' }];
+
+    expect(matchTypedInlineRule(content, richToPlainText(content).length)).toBeNull();
+  });
+
+  test('typed through to the end', () => {
+    expect(typeInto(formatted, ' and `c` ok')).toEqual([
+      { text: 'Use ' },
+      { text: 'a`b', marks: ['code'] },
+      { text: ' and ' },
+      { text: 'c', marks: ['code'] },
+      { text: ' ok' },
+    ]);
+  });
+
+  test('pasted, a closed code span is as opaque', () => {
+    expect(parseInlineMarkdown('Use <code>a`b</code> and `c` ok')).toEqual([
+      { text: 'Use ' },
+      { text: 'a`b', marks: ['code'] },
+      { text: ' and ' },
+      { text: 'c', marks: ['code'] },
+      { text: ' ok' },
+    ]);
+  });
+
+  test('a link across a code run takes its href from the real text', () => {
+    const content: RichText = [
+      { text: '[t](https://a.test/' },
+      { text: 'x', marks: ['code'] },
+      { text: ')' },
+    ];
+
+    expect(matchTypedInlineRule(content, richToPlainText(content).length)).toMatchObject({
+      link: 'https://a.test/x',
+    });
+  });
+
+  test('text with no code run is matched as it stands', () => {
+    expect(matchTypedInlineRule(richFromPlainText('a **b**'), 7)).toEqual(
+      matchInlineRule('a **b**'),
+    );
+  });
+});
+
+describe('a backtick run closes only the open run of its own length', () => {
+  /**
+   * The code rule matched a single backtick back to the nearest other one, so
+   * in `` `` a`b `` `` the inner backtick closed a span with the second of the
+   * opening pair at once: the code came out ` ab ` with the backtick moved out
+   * after it, typed and pasted. Runs pair by length, as in CommonMark, and a
+   * span opened by two or more strips one space from each end.
+   */
+  test.each([
+    ['A literal backtick: `` a`b ``.', 'a`b'],
+    ['x ``a`b`` y', 'a`b'],
+    ['`` ` ``', '`'],
+    ['```a``b```', 'a``b'],
+  ])('%s holds %j', (line, code) => {
+    const runs = parseInlineMarkdown(line);
+
+    expect(runs.filter((run) => run.marks?.includes('code')).map((run) => run.text)).toEqual([
+      code,
+    ]);
+    expect(typeInto([], line)).toEqual(runs);
+  });
+
+  test('a single backtick does not close a double run', () => {
+    expect(matchInlineRule('``a`')).toBeNull();
+    expect(matchInlineRule('`` a`b `')).toBeNull();
+  });
+
+  test('a single-backtick span keeps its spaces, as it always has', () => {
+    expect(apply('` a `')).toEqual({ text: ' a ', mark: 'code', link: undefined });
+  });
+
+  test('a run of only spaces is not stripped', () => {
+    expect(parseInlineMarkdown('``  ``')).toEqual([{ text: '  ', marks: ['code'] }]);
+  });
+});
+
+describe('nothing closes inside a code span opened after its opener', () => {
+  /**
+   * Only a code span open *before* an emphasis opener held the emphasis back,
+   * so one opened after it and still open at the closing delimiter let the
+   * emphasis close inside the code: `` *y `a*b` z* `` came back
+   * `y {italic}|a{italic,code}|b{code}| z*`, typed and pasted alike -- a star
+   * and a backtick deleted and the span split in two. CommonMark reads it as
+   * emphasis around a code span, and so does this, on both paths.
+   */
+  test.each([
+    ['*y `a*b` z*', 'italic', 'y ', 'a*b', ' z'],
+    ['**y `a**b` z**', 'bold', 'y ', 'a**b', ' z'],
+    ['_a `b_c` d_', 'italic', 'a ', 'b_c', ' d'],
+    ['~~a `b~~c` d~~', 'strikethrough', 'a ', 'b~~c', ' d'],
+  ])('%s is %s around the code', (line, mark, before, code, after) => {
+    const runs = parseInlineMarkdown(line);
+
+    expect(runs).toEqual([
+      { text: before, marks: [mark] },
+      { text: code, marks: [mark, 'code'] },
+      { text: after, marks: [mark] },
+    ]);
+    expect(typeInto([], line)).toEqual(runs);
+  });
+
+  test('a link whose "](" falls inside the open span takes the span whole', () => {
+    const line = '[a `b](c)` d](https://e.com)';
+    const runs = parseInlineMarkdown(line);
+
+    expect(runs.find((run) => run.marks?.includes('code'))?.text).toBe('b](c)');
+    expect(runs.every((run) => run.link === 'https://e.com/')).toBe(true);
+    expect(typeInto([], line)).toEqual(runs);
+  });
+
+  test('a closer inside the open span closes nothing', () => {
+    expect(matchInlineRule('*y `a*')).toBeNull();
+    expect(matchInlineRule('**y `a**')).toBeNull();
+    expect(matchInlineRule('<em>a `b</em>')).toBeNull();
+  });
+
+  // The README's stated costs, pinned so a change to either is a decision.
+  test('a stray backtick holds back an emphasis opened before it', () => {
+    expect(parseInlineMarkdown('*use ` with care*')).toEqual([{ text: '*use ` with care*' }]);
+    expect(typeInto([], '*use ` with care*')).toEqual([{ text: '*use ` with care*' }]);
+  });
+
+  test('a single-backtick span closes on the first of a longer run (R2-PARSE-8)', () => {
+    expect(parseInlineMarkdown('`a `` b`')).toEqual([{ text: 'a  b', marks: ['code'] }]);
+    expect(typeInto([], '`a `` b`')).toEqual(parseInlineMarkdown('`a `` b`'));
+  });
+
+  test('an autolink still owns a backtick in its URL', () => {
+    expect(apply('<https://a.test/`x>')).toMatchObject({ text: 'https://a.test/`x' });
+  });
+});
+
+describe('an angled destination that never becomes a link holds its text', () => {
+  /**
+   * The reader asks whether an open `](<` closes later on the line, and
+   * whitespace has to carry that answer through rather than reset it.
+   * Resetting it left every other test green while `` [a](<b c *y* d>) e ``
+   * turned `y` italic: the destination is no URL, so no link forms, but
+   * everything inside it was still a destination while the reader decided.
+   */
+  test('the literal case', () => {
+    expect(parseInlineMarkdown('[a](<b c *y* d>) e')).toEqual([{ text: '[a](<b c *y* d>) e' }]);
   });
 });

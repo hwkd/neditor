@@ -488,6 +488,177 @@ describe('a reset closes what described the document it replaced', () => {
     expect(editor.getMarkdown()).toBe('ACCOUNT NUMBER 1234');
     expect(editor.getDocument().blocks[0]?.content.some((run) => run.link)).toBe(false);
   });
+
+  /*
+   * R7-KEY-1. Round 6 handed focus back from a panel that `setDocument`
+   * closed, with the panel's range selected, so the rest of what the reader
+   * was typing into the panel overwrote the document -- "Read the
+   * documentation first" became "Read the //example.com first" and `change`
+   * carried it out. A panel that closes takes its keystrokes with it: focus
+   * is left outside the editor, and nothing typed after the reset reaches the
+   * document. The probe's document and its panels; the update lands part-way
+   * through the typing, as the probe's timer lands it. The real keyboard is
+   * pinned in popovers.spec.ts (PO14) and tables.spec.ts (TB5h).
+   */
+  const r7Doc = (): Block[] => [
+    block({ id: 'p', content: [{ text: 'Read the documentation first' }] }),
+    block({
+      id: 'tbl',
+      type: 'table',
+      rows: [
+        [[{ text: 'alpha beta gamma' }], [{ text: 'x' }]],
+        [[{ text: 'r2' }], [{ text: 'y' }]],
+      ],
+    }),
+    block({ id: 'img', type: 'image', content: [{ text: 'Cap' }], src: '', alt: '' }),
+    block({ id: 'co', type: 'callout', content: [{ text: 'Callout' }], icon: '💡' }),
+  ];
+
+  /**
+   * What a browser does with a typed key: it goes to whatever holds focus,
+   * after that element's keydown listeners. A button takes Space and Enter as
+   * a click; a field appends a character; an editing host replaces its
+   * selection with it and fires `input` (typing is DOM-first); `<body>` drops
+   * it.
+   */
+  function typeIntoFocus(keys: string[]): void {
+    for (const key of keys) {
+      const target = (document.activeElement ?? document.body) as HTMLElement;
+
+      if (target === document.body || press(target, key)) {
+        continue;
+      }
+
+      if (target.tagName === 'BUTTON') {
+        if (key === ' ' || key === 'Enter') {
+          target.click();
+        }
+      } else if (target.tagName === 'INPUT') {
+        (target as HTMLInputElement).value += key;
+        target.dispatchEvent(
+          new InputEvent('input', { inputType: 'insertText', data: key, bubbles: true }),
+        );
+      } else if (target.getAttribute('contenteditable') === 'true') {
+        const inputType = key === 'Enter' ? 'insertParagraph' : 'insertText';
+        const data = key === 'Enter' ? null : key;
+        const before = new InputEvent('beforeinput', {
+          inputType,
+          data,
+          bubbles: true,
+          cancelable: true,
+        });
+
+        if (!target.dispatchEvent(before)) {
+          continue;
+        }
+
+        const selection = getSelection()!;
+        const range = selection.getRangeAt(0);
+        const typed = document.createTextNode(data ?? '\n');
+        range.deleteContents();
+        range.insertNode(typed);
+        selection.collapse(typed, typed.data.length);
+        target.dispatchEvent(new InputEvent('input', { inputType, data, bubbles: true }));
+      }
+    }
+  }
+
+  const snapshot = (editor: NEditor): string => JSON.stringify(editor.getDocument());
+
+  /** Types `before`, lets the host's update land, types `after`; the `change`s after the update. */
+  function typeThroughReset(editor: NEditor, before: string[], after: string[]): string[] {
+    const changes: string[] = [];
+    typeIntoFocus(before);
+    editor.on('change', (doc) => changes.push(JSON.stringify(doc)));
+    editor.setDocument(editor.getDocument());
+    const reset = changes.length;
+    typeIntoFocus(after);
+
+    return changes.slice(reset);
+  }
+
+  test('the rest of a URL typed into the link editor does not reach the document', () => {
+    const editor = mount(r7Doc());
+    editor.focusRange('p', 9, 22);
+    press(hosts(editor)[0]!, 'k', { ctrlKey: true });
+    const popover = document.querySelector<HTMLElement>('.neditor-link-editor')!;
+    expect(popover.contains(document.activeElement), 'precondition: Mod+K took focus').toBe(true);
+    const doc = snapshot(editor);
+
+    const changes = typeThroughReset(editor, 'https:'.split(''), '//example.com'.split(''));
+
+    expect(popover.hidden).toBe(true);
+    expect(editor.element.contains(document.activeElement)).toBe(false);
+    expect(blockText(editor.getDocument().blocks[0]!)).toBe('Read the documentation first');
+    expect(snapshot(editor)).toBe(doc);
+    expect(changes).toEqual([]);
+  });
+
+  for (const key of [' ', 'Enter']) {
+    const name = key === ' ' ? 'Space' : 'Enter';
+
+    test(`${name} meant for a table toolbar button after F10 does not reach the cell`, () => {
+      const editor = mount(r7Doc());
+      // The probe's selection: Shift+→ ×4 from 6 over "beta".
+      editor.focusRange('tbl', 6, 10, { row: 0, column: 0 });
+      press(editor.element.querySelector<HTMLElement>('[data-cell="0:0"]')!, 'F10');
+      const toolbar = document.querySelector<HTMLElement>('.neditor-table-toolbar')!;
+      expect(toolbar.contains(document.activeElement), 'precondition: F10 took focus').toBe(true);
+      const doc = snapshot(editor);
+
+      const changes = typeThroughReset(editor, [], [key]);
+
+      expect(editor.element.contains(document.activeElement)).toBe(false);
+      expect(snapshot(editor)).toBe(doc);
+      expect(changes).toEqual([]);
+    });
+  }
+
+  test('a URL typed into the image editor reaches neither the caption nor the document', () => {
+    const editor = mount(r7Doc());
+    editor.element
+      .querySelector<HTMLElement>('[data-block-id="img"] .neditor-image__placeholder')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const popover = document.querySelector<HTMLElement>('.neditor-image-editor')!;
+    expect(popover.contains(document.activeElement), 'precondition: it took focus').toBe(true);
+    const doc = snapshot(editor);
+
+    const changes = typeThroughReset(editor, 'https://exa'.split(''), 'mple.com/pic.png'.split(''));
+
+    expect(popover.hidden).toBe(true);
+    expect(editor.element.contains(document.activeElement)).toBe(false);
+    expect(snapshot(editor)).toBe(doc);
+    expect(changes).toEqual([]);
+  });
+
+  test('an icon search typed into the picker does not reach the callout', () => {
+    const editor = mount(r7Doc());
+    editor.element
+      .querySelector<HTMLElement>('.neditor-block__icon')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const popover = document.querySelector<HTMLElement>('.neditor-icon-picker')!;
+    expect(popover.contains(document.activeElement), 'precondition: it took focus').toBe(true);
+    const doc = snapshot(editor);
+
+    const changes = typeThroughReset(editor, 'ro'.split(''), 'cket'.split(''));
+
+    expect(popover.hidden).toBe(true);
+    expect(editor.element.contains(document.activeElement)).toBe(false);
+    expect(snapshot(editor)).toBe(doc);
+    expect(changes).toEqual([]);
+  });
+
+  test('focus that no panel holds is left where the page put it', () => {
+    const editor = mount(r7Doc());
+    const field = document.createElement('input');
+    document.body.append(field);
+    editor.focusRange('p', 6, 8);
+    field.focus();
+
+    editor.setDocument(editor.getDocument());
+
+    expect(document.activeElement).toBe(field);
+  });
 });
 
 describe('destroy() gives the element back the way it found it', () => {

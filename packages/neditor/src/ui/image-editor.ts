@@ -55,8 +55,11 @@ export class ImageEditor {
     // algorithm showed `/sample.png` as `sample.png/`. Only while the field
     // holds one, though -- the placeholder is prose, as in the link editor.
     // The alt text is prose in the reader's language, so it always inherits.
+    // And a correction in progress is no longer the rejected value; see the
+    // link editor.
     this.#src.addEventListener('input', () => {
       this.#syncDirection();
+      this.#clearInvalid();
     });
     this.#alt = this.#createInput(doc, labels.imageAltPlaceholder, labels.imageAlt);
 

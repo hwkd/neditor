@@ -198,9 +198,14 @@ export const NEDITOR_STYLES: string = `
    accessible name, so in a read-only document an empty caption named its
    figure "Add a caption" and an empty heading announced itself as "Heading 1"
    -- instructions to a reader who cannot act on them. The renderer writes
-   contenteditable as true or false on every host, in both modes. */
+   contenteditable as true or false on every host, in both modes. Editable, it
+   still named the figure after its own placeholder, so the text is given empty
+   alternative text: drawn, never read as the element's name. The plain
+   declaration comes first because a declaration fails whole -- an engine that
+   rejects the slash syntax drops the second and keeps the first. */
 .neditor-block__content[contenteditable='true']:empty::before {
   content: attr(data-placeholder);
+  content: attr(data-placeholder) / '';
   color: var(--neditor-placeholder);
   pointer-events: none;
 }
@@ -555,6 +560,8 @@ export const NEDITOR_STYLES: string = `
 
 .neditor-slash-menu {
   width: 20em;
+  /* As the other popovers: 20em is wider than a 320px screen. */
+  max-width: calc(100vw - 2rem);
   max-height: 20rem;
   overflow: hidden;
 }
@@ -627,6 +634,18 @@ export const NEDITOR_STYLES: string = `
   border: 0;
 }
 
+/* And not selectable: a range the reader draws in the page across the editor
+   took in its last announcement, and Mod+C copied it with the blocks' text.
+   Except under a drag across blocks, which makes the blocks' text
+   unselectable: WebKit keeps a caret of its own under the pointer, at the
+   nearest text it can select, and with none left in the editor it put that
+   caret in the page after it or in a second editor's first block -- a
+   Shift+click then extended from there over every block. */
+.neditor:not([data-selecting='true']) .neditor-live-region {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 /* ----------------------------------------------------- block selection -- */
 
 .neditor:focus {
@@ -680,6 +699,17 @@ export const NEDITOR_STYLES: string = `
 
 .neditor-gutter {
   position: absolute;
+  /* Placed by showFor() on the first hover. Until then an absolute box with
+     no offset sits at its static position, below the last block, where it
+     added scrollable overflow -- and the first hover took that away again,
+     shrinking a host that ended with the editor so the click landed short.
+     Both axes: with only the block one set, an RTL editor's gutter sat at
+     its static inline position, half a gutter past the root's edge, and a
+     phone-width page scrolled sideways until the first hover. One gutter
+     width from the start edge, which the negative margin below takes back
+     to the start edge itself -- inside the root, whatever the direction. */
+  top: 0;
+  inset-inline-start: var(--neditor-gutter-width);
   display: flex;
   align-items: center;
   justify-content: flex-end;

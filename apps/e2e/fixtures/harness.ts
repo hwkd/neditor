@@ -10,7 +10,7 @@ import * as lib from '@neditor/core';
 import type { NEditor, NEditorDocument, NEditorLabels, NEditorOptions } from '@neditor/core';
 import { DOCS } from './docs.ts';
 
-type Mount = 'plain' | 'shadow' | 'iframe' | 'dialog' | 'two';
+type Mount = 'plain' | 'shadow' | 'closed' | 'nested' | 'iframe' | 'dialog' | 'two';
 
 interface LoggedEvent {
   editor: number;
@@ -168,11 +168,25 @@ async function mount(
       break;
     }
 
-    case 'shadow': {
+    case 'shadow':
+    // A closed root: `host.shadowRoot` is null, so nothing outside the editor
+    // can look in (a test reaches its DOM through `editor.element`).
+    case 'closed': {
       const outer = document.createElement('e2e-shadow-host');
       stage.appendChild(outer);
-      const shadow = outer.attachShadow({ mode: 'open' });
+      const shadow = outer.attachShadow({ mode: kind === 'closed' ? 'closed' : 'open' });
       create(makeHost(shadow, 'editor'), overrides, doc);
+      break;
+    }
+
+    // An open root inside a closed one: two shadow boundaries between the
+    // page and the editor, the outer of which names no way in.
+    case 'nested': {
+      const outer = document.createElement('e2e-shadow-host');
+      stage.appendChild(outer);
+      const inner = document.createElement('e2e-shadow-host');
+      outer.attachShadow({ mode: 'closed' }).appendChild(inner);
+      create(makeHost(inner.attachShadow({ mode: 'open' }), 'editor'), overrides, doc);
       break;
     }
 

@@ -1,5 +1,6 @@
 import type { NEditorLabels } from '../labels.ts';
 import type { PortalTheme } from './portal.ts';
+import type { AnchorRect } from './portal.ts';
 import { createPortal, positionPortal } from './portal.ts';
 
 /**
@@ -100,10 +101,19 @@ export class TableToolbar {
     this.#element.dataset.neditorTheme = theme;
   }
 
-  show(anchor: DOMRect): void {
+  /**
+   * Shows the toolbar against `anchor`, or against what `anchor` answers for
+   * the toolbar's own height -- measured once it is visible, for a caller
+   * whose choice of anchor depends on whether the toolbar fits beside it.
+   */
+  show(anchor: AnchorRect | ((height: number) => AnchorRect)): void {
     this.#element.hidden = false;
     this.#open = true;
-    positionPortal(this.#element, anchor, { prefer: 'above' });
+    positionPortal(
+      this.#element,
+      typeof anchor === 'function' ? anchor(this.#element.getBoundingClientRect().height) : anchor,
+      { prefer: 'above' },
+    );
   }
 
   hide(): void {

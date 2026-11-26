@@ -233,3 +233,65 @@ describe('the limit is a number of entries, whatever it was given', () => {
     expect(history.undo({ blocks: [], selection: null })).toBeNull();
   });
 });
+
+describe('redo restores where the redone edit left the reader (TXT-12)', () => {
+  const at = (blockId: string, start: number, end = start) => ({ blockId, start, end });
+
+  test('a settled edit redoes to its settled selection, not to the caret at undo time', () => {
+    const history = new History();
+    // Bold "world": recorded with the range it started from, settled on it.
+    history.record({ blocks: entry('plain').blocks, selection: at('p', 6, 11) });
+    history.settle({ selection: at('p', 6, 11) });
+    // Enter at the end, from a bare caret the arrow key left.
+    history.record({ blocks: entry('bold').blocks, selection: at('p', 11) });
+    history.settle({ selection: at('q', 0) });
+
+    const enterUndone = history.undo({ blocks: entry('split').blocks, selection: at('q', 0) });
+    // The second undo is pressed with the caret where the first one put it.
+    history.undo({ blocks: entry('bold').blocks, selection: enterUndone!.selection });
+
+    const plain = { blocks: entry('plain').blocks, selection: at('p', 6, 11) };
+    expect(history.redo(plain)?.selection).toEqual(at('p', 6, 11));
+    // And redoing the Enter comes back to the new block, where it left the caret.
+    const bold = { blocks: entry('bold').blocks, selection: at('p', 6, 11) };
+    expect(history.redo(bold)?.selection).toEqual(at('q', 0));
+  });
+
+  test('undo after redo still restores where the edit began', () => {
+    const history = new History();
+    history.record({ blocks: entry('a').blocks, selection: at('p', 3) });
+    history.settle({ selection: at('p', 8) });
+
+    history.undo({ blocks: entry('b').blocks, selection: at('p', 8) });
+    history.redo({ blocks: entry('a').blocks, selection: at('p', 0) });
+
+    const again = history.undo({ blocks: entry('b').blocks, selection: at('p', 8) });
+    expect(again?.selection).toEqual(at('p', 3));
+  });
+
+  test('two edits recorded before a settle: the first ends where the second began', () => {
+    const history = new History();
+    // A keystroke and the input rule it fires, in one task.
+    history.record({ blocks: entry('a').blocks, selection: at('p', 1) });
+    history.record({ blocks: entry('b').blocks, selection: at('p', 2) });
+    history.settle({ selection: at('p', 0) });
+
+    history.undo({ blocks: entry('c').blocks, selection: at('p', 0) });
+    history.undo({ blocks: entry('b').blocks, selection: at('p', 2) });
+
+    expect(history.redo({ blocks: entry('a').blocks, selection: null })?.selection).toEqual(
+      at('p', 2),
+    );
+  });
+
+  test('a settle that arrives after an undo describes nothing', () => {
+    const history = new History();
+    history.record({ blocks: entry('a').blocks, selection: at('p', 1) });
+    history.undo({ blocks: entry('b').blocks, selection: at('p', 4) });
+    history.settle({ selection: at('x', 9) });
+
+    expect(history.redo({ blocks: entry('a').blocks, selection: null })?.selection).toEqual(
+      at('p', 4),
+    );
+  });
+});

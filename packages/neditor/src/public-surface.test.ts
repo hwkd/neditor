@@ -1008,6 +1008,68 @@ describe('a shadow-mounted selection keeps its direction', () => {
       window.getSelection = original;
     }
   });
+
+  // R14-PTR-2. The selection does not always know: WebKit says "none" for
+  // one a mouse made (measured: a drag and a double-click; its Shift+arrow
+  // says "backward"), and the range then reads forward whichever way it was
+  // dragged. The reading says so (`undirected`), which is what lets a drag a
+  // peer's update redraws ask the press instead of the reported anchor --
+  // and only there: a selection read straight, or one that names its
+  // direction, is taken at its word. happy-dom has no composed ranges and no
+  // `direction`, so the selection is a stand-in, as above; the drag itself
+  // is pinned in WebKit in pointer-select.spec.ts (P17b2).
+  for (const [direction, undirected] of [
+    ['none', true],
+    [undefined, true],
+    ['forward', undefined],
+    ['backward', undefined],
+  ] as const) {
+    test(`a composed reading whose selection reports ${direction ?? 'no direction at all'} is ${undirected ? 'undirected' : 'directed'}`, async () => {
+      const { readSelection } = await import('./view/selection.ts');
+      const outer = document.createElement('div');
+      document.body.append(outer);
+      const shadow = outer.attachShadow({ mode: 'open' });
+      const host = document.createElement('p');
+      host.textContent = 'Alpha one';
+      shadow.append(host);
+      Object.defineProperty(shadow, 'getSelection', { value: undefined, configurable: true });
+      const text = host.firstChild!;
+      const retargeted = document.createRange();
+      retargeted.setStart(outer, 0);
+      const original = window.getSelection;
+      window.getSelection = () =>
+        ({
+          rangeCount: 1,
+          anchorNode: outer,
+          focusNode: outer,
+          isCollapsed: false,
+          ...(direction ? { direction } : {}),
+          getRangeAt: () => retargeted,
+          getComposedRanges: () => [
+            { startContainer: text, startOffset: 2, endContainer: text, endOffset: 6 },
+          ],
+        }) as unknown as Selection;
+
+      try {
+        const reading = readSelection(host)!;
+        expect(reading.undirected).toBe(undirected);
+        expect(reading.anchorOffset).toBe(direction === 'backward' ? 6 : 2);
+      } finally {
+        window.getSelection = original;
+        outer.remove();
+      }
+    });
+  }
+
+  test('a selection read straight from the document is never undirected', async () => {
+    const { readSelection } = await import('./view/selection.ts');
+    const host = document.createElement('p');
+    host.textContent = 'Alpha one';
+    document.body.append(host);
+    getSelection()!.setBaseAndExtent(host.firstChild!, 6, host.firstChild!, 2);
+    expect(readSelection(host)!.undirected).toBeUndefined();
+    host.remove();
+  });
 });
 
 describe('a shadow-mounted editor places its caret where the browser will take it', () => {

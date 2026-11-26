@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest';
 
 import { NEDITOR_STYLES } from './styles.ts';
 import { DEFAULT_LABELS, pluralLabel, resolveLabels } from './labels.ts';
+import type { NEditorLabels } from './labels.ts';
 import { createEditor } from './index.ts';
 import { SLASH_COMMANDS, SlashMenu, createSlashCommands, filterCommands } from './ui/slash-menu.ts';
 
@@ -221,6 +222,90 @@ describe('a translation made before a label existed is not lost to English', () 
 
   test('and a host that overrides nothing keeps the defaults', () => {
     expect(resolveLabels().blockSelectedNamed).toBe(DEFAULT_LABELS.blockSelectedNamed);
+  });
+
+  /*
+   * R2-NAV-7: the cut, move, indent and duplicate announcements arrived after
+   * the live region was translatable, and a host that had translated it heard
+   * "Block cut" in English.
+   */
+  test('their "deleted" stands in for "cut", and the newer sentences say nothing English', () => {
+    const labels = resolveLabels({
+      blockDeleted: 'Bloc supprimé',
+      blocksDeleted: '{count} blocs supprimés',
+      blockSelected: '1 bloc sélectionné',
+    });
+
+    expect(labels.blockCut).toBe('Bloc supprimé');
+    expect(labels.blocksCut).toBe('{count} blocs supprimés');
+    expect(labels.textlessBlockSelectedNamed).toBe('1 bloc sélectionné');
+    for (const key of [
+      'blocksMovedUp',
+      'blocksMovedDown',
+      'blocksIndented',
+      'blocksOutdented',
+      'blockDuplicated',
+      'blocksDuplicated',
+    ] as const) {
+      expect({ [key]: labels[key] }).toEqual({ [key]: '' });
+    }
+  });
+
+  test('a newer sentence the host did translate is theirs', () => {
+    const labels = resolveLabels({ blockDeleted: 'Bloc supprimé', blockCut: 'Bloc coupé' });
+
+    expect(labels.blockCut).toBe('Bloc coupé');
+  });
+
+  // R3-KEY-5: "translating" is not a hand-written list of the live region's
+  // labels -- one left out the table announcements -- and needs an older one.
+  test('a host that supplies no older announcement keeps every English sentence', () => {
+    for (const labels of [
+      resolveLabels(),
+      resolveLabels({}),
+      resolveLabels({ blocksIndented: 'Tabbed in', blockTypeNames: { quote: 'Quotation' } }),
+    ]) {
+      expect(labels.blockCut).toBe(DEFAULT_LABELS.blockCut);
+      expect(labels.blocksMovedUp).toBe(DEFAULT_LABELS.blocksMovedUp);
+      expect(labels.blockDuplicated).toBe(DEFAULT_LABELS.blockDuplicated);
+    }
+  });
+
+  // R4-KEY-2: an older announcement, not any older label. A host that rewords
+  // one English placeholder, or names the editor, has not translated the live
+  // region, and lost the move / indent / duplicate sentences and heard "Block
+  // deleted" for a cut.
+  test('a host that customised a label outside the live region keeps every English sentence', () => {
+    for (const overrides of [
+      { placeholders: { paragraph: 'Write something…' } },
+      { editor: 'Release notes' },
+      { imageUrl: 'Picture address' },
+      { bold: 'Strong', slashCommands: { quote: { label: 'Q', description: '', keywords: [] } } },
+    ] satisfies Partial<NEditorLabels>[]) {
+      const labels = resolveLabels(overrides);
+
+      expect(labels.blockCut).toBe(DEFAULT_LABELS.blockCut);
+      expect(labels.blocksCut).toBe(DEFAULT_LABELS.blocksCut);
+      expect(labels.blocksMovedUp).toBe(DEFAULT_LABELS.blocksMovedUp);
+      expect(labels.blocksIndented).toBe(DEFAULT_LABELS.blocksIndented);
+      expect(labels.blockDuplicated).toBe(DEFAULT_LABELS.blockDuplicated);
+    }
+  });
+
+  test('a host that translated any older announcement is translating', () => {
+    for (const overrides of [
+      { undone: 'Annulé' },
+      { rowInsertedAbove: 'Ligne insérée au-dessus' },
+      { leftEditor: 'Sorti de l’éditeur' },
+      { blocksSelected: '{count} blocs sélectionnés' },
+      { toggleCollapsed: 'Replié' },
+    ] satisfies Partial<NEditorLabels>[]) {
+      const labels = resolveLabels(overrides);
+
+      expect(labels.blocksMovedUp).toBe('');
+      expect(labels.blockDuplicated).toBe('');
+      expect(labels.blockCut).toBe(DEFAULT_LABELS.blockDeleted);
+    }
   });
 });
 

@@ -126,4 +126,59 @@ test.describe('15 · images', () => {
     await editor.load({ doc: 'image-empty', editable: false });
     await expect(editor.block('img').locator('.neditor-image__placeholder')).toHaveCount(0);
   });
+
+  // e2e only: the defect is WebKit's own Tab order, which skips any button
+  // without an explicit tabindex; happy-dom has no Tab order to ask.
+  test('I7 the image trigger and the "Add an image" button are Tab stops in every engine', async ({
+    editor,
+    page,
+  }) => {
+    // Was A11Y-4: WebKit left the trigger out of the Tab order, so the alt
+    // text could not be corrected from the keyboard there.
+    await editor.load({ doc: 'image' });
+    await editor.caretAtEnd('before');
+    await page.keyboard.press('Tab');
+    await expect(editor.block('img').locator('.neditor-image__trigger')).toBeFocused();
+
+    await editor.load({ doc: 'image-empty' });
+    await editor.caretAtEnd('before');
+    await page.keyboard.press('Tab');
+    await expect(editor.block('img').locator('.neditor-image__placeholder')).toBeFocused();
+
+    // Read-only the trigger is disabled, and the explicit tabindex does not
+    // put it back.
+    await editor.load({ doc: 'image', editable: false });
+    await page.locator('#before').focus();
+    for (let i = 0; i < 4; i += 1) {
+      await page.keyboard.press('Tab');
+      await expect(editor.block('img').locator('.neditor-image__trigger')).not.toBeFocused();
+    }
+  });
+
+  test('I8 an empty caption does not name its figure after the placeholder', async ({ editor }) => {
+    // Was UI-9: the placeholder is generated content, which is part of the
+    // accessible name, so the figure announced itself as "Add a caption".
+    await editor.load({ doc: 'image' });
+    await editor.setDocument({
+      blocks: [
+        {
+          id: 'img',
+          type: 'image',
+          content: [],
+          depth: 0,
+          src: '/sample.png',
+          alt: 'A blue gradient',
+        },
+      ],
+    });
+    const caption = editor.block('img').locator('figcaption');
+    // Still drawn for a sighted author...
+    expect(
+      await caption.evaluate((element) => getComputedStyle(element, '::before').content),
+    ).toContain('Add a caption');
+    // ...and named only by what is really there.
+    const tree = await editor.block('img').ariaSnapshot();
+    expect(tree).not.toContain('Add a caption');
+    expect(tree).toContain('img "A blue gradient"');
+  });
 });

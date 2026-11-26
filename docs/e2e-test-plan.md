@@ -17,17 +17,17 @@ and the unit tests themselves list the gaps:
 
 | Gap happy-dom cannot observe                                       | Where it is admitted                                                          |
 | ------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
-| Layout (every rect is zero, drop gap always "past the last block") | `commit-records.test.ts:115`, `portal-gestures.test.ts:668,746`               |
-| Selection vs focus (selection kept regardless of focus)            | `view/selection.test.ts:24-26`, AGENTS.md                                     |
-| The newline-after-`<pre>` parsing rule                             | `view/rich-dom.test.ts:1529,1554`                                             |
+| Layout (every rect is zero, drop gap always "past the last block") | `commit-records.test.ts:115`, `portal-gestures.test.ts:770,884`               |
+| Selection vs focus (selection kept regardless of focus)            | `view/selection.test.ts:24-27`, AGENTS.md                                     |
+| The newline-after-`<pre>` parsing rule                             | `view/rich-dom.test.ts:1597,1637`                                             |
 | Native drag/drop: `dataTransfer`, coordinates, caret-from-point    | `foreign-input.test.ts:69,209`                                                |
-| Shadow-DOM event retargeting                                       | `portal-gestures.test.ts:473-478`                                             |
-| Pointer capture and the compatibility click after a drag           | `portal-gestures.test.ts:410`                                                 |
+| Shadow-DOM event retargeting                                       | `portal-gestures.test.ts:521-528`                                             |
+| Pointer capture and the compatibility click after a drag           | `portal-gestures.test.ts:458`                                                 |
 | A genuine second realm (iframe)                                    | `util/dom.test.ts:13`                                                         |
 | Real clipboard round trips                                         | every paste test hand-builds a `ClipboardEvent`                               |
 | IME composition                                                    | synthetic `CompositionEvent`s in `editor.test.ts`                             |
 | Cross-block pointer selection                                      | AGENTS.md: "never verify one by building that range with the Selection API"   |
-| Scrolling / `scrollIntoView`, trailing `<br>` line box             | `public-surface.test.ts:303-315,603-640`                                      |
+| Scrolling / `scrollIntoView`, trailing `<br>` line box             | `public-surface.test.ts:305-319,605-640`                                      |
 | Touch: `pointercancel`, no hover, `touch-action`                   | AGENTS.md; README ("verified with synthetic pointer events, not on hardware") |
 
 **Scope rule:** e2e covers (a) every user-facing feature at least once through
@@ -275,6 +275,38 @@ and then pasted with a **real** Mod+V.
 - C10 Into a table cell ⇒ flattened text, marks kept.
 - C11 **`<pre>` newline rule (real parser)**: a code block whose text starts with `\n` survives copy → paste unchanged.
 - C12 Native text-mode copy of a partial, formatted range pastes back with its marks.
+- C13 A link copied from the editor and pasted back is a link with no underline mark (the editor writes its own text-range clipboard).
+- C14 A checked to-do's text copied and pasted over itself gains no strikethrough mark.
+- C15 A soft break and a double space survive a text-range copy and paste (Firefox collapsed both).
+- C16 Cut of a text range takes it out as one undo step.
+- C17 Windows and classic Mac line endings pasted into a code block become newlines.
+- C18 Plain lines pasted into a list item become items of that list, as Enter makes them.
+- C19 A Google Docs link (a styled, underlined span inside the `<a>`) pastes as a link with no underline mark.
+- C20 A block copy pasted into a plain contenteditable keeps its soft breaks and runs of spaces (`<br>` and `white-space: pre-wrap` in our HTML).
+- C21 A line-wrapped, indented page `<p>`, selected with a mouse drag and copied, pastes as one line (Firefox copies the source whitespace as it is).
+- C22 A Word list (`mso-list` paragraphs, or WebKit's sanitized form of them) pastes as list items at their level, markers dropped.
+- C22b A Word list indented in inches (US and Mac Word, kept by WebKit's sanitizer) keeps its nesting, and a roman `viii.` marker is numbered.
+- C23 A text range copied from a code block keeps its indent and its double space in another rich-text field (`white-space: pre-wrap` / `<pre>` in our HTML).
+- C24 A page's `<code>` styled by a stylesheet, and an inline `white-space: pre` span inside a line-wrapped paragraph, keep their own spaces when selected and copied, while the source indentation around them collapses.
+- C25 Chat messages -- `<div class>` a stylesheet makes `pre-wrap` -- keep their lines and double spaces when selected and copied (Firefox copies the class, not the style; the plain text decides).
+- C26 A page paragraph's source-wrapped `<code>` (default `white-space: normal`) pastes on one line, its double space collapsed.
+- C27 The undrawn space at the end of a line, a heading, a bold run and a table cell stays unseen (WebKit writes each as an `Apple-converted-space`).
+- C28 Pretty-printed blocks inside a `pre-wrap` region (cells, list items, quotes with a newline after a child block) keep their last letters.
+- C29 A `pre-wrap` table cell keeps the spaces at its edges (Firefox, whose plain text separates cells with tabs).
+- C29b A `pre-wrap` block keeps the space it starts with (Firefox writes no undrawn leading space but at the very start of a copy, so its plain text decides).
+- C29c A `pre-wrap` cell after one Firefox spells differently in its plain text (an image's alt text) keeps its spaces.
+- C29d A `pre-wrap` cell in a row whose first cell is empty, holds only a picture, or follows a row whose last cell Firefox spells differently keeps its spaces.
+- C29e A `pre-wrap` quote or list item keeps the space it starts with and its line breaks, and an item's undrawn leading spaces stay out (Firefox indents each line of a list item, a definition and a quote in its plain text).
+- C29f A `pre-wrap` item keeps a blank line, a quote in a quote and a second paragraph in an item keep the space they start with, a `pre-wrap` paragraph keeps a space after a `<br>`, and a `normal` item's undrawn spaces after a `<br>` stay out even when there are exactly as many as Firefox's indentation (Firefox writes no indentation on an empty line and a blank line between paragraphs).
+- C29g A second paragraph in a `pre-wrap` table cell, or in a `pre-wrap` list item a drag began inside, keeps the spaces it starts with (Firefox writes that blank line where it indents nothing, too).
+- C29h A list, quote or definition inside a table cell keeps only the spaces it drew, after a paragraph or a `<br>` (Firefox indents its lines though the cell is not indented; each line is matched past the indentation of the element it starts in).
+- C30 A mouse drag begun just past the end of the line above pastes no empty line (Chromium and WebKit mark the crossed break with `Apple-interchange-newline`).
+- C30b The same drag from a list item (the break written inside the item) or from a pretty-printed page (Firefox's emptied block, its plain text starting with newlines), pasted mid-paragraph, joins the paragraph it lands in.
+- C30c A drag ended at the start of the line below (a heading), pasted mid-paragraph, leaves the reader's text its type (Firefox writes that heading, emptied).
+- C30d The same drags from blocks holding inline markup -- a paragraph ending in a link, a heading whose text is in a `<span>`, a code block -- and from a pretty-printed page, pasted mid-paragraph, join the paragraph they land in (Firefox writes the emptied block with its inline elements, its indentation, or as an empty `<pre>`); so do drags begun past the end of a paragraph or a summary in a `<details>`, or ended at the start of a summary (Firefox and WebKit write the emptied `<details>`).
+- C30e A drag begun in an open `<details>`' answer and ended past the next paragraph, pasted mid-paragraph, pastes the answers as paragraphs joined to the text around the caret (the copy starts with the `<details>` and no summary) -- and so does one whose FAQ is inside a page wrapper (`<div class="faq">`), or nested in another `<details>`, ended past the wrapper.
+- C30f A drag across closed `<details>` pastes each question as a toggle at the paste's depth (WebKit writes the start tags of every closed `<details>` the drag crossed first, around the whole copy).
+- C30g A drag begun at a drawn space (after `Sentence.` in `Sentence.  Next words`), pasted mid-paragraph, keeps that space (WebKit writes it as a lone converted space at the copy's start).
 
 ### 12 · Drop — `drop.spec.ts` (P0, security)
 
@@ -339,7 +371,7 @@ set in the source's `dragstart`.
 
 - PO1 Open the link editor from block A, click into block B, press Escape: B's block is selected; the caret does **not** jump to A.
 - PO2 Escape inside a table cell only dismisses a popover that cell opened.
-- PO3 Page scroll closes slash menu, link/image editors, icon picker and format toolbar, but **not** the table toolbar; scrolling _inside_ a portal closes nothing.
+- PO3 Page scroll closes the slash menu and the format toolbar, but **not** the table toolbar, which follows its cell; the link editor, image editor and icon picker stay open and follow their anchor while they hold focus (a dialog being typed into must not hand the rest of a URL to the document), and close only once focus has left them; scrolling _inside_ a portal closes nothing.
 - PO4 Every portal is positioned inside the viewport near all four edges, and at a 375 px mobile width.
 
 ### 19 · Embedding — `embedding.spec.ts` (P1)

@@ -57,8 +57,12 @@ export class LinkEditor {
     // the field holds one, though: the placeholder is prose in the reader's
     // language, and a field forced LTR drew a translated one left-aligned with
     // its ellipsis on the wrong end. See `#syncDirection`.
+    // A correction in progress is not the rejected value: the message and
+    // `aria-invalid` stood while the user typed the fixed URL, and a reader
+    // heard "invalid" on every character of it.
     this.#input.addEventListener('input', () => {
       this.#syncDirection();
+      this.#clearInvalid();
     });
 
     // Named rather than colour-only, and wired to the input by

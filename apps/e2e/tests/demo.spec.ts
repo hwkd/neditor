@@ -75,4 +75,46 @@ test.describe('27 · demo site smoke', () => {
     await expect(page.locator('[data-output="json"]')).toBeVisible();
     await expect(page.locator('[data-output="json"]')).toContainText('"seed-13"');
   });
+
+  // e2e only: the demo page, real focus and Firefox's form-state restoration.
+  test('DS3 pressing Undo from the keyboard until the history is empty hands focus to Redo', async ({
+    page,
+  }) => {
+    // Was A11Y-3: the last undo disabled the button, focus() on it did
+    // nothing, focus stayed in the document and the next Space typed there.
+    await page.goto(DEMO_URL);
+    const undo = page.locator('[data-action="undo"]');
+    const redo = page.locator('[data-action="redo"]');
+    const markdown = page.locator('[data-output="markdown"]');
+    await page.locator('[data-block-id="seed-13"] .neditor-block__content').click();
+    await page.keyboard.type('hello');
+    await expect(undo).toBeEnabled();
+
+    await undo.focus();
+    await page.keyboard.press('Space');
+    await expect(undo).toBeDisabled();
+    await expect(redo).toBeFocused();
+    await expect(markdown).not.toContainText('hello');
+
+    // The next Space redoes rather than typing a space into the document.
+    await page.keyboard.press('Space');
+    await expect(markdown).toContainText('hello');
+    await expect(redo).toBeDisabled();
+    await expect(undo).toBeFocused();
+  });
+
+  test('DS4 a reload does not bring back enabled history buttons', async ({ page }) => {
+    // Was A11Y-6 (Firefox): form-state restoration re-enabled the buttons
+    // from before the reload, over a history that no longer existed.
+    await page.goto(DEMO_URL);
+    await page.locator('[data-block-id="seed-13"] .neditor-block__content').click();
+    await page.keyboard.type('abc');
+    await page.keyboard.press('ControlOrMeta+z');
+    await expect(page.locator('[data-action="redo"]')).toBeEnabled();
+
+    await page.reload();
+    await page.locator('#editor.neditor').waitFor();
+    await expect(page.locator('[data-action="undo"]')).toBeDisabled();
+    await expect(page.locator('[data-action="redo"]')).toBeDisabled();
+  });
 });

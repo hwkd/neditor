@@ -117,6 +117,7 @@ export {
   parseRichTextFromHtml,
   renderRichText,
 } from './view/rich-dom.ts';
+export type { HtmlReadOptions } from './view/rich-dom.ts';
 export { sanitizeImageUrl, sanitizeUrl } from './util/url.ts';
 
 export { NEDITOR_STYLES, injectStyles } from './styles.ts';

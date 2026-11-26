@@ -134,8 +134,54 @@ export interface NEditorLabels {
    * type name, `{text}` the start of the block's own text.
    */
   blockSelectedNamed: string;
-  /** For a block with no text of its own -- a divider, an empty paragraph. */
+  /**
+   * For a block with nothing in it: an empty paragraph, a table with no text in
+   * any cell, an image with no picture. `{type}` is substituted.
+   */
   emptyBlockSelectedNamed: string;
+  /**
+   * For a block that is not empty but has no text to read out: a divider, an
+   * image with a picture and neither alt text nor caption. `{type}` is
+   * substituted. (An image with alt text is named by it, through
+   * `blockSelectedNamed`.)
+   */
+  textlessBlockSelectedNamed: string;
+  /**
+   * What a block is called as the `{type}` of a selection announcement, per
+   * type. A type with no entry here is called by its slash-menu label.
+   *
+   * The menu's "Text" is an instruction to start writing, not a name: as the
+   * name of a selected block it read "Text selected, Block B", which sounds
+   * like a text selection. Merged per entry, and a host that translates a
+   * type's slash command without naming it here keeps its own translation
+   * rather than this English default.
+   */
+  blockTypeNames: Partial<Record<BlockType, string>>;
+  /**
+   * Announced when selected blocks are cut. `{count}` is substituted. Left
+   * out by a host that supplies any announcement older than these, its
+   * `blockDeleted` / `blocksDeleted` stand in -- their English defaults when
+   * it gave none, so a cut is never announced as nothing.
+   */
+  blockCut: string;
+  blocksCut: string;
+  /**
+   * Announced when selected blocks move one place (⌘/Ctrl+Shift+↑/↓). Left out
+   * by a host that supplies any announcement older than these, nothing is
+   * announced.
+   */
+  blocksMovedUp: string;
+  blocksMovedDown: string;
+  /** Announced when Tab or Shift+Tab indents or outdents selected blocks; as above. */
+  blocksIndented: string;
+  blocksOutdented: string;
+  /**
+   * Announced when selected blocks are duplicated, before the selection of the
+   * copies. `{count}` is substituted. Left out by a host that supplies any
+   * announcement older than these, the selection is announced alone.
+   */
+  blockDuplicated: string;
+  blocksDuplicated: string;
   rowAdded: string;
   rowInsertedAbove: string;
   rowInsertedBelow: string;
@@ -226,6 +272,48 @@ export const DEFAULT_SLASH_COMMANDS: Record<BlockType, SlashCommandLabel> = {
   },
 };
 
+/**
+ * The live region's sentences: every label that is announced rather than
+ * shown. A group of its own because whether a host translates the live
+ * region is asked of exactly these keys (`resolveLabels`).
+ */
+const DEFAULT_ANNOUNCEMENTS = {
+  blocksSelected: '{count} blocks selected',
+  blockSelected: '1 block selected',
+  noBlocksSelected: 'No blocks selected',
+  blocksDeleted: '{count} blocks deleted',
+  blockDeleted: 'Block deleted',
+  toggleCollapsed: 'Toggle collapsed',
+  todoChecked: 'Checked',
+  todoUnchecked: 'Unchecked',
+  blockSelectedNamed: '{type} selected, {text}',
+  // The type leads, as it does in the named form: mid-sentence, a type name
+  // spelt for the start of one read "Empty Table selected".
+  emptyBlockSelectedNamed: '{type} selected, empty',
+  textlessBlockSelectedNamed: '{type} selected',
+  blockTypeNames: { paragraph: 'Paragraph' },
+  blockCut: 'Block cut',
+  blocksCut: '{count} blocks cut',
+  blocksMovedUp: 'Moved up',
+  blocksMovedDown: 'Moved down',
+  blocksIndented: 'Indented',
+  blocksOutdented: 'Outdented',
+  blockDuplicated: 'Block duplicated',
+  blocksDuplicated: '{count} blocks duplicated',
+  toggleExpanded: 'Toggle expanded',
+  rowAdded: 'Row added',
+  rowInsertedAbove: 'Row inserted above',
+  rowInsertedBelow: 'Row inserted below',
+  rowDeleted: 'Row deleted',
+  columnInsertedLeft: 'Column inserted left',
+  columnInsertedRight: 'Column inserted right',
+  columnDeleted: 'Column deleted',
+  changedTo: 'Changed to {type}',
+  undone: 'Undone',
+  redone: 'Redone',
+  leftEditor: 'Left the editor',
+} satisfies Partial<NEditorLabels>;
+
 export const DEFAULT_LABELS: NEditorLabels = {
   editor: 'Rich text editor',
 
@@ -293,29 +381,46 @@ export const DEFAULT_LABELS: NEditorLabels = {
   deleteColumnGlyph: '⤫ column',
   codeBlockLabel: 'code',
 
-  blocksSelected: '{count} blocks selected',
-  blockSelected: '1 block selected',
-  noBlocksSelected: 'No blocks selected',
-  blocksDeleted: '{count} blocks deleted',
-  blockDeleted: 'Block deleted',
-  toggleCollapsed: 'Toggle collapsed',
-  todoChecked: 'Checked',
-  todoUnchecked: 'Unchecked',
-  blockSelectedNamed: '{type} selected, {text}',
-  emptyBlockSelectedNamed: 'Empty {type} selected',
-  toggleExpanded: 'Toggle expanded',
-  rowAdded: 'Row added',
-  rowInsertedAbove: 'Row inserted above',
-  rowInsertedBelow: 'Row inserted below',
-  rowDeleted: 'Row deleted',
-  columnInsertedLeft: 'Column inserted left',
-  columnInsertedRight: 'Column inserted right',
-  columnDeleted: 'Column deleted',
-  changedTo: 'Changed to {type}',
-  undone: 'Undone',
-  redone: 'Redone',
-  leftEditor: 'Left the editor',
+  ...DEFAULT_ANNOUNCEMENTS,
 };
+
+/** Announcements added after the live region was translatable (9 Nov 2026). */
+const ANNOUNCED_LATER = [
+  'blockCut',
+  'blocksCut',
+  'blocksMovedUp',
+  'blocksMovedDown',
+  'blocksIndented',
+  'blocksOutdented',
+  'blockDuplicated',
+  'blocksDuplicated',
+] as const satisfies readonly (keyof typeof DEFAULT_ANNOUNCEMENTS)[];
+
+/** Every label introduced with `ANNOUNCED_LATER` (9 Nov 2026), announced or not. */
+const INTRODUCED_LATER: ReadonlySet<string> = new Set<keyof NEditorLabels>([
+  ...ANNOUNCED_LATER,
+  'textlessBlockSelectedNamed',
+  'blockTypeNames',
+  'imageUrl',
+]);
+
+/**
+ * The announcements a host could have translated before `ANNOUNCED_LATER`
+ * existed. Supplying any of them is what says a host translates the live
+ * region, and so would rather hear nothing than an English sentence among
+ * its own.
+ *
+ * Stated as a predicate over the label's kind -- announced, and older than
+ * this release -- rather than as a list. Each list so far was wrong in its own
+ * direction: one hand-written list of announcements left out the table ones,
+ * so a host that translated only those heard English; "any older label at
+ * all" counted a host that renamed the editor or reworded one English
+ * placeholder, and it lost the move, indent and duplicate sentences and heard
+ * "Block deleted" for a cut.
+ */
+const OLDER_ANNOUNCEMENTS: ReadonlySet<string> = new Set(
+  Object.keys(DEFAULT_ANNOUNCEMENTS).filter((key) => !INTRODUCED_LATER.has(key)),
+);
 
 /** Fills in whatever the caller did not override. */
 export function resolveLabels(overrides?: Partial<NEditorLabels>): NEditorLabels {
@@ -333,16 +438,52 @@ export function resolveLabels(overrides?: Partial<NEditorLabels>): NEditorLabels
   const standIn = overrides?.blockSelected?.replaceAll('{count}', '1');
   const named = overrides?.blockSelectedNamed ?? standIn;
   const emptyNamed = overrides?.emptyBlockSelectedNamed ?? standIn;
+  const textlessNamed = overrides?.textlessBlockSelectedNamed ?? standIn;
+  // The announcements added after the live region was first translatable get
+  // the same treatment: a host that translated it before they existed heard
+  // "Block cut" in English after a cut. A cut is a deletion as far as the
+  // document goes, so the sentence for that stands in -- the host's own, or
+  // the English default where it gave none: a cut that says nothing at all
+  // left a screen-reader user unsure anything happened. The others have no
+  // sentence near enough to borrow, and are left unsaid -- a duplicate still
+  // announces the copies' selection in the host's words.
+  const translating = Object.entries(overrides ?? {}).some(
+    ([key, value]) => value !== undefined && OLDER_ANNOUNCEMENTS.has(key),
+  );
+  const later = (
+    key: (typeof ANNOUNCED_LATER)[number],
+    standInFor?: string,
+  ): Partial<NEditorLabels> =>
+    overrides?.[key] !== undefined || !translating ? {} : { [key]: standInFor ?? '' };
+  // The same reasoning for a type's name: a host that translated the slash
+  // command for paragraphs but has never heard of `blockTypeNames` would
+  // otherwise hear an English "Paragraph" in a French sentence. Its own
+  // translation of the command stands in.
+  const typeNames = Object.fromEntries(
+    Object.entries(DEFAULT_LABELS.blockTypeNames).filter(
+      ([type]) => overrides?.slashCommands?.[type as BlockType] === undefined,
+    ),
+  );
 
   return {
     ...DEFAULT_LABELS,
     ...overrides,
     ...(named === undefined ? {} : { blockSelectedNamed: named }),
     ...(emptyNamed === undefined ? {} : { emptyBlockSelectedNamed: emptyNamed }),
+    ...(textlessNamed === undefined ? {} : { textlessBlockSelectedNamed: textlessNamed }),
+    ...later('blockCut', overrides?.blockDeleted ?? DEFAULT_LABELS.blockDeleted),
+    ...later('blocksCut', overrides?.blocksDeleted ?? DEFAULT_LABELS.blocksDeleted),
+    ...later('blocksMovedUp'),
+    ...later('blocksMovedDown'),
+    ...later('blocksIndented'),
+    ...later('blocksOutdented'),
+    ...later('blockDuplicated'),
+    ...later('blocksDuplicated'),
     placeholders: { ...DEFAULT_LABELS.placeholders, ...overrides?.placeholders },
     // Per entry, like placeholders: translating one command must not blank the
     // other thirteen.
     slashCommands: { ...DEFAULT_LABELS.slashCommands, ...overrides?.slashCommands },
+    blockTypeNames: { ...typeNames, ...overrides?.blockTypeNames },
   };
 }
 

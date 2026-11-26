@@ -6,6 +6,7 @@ import {
   blocksFromHtml,
   blocksFromMarkdown,
   blocksToHtml,
+  createEditor,
   normalizeDocument,
   toMarkdown,
 } from './index.ts';
@@ -89,6 +90,16 @@ const CORPUS: Record<string, Block[]> = {
   'paragraph of asterisks': [b({ content: t('***') })],
   'code block': [b({ type: 'code', content: t('const a = 1;') })],
   'code block with fence': [b({ type: 'code', content: t('```js\nx = 1\n```') })],
+  // R2-PARSE-7: a line that starts with three backticks and holds another is a
+  // code span in chat apps and in CommonMark, never an opening fence.
+  'text in triple backticks, then a line': [
+    b({ content: t('```npm install```') }),
+    b({ content: t('then run it') }),
+  ],
+  'code run in triple backticks, then a line': [
+    b({ content: t('a```b', { marks: ['code'] }) }),
+    b({ content: t('then run it') }),
+  ],
   image: [b({ type: 'image', src: 'https://a.test/x.png', alt: 'cat' })],
   'image with paren in src': [b({ type: 'image', src: 'https://a.test/a(1).png', alt: 'cat' })],
   table: [
@@ -738,6 +749,12 @@ const bestOf = (work: () => void): number => {
  * more when the whole suite is running beside it.
  */
 const LINEAR = 90;
+/**
+ * How much more a nesting may cost than the same items flat. Linear work
+ * measures one to two (under a loaded suite, up to about three); reading every
+ * level through the rest is well past this.
+ */
+const NESTED_OVER_FLAT = 8;
 const growth = (work: (size: number) => void, size: number): number => {
   let least = Infinity;
 
@@ -2161,43 +2178,55 @@ describe('audit 28', () => {
 
   // An item's quote and table are visited now, so a quote's lists and a
   // table's cells must not each be read through everything nested below them.
-  // The list bound caps the depth at 256 levels, so sizes cannot be spread as
-  // far as `growth` spreads them, and fixed costs flatten the ratio: measured,
-  // 7-8 when linear and 44-86 when each level read the rest.
+  //
+  // Measured against the same items laid out flat rather than against a
+  // smaller nesting: the property is that each level is read once, which a
+  // flat list of the same items reads by construction, so the ratio sits near
+  // one whatever the machine is doing. A ratio between two depths was used
+  // before and was flaky: the list bound caps the depth, the fixed costs do
+  // not scale, and honest linear work measured 18 to 50 against a bound of 30.
+  // Reading each level through the rest is about n/2 times the flat cost:
+  // made to (a `parseRichText` of each quote's whole subtree, a read of each
+  // anchor's whole item), the quote and the anchor cases both fail.
+  // The table case cannot regress that way today -- a table nested in a cell
+  // is dropped, so only the outer one is read -- and stands guard over the
+  // cell reader, which once copied the cell's subtree per table.
+  const nestedOverFlat = (nested: string, flat: string): number => {
+    let least = Infinity;
+
+    for (let attempt = 0; attempt < 3 && least >= NESTED_OVER_FLAT; attempt += 1) {
+      blocksFromHtml(document, nested);
+      const deep = bestOf(() => blocksFromHtml(document, nested));
+      const wide = bestOf(() => blocksFromHtml(document, flat));
+
+      least = Math.min(least, deep / Math.max(wide, 0.5));
+    }
+
+    return least;
+  };
+
   test.each([
     ['a quote', '<blockquote>', '</blockquote>'],
     ['a table', '<table><tr><td>', '</td></tr></table>'],
-  ])('%s per level reads in linear time', (_name, open, close) => {
+  ])('%s per level costs what the same items cost flat', (_name, open, close) => {
     const pad = '<i>q</i>'.repeat(20);
-    const html = (n: number) =>
-      `${`<ul><li>a${open}${pad}`.repeat(n)}${`${close}</li></ul>`.repeat(n)}`;
-    let least = Infinity;
+    const levels = 192;
+    const nested = `${`<ul><li>a${open}${pad}`.repeat(levels)}${`${close}</li></ul>`.repeat(levels)}`;
+    const flat = `<ul>${`<li>a${open}${pad}${close}</li>`.repeat(levels)}</ul>`;
 
-    for (let attempt = 0; attempt < 3 && least >= 30; attempt += 1) {
-      const small = bestOf(() => blocksFromHtml(document, html(12)));
-      const large = bestOf(() => blocksFromHtml(document, html(192)));
-      least = Math.min(least, large / Math.max(small, 1));
-    }
-
-    expect(least).toBeLessThan(30);
+    expect(nestedOverFlat(nested, flat)).toBeLessThan(NESTED_OVER_FLAT);
   });
 
   // The parser rebuilds an anchor around every level, so one item's text
   // reaches every skipped list below it: a look-ahead from each for text after
   // it went through the rest. Only one item is read, so this is not capped by
-  // the list bound; measured, 8 when linear and 133 with the look-ahead.
-  test('anchors between list levels read in linear time', () => {
-    const html = (n: number) =>
-      `${'<ul><li>a<a href="https://x.test/">'.repeat(n)}${'</a></li></ul>'.repeat(n)}`;
-    let least = Infinity;
+  // the list bound.
+  test('anchors between list levels cost what the same anchors cost flat', () => {
+    const levels = 1600;
+    const nested = `${'<ul><li>a<a href="https://x.test/">'.repeat(levels)}${'</a></li></ul>'.repeat(levels)}`;
+    const flat = `<ul>${'<li>a<a href="https://x.test/"></a></li>'.repeat(levels)}</ul>`;
 
-    for (let attempt = 0; attempt < 3 && least >= 40; attempt += 1) {
-      const small = bestOf(() => blocksFromHtml(document, html(100)));
-      const large = bestOf(() => blocksFromHtml(document, html(1600)));
-      least = Math.min(least, large / Math.max(small, 1));
-    }
-
-    expect(least).toBeLessThan(40);
+    expect(nestedOverFlat(nested, flat)).toBeLessThan(NESTED_OVER_FLAT);
   });
 
   // Breaks deferred past skipped blocks are dropped in one pass, not one
@@ -2303,5 +2332,82 @@ describe('audit 28', () => {
     const markdown = toMarkdown({ blocks: [callout] });
     expect(markdown).not.toContain(`[!${icon}]`);
     expect(blocksFromMarkdown(markdown)[0]?.icon).toBe(icon);
+  });
+});
+
+describe('a stored carriage return is a line break', () => {
+  /**
+   * `normalizeDocument` is the boundary every loaded document crosses. A
+   * `\r\n` kept from a Windows tool, or a lone `\r`, stayed in the model: the
+   * caret stepped over it as a character of its own, and the Markdown writer
+   * wrote a lone one as a hard break.
+   */
+  test('in a block, a code block and a table cell', () => {
+    const doc = normalizeDocument({
+      blocks: [
+        b({ type: 'code', content: [{ text: 'if (x) {\r\n  y();\rZ\n}' }] }),
+        b({ content: [{ text: 'mac\rclassic' }, { text: ' and\r\n', marks: ['bold'] }] }),
+        b({ type: 'table', content: [], rows: [[[{ text: 'a\r\nb' }], [{ text: 'c' }]]] }),
+      ],
+    });
+
+    expect(doc.blocks[0]!.content).toEqual([{ text: 'if (x) {\n  y();\nZ\n}' }]);
+    expect(doc.blocks[1]!.content).toEqual([
+      { text: 'mac\nclassic' },
+      { text: ' and\n', marks: ['bold'] },
+    ]);
+    expect(doc.blocks[2]!.rows![0]![0]).toEqual([{ text: 'a\nb' }]);
+  });
+
+  test('so it reads back from Markdown as it was', () => {
+    const doc = normalizeDocument({ blocks: [b({ content: [{ text: 'mac\rclassic' }] })] });
+
+    expect(
+      normalizeDocument({ blocks: blocksFromMarkdown(toMarkdown(doc)) }).blocks[0]!.content,
+    ).toEqual(doc.blocks[0]!.content);
+  });
+});
+
+describe('a text range copied out of the editor reads back as it was', () => {
+  /**
+   * R2-PARSE-4 / R2-EDIT-3: the HTML a text-range copy writes is what every
+   * other application reads, and what this reader reads when a browser drops
+   * `application/x-neditor` between origins. Its spaces were left unmarked, so
+   * an indented line from a code block lost its indent and its double space.
+   */
+  const copy = (block: Block, start: number, end: number): DataTransfer => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const editor = createEditor({ element: host, doc: { blocks: [block] } });
+    const data = new DataTransfer();
+
+    editor.focusRange(block.id, start, end);
+    editor.element
+      .querySelector('.neditor-block__content')!
+      .dispatchEvent(
+        new ClipboardEvent('copy', { clipboardData: data, bubbles: true, cancelable: true }),
+      );
+    editor.destroy();
+    host.remove();
+
+    return data;
+  };
+
+  test('from a code block, as a code block', () => {
+    const text = 'x = 0\ndef f():\n    return  1';
+    const data = copy(b({ id: 'c', type: 'code', content: t(text) }), 6, text.length);
+
+    expect(blocksFromHtml(document, data.getData('text/html'))).toEqual([
+      expect.objectContaining({ type: 'code', content: t('def f():\n    return  1') }),
+    ]);
+  });
+
+  test('from a paragraph, with its spaces and tabs', () => {
+    const text = 'say  \tthis   ';
+    const data = copy(b({ id: 'p', content: t(`(${text})`) }), 1, text.length + 1);
+
+    expect(
+      blocksFromHtml(document, data.getData('text/html')).map((block) => block.content),
+    ).toEqual([t(text)]);
   });
 });

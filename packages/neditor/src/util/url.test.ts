@@ -198,3 +198,77 @@ describe('a disguise the URL parser sees through but a string test does not', ()
     expect(sanitizeUrl('https://a.test/x')).toBe('https://a.test/x');
   });
 });
+
+describe('a scheme-less address is an email address', () => {
+  // `[mail](me@example.com)` linked to `https://me@example.com/` -- a page on
+  // example.com, with `me` as its user name. An address alone becomes mailto:.
+  test.each([
+    ['me@example.com', 'mailto:me@example.com'],
+    ['first.last+tag@mail.example.co.uk', 'mailto:first.last+tag@mail.example.co.uk'],
+    ['  me@example.com  ', 'mailto:me@example.com'],
+    // R2-PARSE-10: a query is how a mailto: carries a subject; it became
+    // `https://me@example.com/?subject=hi`, a page on example.com.
+    ['me@example.com?subject=hi', 'mailto:me@example.com?subject=hi'],
+    ['me@example.com?q', 'mailto:me@example.com?q'],
+  ])('%j', (input, expected) => {
+    expect(sanitizeUrl(input)).toBe(expected);
+  });
+
+  test.each([
+    // A path or a port says it is a URL -- whose user name is then dropped.
+    ['me@example.com/x', 'https://example.com/x'],
+    ['me@example.com:8080', 'https://example.com:8080/'],
+    // Left over from an unclosed angled destination: never an address.
+    ['<u@x.test', 'https://x.test/'],
+  ])('%j is still read as a URL', (input, expected) => {
+    expect(sanitizeUrl(input)).toBe(expected);
+  });
+
+  test('a host with no dot is neither', () => {
+    expect(sanitizeUrl('me@localhost')).toBe(null);
+  });
+
+  // R3-FMT-8: a query with a space in it, or a fragment, failed the address
+  // test and fell through to the host test, which then dropped `me@` as a
+  // user name: the address was gone and the link opened the website.
+  test.each([
+    ['me@example.com?subject=Hello there', 'mailto:me@example.com?subject=Hello%20there'],
+    ['me@example.com#x', 'mailto:me@example.com#x'],
+    ['me@example.com?subject=a<b', 'mailto:me@example.com?subject=a%3Cb'],
+    ['me@example.com?', 'mailto:me@example.com?'],
+    ['a.b@c.d.e?x=1#y', 'mailto:a.b@c.d.e?x=1#y'],
+  ])('%j keeps its address', (input, expected) => {
+    expect(sanitizeUrl(input)).toBe(expected);
+  });
+
+  test('a query that only mentions an address is still a website', () => {
+    expect(sanitizeUrl('www.example.com?ref=me@x.com')).toBe(
+      'https://www.example.com/?ref=me@x.com',
+    );
+  });
+
+  test('never an image', () => {
+    expect(sanitizeImageUrl('me@example.com')).toBe(null);
+  });
+});
+
+describe('a user name before the host is dropped', () => {
+  // R2-PARSE-10: `https://google.com@evil.test` reads as Google and opens
+  // evil.test. The href keeps the host it reaches and nothing that disguises it.
+  test.each([
+    ['https://google.com@evil.test', 'https://evil.test/'],
+    ['//google.com@evil.test', 'https://evil.test/'],
+    ['http://user:pass@a.test/x?y#z', 'http://a.test/x?y#z'],
+    ['https://:pass@a.test/', 'https://a.test/'],
+  ])('%j', (input, expected) => {
+    expect(sanitizeUrl(input)).toBe(expected);
+  });
+
+  test('a mailto: address is not a user name', () => {
+    expect(sanitizeUrl('mailto:me@example.com')).toBe('mailto:me@example.com');
+  });
+
+  test('nor is an image source left holding one', () => {
+    expect(sanitizeImageUrl('https://a.test@evil.test/x.png')).toBe('https://evil.test/x.png');
+  });
+});

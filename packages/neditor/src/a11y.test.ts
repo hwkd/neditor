@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import type { Block } from './index.ts';
 import { NEDITOR_STYLES, createEditor } from './index.ts';
@@ -195,6 +195,81 @@ describe('keyboard reachability', () => {
     expect(editor.getDocument().blocks[0]?.rows).toHaveLength(2);
   });
 
+  /**
+   * R4-PTR-2. A range in a cell draws the format toolbar, and the format
+   * toolbar keeps the table toolbar hidden: F10 focused a hidden button, so
+   * focus stayed in the cell and the key was swallowed -- with a Shift+arrow
+   * range (Chromium), and in WebKit after every Tab, whose whole-cell
+   * selection does the same. F10 draws the table toolbar for its own cell.
+   */
+  for (const how of ['a Shift+arrow range', 'the whole cell Tab selects'] as const) {
+    test(`F10 reaches the table toolbar with ${how} in the cell`, ({ onTestFinished }) => {
+      // happy-dom lays nothing out, and the format toolbar is drawn only for a
+      // range with a box.
+      const rect = vi
+        .spyOn(Range.prototype, 'getBoundingClientRect')
+        .mockReturnValue(new DOMRect(40, 40, 30, 16));
+      onTestFinished(() => {
+        rect.mockRestore();
+      });
+      const editor = mount([
+        block({ type: 'table', rows: [[[{ text: 'Alpha' }], [{ text: 'Bravo' }]]] }),
+      ]);
+      const first = editor.element.querySelector<HTMLElement>('[data-cell="0:0"]')!;
+      const second = editor.element.querySelector<HTMLElement>('[data-cell="0:1"]')!;
+      const format = document.querySelector<HTMLElement>('.neditor-toolbar')!;
+      const table = document.querySelector<HTMLElement>('.neditor-table-toolbar')!;
+
+      let tabbed = true;
+
+      if (how === 'a Shift+arrow range') {
+        second.focus();
+        getSelection()?.setBaseAndExtent(second.firstChild!, 3, second.firstChild!, 5);
+      } else {
+        first.focus();
+        getSelection()?.collapse(first.firstChild, 5);
+        document.dispatchEvent(new Event('selectionchange'));
+        tabbed = press(first, 'Tab');
+      }
+      expect(tabbed).toBe(true);
+      expect(document.activeElement).toBe(second);
+      document.dispatchEvent(new Event('selectionchange'));
+      expect(format.hidden, 'the range draws the format toolbar').toBe(false);
+      expect(table.hidden, 'which keeps the table toolbar hidden').toBe(true);
+
+      expect(press(second, 'F10')).toBe(true);
+
+      expect(table.hidden).toBe(false);
+      expect(format.hidden).toBe(true);
+      expect(table.contains(document.activeElement)).toBe(true);
+
+      // A selectionchange that arrives after F10 -- Chromium keeps the range
+      // in the cell, and under load the one for a Tab's selection comes late
+      // -- draws no format toolbar over the one being operated.
+      document.dispatchEvent(new Event('selectionchange'));
+      expect(format.hidden).toBe(true);
+      expect(table.hidden).toBe(false);
+
+      // And it acts on the cell F10 came from.
+      (document.activeElement as HTMLElement).click();
+      expect(editor.getDocument().blocks[0]?.rows).toHaveLength(2);
+    });
+  }
+
+  test('F10 that cannot reach the toolbar leaves the key alone', () => {
+    const editor = mount([block({ type: 'table', rows: [[[{ text: 'A' }]]] })]);
+    const cell = editor.element.querySelector<HTMLElement>('[data-cell="0:0"]')!;
+    const table = document.querySelector<HTMLElement>('.neditor-table-toolbar')!;
+    cell.focus();
+    // A host stylesheet, or an engine, that will not let its buttons focus.
+    for (const button of table.querySelectorAll('button')) {
+      button.focus = () => {};
+    }
+
+    expect(press(cell, 'F10')).toBe(false);
+    expect(document.activeElement).toBe(cell);
+  });
+
   test('arrows rove within the toolbar and Escape returns to the cell', () => {
     const editor = mount([block({ type: 'table', rows: [[[{ text: 'A' }]]] })]);
     const cell = editor.element.querySelector<HTMLElement>('[data-cell="0:0"]')!;
@@ -210,6 +285,61 @@ describe('keyboard reachability', () => {
 
     expect((document.activeElement as HTMLElement)?.dataset.cell).toBe('0:0');
   });
+
+  /*
+   * R5-PTR-3. The F10 case asked no modifier, so Shift+F10 -- the keyboard's
+   * context menu -- and Ctrl, Alt or Meta with it all focused the table
+   * toolbar and swallowed the key. Only F10 itself is the toolbar's.
+   */
+  for (const modifier of ['shiftKey', 'ctrlKey', 'altKey', 'metaKey'] as const) {
+    test(`${modifier.replace('Key', '')}+F10 in a cell is left alone`, () => {
+      const editor = mount([block({ type: 'table', rows: [[[{ text: 'alpha bravo' }]]] })]);
+      const cell = editor.element.querySelector<HTMLElement>('[data-cell="0:0"]')!;
+      const table = document.querySelector<HTMLElement>('.neditor-table-toolbar')!;
+      cell.focus();
+      getSelection()?.collapse(cell.firstChild, 3);
+
+      expect(press(cell, 'F10', { [modifier]: true })).toBe(false);
+      expect(document.activeElement).toBe(cell);
+      expect(table.contains(document.activeElement)).toBe(false);
+    });
+  }
+
+  /*
+   * R5-PTR-4. Escape from the toolbar put the caret at the cell's end, so a
+   * caret at 3, a range 6-11 or a backward one were all lost on the way back.
+   * The probe's three selections, in a cell reading "alpha bravo charlie".
+   */
+  for (const [how, anchor, focus] of [
+    ['a caret at 3', 3, 3],
+    ['a range 6-11', 6, 11],
+    ['a backward range 11-6', 11, 6],
+  ] as const) {
+    test(`Escape from the table toolbar puts back ${how}`, () => {
+      const editor = mount([
+        block({ type: 'table', rows: [[[{ text: 'x' }], [{ text: 'alpha bravo charlie' }]]] }),
+      ]);
+      const cell = editor.element.querySelector<HTMLElement>('[data-cell="0:1"]')!;
+      cell.focus();
+      getSelection()?.setBaseAndExtent(cell.firstChild!, anchor, cell.firstChild!, focus);
+      document.dispatchEvent(new Event('selectionchange'));
+
+      expect(press(cell, 'F10')).toBe(true);
+      // WebKit drops the cell's selection when a toolbar button takes focus;
+      // what comes back cannot be read from it.
+      getSelection()?.removeAllRanges();
+      press(document.activeElement as HTMLElement, 'Escape');
+
+      expect(document.activeElement).toBe(cell);
+      const selection = getSelection()!;
+      expect(cell.contains(selection.anchorNode)).toBe(true);
+      expect([selection.anchorOffset, selection.focusOffset]).toEqual([anchor, focus]);
+      expect(editor.getSelectionState()).toMatchObject({
+        cell: { row: 0, column: 1 },
+        range: { start: Math.min(anchor, focus), end: Math.max(anchor, focus) },
+      });
+    });
+  }
 
   test('the table toolbar survives toolbar:false', () => {
     const editor = mount([block({ type: 'table', rows: [[[{ text: 'A' }]]] })], {
@@ -792,6 +922,37 @@ describe('a rejected URL is signalled by more than a colour', () => {
     // No description at all, rather than one pointing at a hidden message:
     // description computation follows a reference into a hidden node.
     expect(input.hasAttribute('aria-describedby')).toBe(false);
+  });
+
+  test('typing a correction clears the rejection, in the link and the image editor', () => {
+    // UI-8: the message and aria-invalid stood while the corrected URL was
+    // typed, so every keystroke of the fix was announced as invalid.
+    const { input } = openLink();
+
+    input.value = 'not a url';
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(input.getAttribute('aria-invalid')).toBe('true');
+    const message = document.getElementById(input.getAttribute('aria-describedby') ?? '')!;
+
+    input.value = 'https://example.com';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(input.getAttribute('aria-invalid')).toBeNull();
+    expect(input.hasAttribute('aria-describedby')).toBe(false);
+    expect(message.hidden).toBe(true);
+
+    const editor = mount([block({ id: 'img', type: 'image', src: 'https://a.test/x.png' })]);
+    editor.element.querySelector<HTMLElement>('.neditor-image__trigger')!.click();
+    const dialogs = document.querySelectorAll('.neditor-image-editor');
+    const src = dialogs[dialogs.length - 1]!.querySelector<HTMLInputElement>('input')!;
+
+    src.value = 'javascript:alert(1)';
+    src.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(src.getAttribute('aria-invalid')).toBe('true');
+
+    src.value = 'https://a.test/y.png';
+    src.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(src.getAttribute('aria-invalid')).toBeNull();
+    expect(src.hasAttribute('aria-describedby')).toBe(false);
   });
 
   test('forced colours restate the rejection, which they previously dropped', () => {

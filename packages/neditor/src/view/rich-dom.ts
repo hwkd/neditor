@@ -1,9 +1,16 @@
 import type { Block, BlockType } from '../model/document.ts';
 import { DEFAULT_CALLOUT_ICON, computeListNumbers, createBlock } from '../model/document.ts';
 import type { Mark, RichText, TextRun } from '../model/rich-text.ts';
-import { isRichEmpty, normalizeRuns, richDelete, richToPlainText } from '../model/rich-text.ts';
+import {
+  isRichEmpty,
+  normalizeRuns,
+  richDelete,
+  richLength,
+  richToPlainText,
+} from '../model/rich-text.ts';
 import type { TableRows } from '../model/table.ts';
 import { normalizeTableRows } from '../model/table.ts';
+import { normalizeControlCharacters } from '../input/line-breaks.ts';
 import { sanitizeImageUrl, sanitizeUrl } from '../util/url.ts';
 
 /**
@@ -108,6 +115,7 @@ const TAG_MARKS: Readonly<Record<string, Mark>> = {
  */
 const ELEMENT_NODE = 1;
 const TEXT_NODE = 3;
+const COMMENT_NODE = 8;
 const SHOW_ELEMENT = 0x1;
 const SHOW_TEXT = 0x4;
 const FILTER_ACCEPT = 1;
@@ -177,19 +185,75 @@ function marksForElement(element: Element): MarkChange {
   const decoration = `${style.textDecorationLine} ${style.textDecoration}`.trim();
 
   if (decoration) {
-    set('underline', decoration.includes('underline'));
+    // A link's underline is how links look, not a mark on its text: Google
+    // Docs underlines a span inside every `<a>`, and Chromium and WebKit copy
+    // a link out of this editor with its computed `text-decoration` inlined,
+    // so a pasted link came back underlined too and its Markdown read
+    // `[<u>docs</u>](…)`. Neither direction is read on or inside an `<a href>`
+    // -- its `none` says nothing either -- and a `<u>` there is still one.
+    if (!inLink(element)) {
+      set('underline', decoration.includes('underline'));
+    }
+
     set('strikethrough', decoration.includes('line-through'));
   }
 
   return { add: [...add], remove: [...remove] };
 }
 
+const IN_LINK = new WeakMap<Element, boolean>();
+
+/**
+ * Whether an element is an `<a href>` or inside one. Remembered per element
+ * and filled in down the chain, as {@link whiteSpaceOf} is, so a deep chain of
+ * styled spans is walked once rather than once per span.
+ */
+function inLink(element: Element): boolean {
+  const chain: Element[] = [];
+  let inside = false;
+
+  for (let at: Element | null = element; at; at = at.parentElement) {
+    const known = IN_LINK.get(at);
+
+    if (known !== undefined) {
+      inside = known;
+      break;
+    }
+
+    chain.push(at);
+  }
+
+  for (const at of chain.reverse()) {
+    inside ||= tagNameOf(at) === 'A' && at.hasAttribute('href');
+    IN_LINK.set(at, inside);
+  }
+
+  return inside;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Render                                                                      */
 /* -------------------------------------------------------------------------- */
 
-function renderRun(doc: Document, run: TextRun): Node {
+function renderRun(doc: Document, run: TextRun, breaks: boolean): Node {
   let node: Node = doc.createTextNode(run.text);
+
+  if (breaks && run.text.includes('\n')) {
+    const lines = doc.createDocumentFragment();
+
+    for (const [index, line] of run.text.split('\n').entries()) {
+      if (index > 0) {
+        lines.append(doc.createElement('br'));
+      }
+
+      if (line.length > 0) {
+        lines.append(doc.createTextNode(line));
+      }
+    }
+
+    node = lines;
+  }
+
   const marks = new Set(run.marks ?? []);
 
   for (const [mark, tag] of MARK_ELEMENTS) {
@@ -221,14 +285,22 @@ function renderRun(doc: Document, run: TextRun): Node {
  *
  * Empty content yields an empty fragment rather than an empty text node, so the
  * `:empty` placeholder rule still matches.
+ *
+ * `breaks` writes each line break as a `<br>` rather than a newline, for HTML
+ * that leaves this editor: its own view draws a newline under `pre-wrap`, but
+ * any other application collapses one in a paragraph to a space.
  */
-export function renderRichText(doc: Document, content: readonly TextRun[]): DocumentFragment {
+export function renderRichText(
+  doc: Document,
+  content: readonly TextRun[],
+  breaks = false,
+): DocumentFragment {
   const fragment = doc.createDocumentFragment();
   let last: TextRun | undefined;
 
   for (const run of content) {
     if (run.text.length > 0) {
-      fragment.append(renderRun(doc, run));
+      fragment.append(renderRun(doc, run, breaks));
       last = run;
     }
   }
@@ -247,6 +319,81 @@ export function renderRichText(doc: Document, content: readonly TextRun[]): Docu
   }
 
   return fragment;
+}
+
+/** How {@link richTextToHtml} writes a range. */
+export interface RichTextHtmlOptions {
+  /**
+   * The range is from a code block: it is written as one, a `<pre>` exactly
+   * as `blocksToHtml` writes the block, so another application shows it as
+   * code and this reader reads it back as a code block.
+   */
+  readonly code?: boolean;
+}
+
+/**
+ * Serializes a range of one block's text for the clipboard.
+ *
+ * The runs as `renderRichText` draws them, with no block element around them:
+ * a text-range copy is a phrase, so it lands inline wherever it is pasted.
+ * Each newline becomes a `<br>`, because every other application reads this
+ * HTML under `white-space: normal`, where a bare newline is a space. The filler
+ * `renderRichText` appends after a final newline stays: `parseRichText` reads a
+ * trailing `<br>` as nothing, so it is what keeps the newline before it.
+ *
+ * The phrase is held in an inline element marked `white-space: pre-wrap`, as
+ * the block writer marks every element that holds text: left unmarked, a run
+ * of spaces, a tab, an indent or an edge space was collapsed by every other
+ * application, and by this reader whenever WebKit drops our own type between
+ * origins -- `def f():` + newline + `    return  1` came back unindented.
+ */
+export function richTextToHtml(
+  doc: Document,
+  content: readonly TextRun[],
+  options: RichTextHtmlOptions = {},
+): string {
+  if (options.code) {
+    return blocksToHtml(doc, [
+      { id: 'range', type: 'code', depth: 0, content: content.map((run) => ({ text: run.text })) },
+    ]);
+  }
+
+  const host = doc.createElement('span');
+  host.style.whiteSpace = 'pre-wrap';
+  host.append(renderRichText(doc, content));
+
+  // NodeFilter.SHOW_TEXT, spelled out: the constant belongs to a realm, and
+  // the document may be another one's.
+  const walker = doc.createTreeWalker(host, 4);
+  const texts: Text[] = [];
+
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    texts.push(node as Text);
+  }
+
+  for (const text of texts) {
+    const lines = text.data.split('\n');
+
+    if (lines.length === 1) {
+      continue;
+    }
+
+    const parts: Node[] = [];
+
+    lines.forEach((line, index) => {
+      if (index > 0) {
+        parts.push(doc.createElement('br'));
+      }
+
+      if (line.length > 0) {
+        parts.push(doc.createTextNode(line));
+      }
+    });
+
+    text.replaceWith(...parts);
+  }
+
+  return host.outerHTML;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -320,8 +467,15 @@ function hasContentAfter(node: Node, root: Node, skip?: SkipPredicate): boolean 
     }
 
     // Whitespace between block tags is formatting, not content -- but a
-    // no-break space is content, which `trim` would take for whitespace.
-    if (current.nodeType === TEXT_NODE && /[^ \t\n\r\f]/.test(current.nodeValue ?? '')) {
+    // no-break space is content, which `trim` would take for whitespace, and
+    // so is any whitespace a style preserves: under `pre-wrap` the spaces
+    // after a `<br>` are a line of their own, which is how this package's
+    // writer spells a block ending in a break and a space.
+    if (
+      current.nodeType === TEXT_NODE &&
+      (/[^ \t\n\r\f]/.test(current.nodeValue ?? '') ||
+        ((current.nodeValue ?? '').length > 0 && whiteSpaceOf(current.parentElement) === 'pre'))
+    ) {
       return true;
     }
   }
@@ -364,6 +518,12 @@ const SKIPPED_SPACES = new WeakSet<TextRun>();
 const BLANK_LINES = new WeakSet<Block>();
 
 /**
+ * The `<details>` a copy starts in without its summary, read as containers
+ * rather than toggles ({@link dropSelectionEdges}).
+ */
+const HEADLESS_DETAILS = new WeakSet<Element>();
+
+/**
  * Whether an element starts and ends a line of text: what `BLOCK_TAGS` names,
  * and everything a browser lays out as a block -- `<center>`, `<address>`,
  * `<aside>` and the rest, whose text otherwise ran into its neighbours'.
@@ -402,7 +562,7 @@ function breakLine(
   // While whitespace is collapsed, source whitespace is a run of its own and
   // no content: a break after `<br>` + layout, or beside an element holding
   // only spaces, looks past it -- or it added a line no browser shows.
-  const previous = collapsing ? lastSolidRun(out) : out.at(-1);
+  const previous = collapsing || collapsingSource ? lastSolidRun(out) : out.at(-1);
 
   // Matches a newline followed by any trailing whitespace, so a run ending
   // "\n  " still counts as already broken. (trimEnd would strip the newline
@@ -479,6 +639,21 @@ let lineOpen = false;
 
 /** Set while `collapseWhitespace` parses, the only reader of its marks. */
 let collapsing = false;
+
+/**
+ * Set while {@link readBlockText} parses a block whose whitespace a browser
+ * collapses: `walk` then reads each run of source whitespace as one space,
+ * without touching the tree it reads.
+ */
+let collapsingSource = false;
+
+/**
+ * Whether every block's text is read as it stands, as the reader did before
+ * the writer marked its blocks `white-space: pre-wrap`: that writer put a soft
+ * line break in a block as a raw newline. Set for `whitespace: 'preserve'`,
+ * and for HTML that is recognisably that writer's (see `blocksFromHtml`).
+ */
+let legacyOwnHtml = false;
 
 /**
  * The text of a subtree, gathered with a cursor.
@@ -609,12 +784,97 @@ function codeText(root: Element): string {
   }
 
   // The last `<br>` of all is the filler of the line it ends; with none, the
-  // last newline ends the last line and draws none of its own.
+  // last newline ends the last line and draws none of its own -- nor does a
+  // CR, vertical tab or form feed there, each a line break once the text is
+  // cleaned (`normalizeControlCharacters`), as in any other block (R5-FMT-5).
   if (breaks > 0) {
     return text + '\n'.repeat(breaks - 1);
   }
 
-  return text.endsWith('\n') ? text.slice(0, -1) : text;
+  return text.replace(/(?:\r\n?|[\n\v\f])$/, '');
+}
+
+/**
+ * A text node's source as {@link readBlockText} reads it while it collapses a
+ * block: under `normal` each run of whitespace is one collapsible space; what
+ * `pre` preserves, and the line breaks `pre-line` keeps, are marked so the
+ * collapsing pass leaves them (the marks {@link collapseWhitespace} uses), and
+ * so is a converted space. Asked per text node, by its own parent's style: a
+ * block whose one inline element said `pre` used to be read raw throughout,
+ * source indentation and all.
+ *
+ * A vertical tab, and a form feed that is not collapsed, is a line break (see
+ * `normalizeControlCharacters`), marked as `pre-line`'s are: one that ends
+ * the text ends its last line and draws none, where a bare `\n` would be
+ * read as a `<br>` and stand (R4-FMT-6c).
+ */
+function sourceWhitespace(raw: string, mode: WhiteSpace, converted: boolean): string {
+  const value = raw.replace(/[\uFDD0-\uFDD5]/g, (char) => LITERAL + char);
+  const laid = (
+    mode === 'pre'
+      ? value.replace(/[ \t\n]/g, (char) => PRESERVED[char]!)
+      : mode === 'pre-line'
+        ? value
+            .split('\n')
+            .map((line) => line.replace(/[ \t\r\f]+/g, ' '))
+            .join(LINE_BREAK)
+        : value.replace(/[ \t\n\r\f]+/g, ' ')
+  ).replace(/[\v\f]/g, LINE_BREAK);
+
+  return converted ? laid.replace(/\u00a0/g, PRESERVED[' ']!) : laid;
+}
+
+/**
+ * One text node's run, for {@link walk}: kept out of it because `walk`
+ * recurses once per element, and every local it holds is paid for at every
+ * level of the deepest tree it reads.
+ */
+function walkText(
+  child: Node,
+  parent: Node,
+  marks: Mark[],
+  link: string | undefined,
+  out: TextRun[],
+): void {
+  // Safari writes a space at an element boundary as `&nbsp;` inside this span
+  // when it copies. The class is its own record that the character was an
+  // ordinary space, so it is read back as one; every other `&nbsp;` is kept.
+  // A run of them -- the `&nbsp; &nbsp;` WebKit writes for three spaces -- or
+  // one beside another space is a space that was drawn, so where whitespace
+  // is being collapsed it is marked preserved: converted first and collapsed
+  // second, three came back as one. A lone one is not: WebKit writes the
+  // space it did not draw, at the end of a line or a block, the same way, and
+  // kept, `Title ` arrived with a space no one could see.
+  const convertedSpace =
+    parent.nodeType === ELEMENT_NODE &&
+    ((parent as Element).getAttribute('class') ?? '')
+      .split(/\s+/)
+      .includes('Apple-converted-space');
+  const drawnRun = convertedSpace && isDrawnConvertedSpace(parent as Element);
+  const value = child.nodeValue ?? '';
+  // A lone converted space is an ordinary space from the start.
+  const raw = convertedSpace && !drawnRun ? value.replace(/\u00a0/g, ' ') : value;
+  const converted = convertedSpace ? raw.replace(/\u00a0/g, ' ') : raw;
+  const text = collapsingSource
+    ? sourceWhitespace(raw, whiteSpaceOf(child.parentElement), drawnRun)
+    : drawnRun
+      ? raw.replace(/\u00a0/g, collapsing ? PRESERVED[' ']! : ' ')
+      : raw;
+
+  // Indentation between block elements is source formatting, not content.
+  // Without this, pretty-printed HTML pastes with blank leading lines. A
+  // no-break space is content, though `trim` would take it for layout.
+  if (!/[^ \t\n\r\f]/.test(converted) && isBetweenBlocks(child)) {
+    return;
+  }
+
+  if (text.length > 0) {
+    out.push({ text, marks: [...marks], link });
+
+    if (/[^ \t\n\r\f\u200b]/.test(converted)) {
+      solidTexts += 1;
+    }
+  }
 }
 
 function walk(
@@ -628,33 +888,9 @@ function walk(
   // Where the last of these drawn apart from its neighbour ended.
   let apartEnd = -1;
 
-  // Safari writes a space at an element boundary as `&nbsp;` inside this span
-  // when it copies. The class is its own record that the character was an
-  // ordinary space, so it is read back as one; every other `&nbsp;` is kept.
-  const convertedSpace =
-    node.nodeType === ELEMENT_NODE &&
-    ((node as Element).getAttribute('class') ?? '').split(/\s+/).includes('Apple-converted-space');
-
   for (const child of [...node.childNodes]) {
     if (child.nodeType === TEXT_NODE) {
-      const raw = child.nodeValue ?? '';
-      const text = convertedSpace ? raw.replace(/\u00a0/g, ' ') : raw;
-
-      // Indentation between block elements is source formatting, not content.
-      // Without this, pretty-printed HTML pastes with blank leading lines. A
-      // no-break space is content, though `trim` would take it for layout.
-      if (!/[^ \t\n\r\f]/.test(text) && isBetweenBlocks(child)) {
-        continue;
-      }
-
-      if (text.length > 0) {
-        out.push({ text, marks: [...marks], link });
-
-        if (/[^ \t\n\r\f\u200b]/.test(text)) {
-          solidTexts += 1;
-        }
-      }
-
+      walkText(child, node, marks, link, out);
       continue;
     }
 
@@ -802,6 +1038,28 @@ function walk(
   }
 }
 
+/**
+ * Whether an `Apple-converted-space` stands for spaces that were drawn: more
+ * than one, or one beside a space in the text either side of it. Whitespace
+ * there that holds a line break is source layout, and no such neighbour.
+ */
+function isDrawnConvertedSpace(span: Element): boolean {
+  if ((span.textContent ?? '').length > 1) {
+    return true;
+  }
+
+  const before = span.previousSibling;
+  const after = span.nextSibling;
+  const spaced = (run: string | undefined): boolean => run !== undefined && !/[\n\r]/.test(run);
+
+  return (
+    (before?.nodeType === TEXT_NODE &&
+      spaced(/[ \t\n\r\f\u00a0]+$/.exec(before.nodeValue ?? '')?.[0])) ||
+    (after?.nodeType === TEXT_NODE &&
+      spaced(/^[ \t\n\r\f\u00a0]+/.exec(after.nodeValue ?? '')?.[0]))
+  );
+}
+
 /** How many runs holding more than whitespace the walk has written. */
 let solidTexts = 0;
 
@@ -836,20 +1094,29 @@ export function parseRichText(root: Node, skip?: SkipPredicate): RichText {
     }
   }
 
+  // No control character but the tab and the line feed is text the model
+  // holds (see `normalizeControlCharacters`): a page's `&#1;` went on into
+  // `getDocument()` and every export, and only a reload took it away.
   return normalizeRuns(
-    out.filter((run, index) => {
-      if (DEFERRED_BREAKS.has(run)) {
-        return index <= lastText;
-      }
+    out
+      .filter((run, index) => {
+        if (DEFERRED_BREAKS.has(run)) {
+          return index <= lastText;
+        }
 
-      if (SKIPPED_SPACES.has(run)) {
-        const next = out[index + 1]?.text ?? '';
+        if (SKIPPED_SPACES.has(run)) {
+          const next = out[index + 1]?.text ?? '';
 
-        return !/[ \t\n\r\f]/.test(next[0] ?? ' ');
-      }
+          return !/[ \t\n\r\f]/.test(next[0] ?? ' ');
+        }
 
-      return true;
-    }),
+        return true;
+      })
+      .map((run) => {
+        const text = normalizeControlCharacters(run.text);
+
+        return text === run.text ? run : { ...run, text };
+      }),
   );
 }
 
@@ -908,7 +1175,8 @@ function tableSections(doc: Document, rows: TableRows): HTMLElement[] {
 
     for (const cell of cells) {
       const container = doc.createElement(tag);
-      container.append(renderRichText(doc, cell));
+      container.style.whiteSpace = 'pre-wrap';
+      container.append(renderRichText(doc, cell, true));
       tr.append(container);
     }
 
@@ -954,6 +1222,21 @@ export function blocksToHtml(doc: Document, blocks: readonly Block[]): string {
   const host = doc.createElement('div');
   const numbers = computeListNumbers(blocks);
 
+  /**
+   * A block's text for another application: each line break a `<br>`, and
+   * the element holding it marked `white-space: pre-wrap`, so a run of spaces,
+   * a tab or an edge space draws as it does here. Both used to be left raw,
+   * which only this package's reader kept: Gmail, Google Docs or a plain
+   * contenteditable collapsed them, and so did this reader whenever WebKit
+   * dropped the `application/x-neditor` flag on a paste between origins. The
+   * mark is also how `blocksFromHtml` tells this writer's blocks, which say
+   * what they mean, from older ones, which kept the newline raw.
+   */
+  const textInto = (element: HTMLElement, content: RichText): void => {
+    element.style.whiteSpace = 'pre-wrap';
+    element.append(renderRichText(doc, content, true));
+  };
+
   /** Open lists, innermost last. */
   let open: Array<{ list: HTMLElement; type: BlockType; depth: number }> = [];
 
@@ -986,7 +1269,7 @@ export function blocksToHtml(doc: Document, blocks: readonly Block[]): string {
 
         if (!isRichEmpty(block.content)) {
           const caption = doc.createElement('figcaption');
-          caption.append(renderRichText(doc, block.content));
+          textInto(caption, block.content);
           element.append(caption);
         }
 
@@ -1011,7 +1294,7 @@ export function blocksToHtml(doc: Document, blocks: readonly Block[]): string {
         }
 
         const summary = doc.createElement('summary');
-        summary.append(renderRichText(doc, block.content));
+        textInto(summary, block.content);
         element.append(summary);
       } else if (block.type !== 'divider') {
         if (block.type === 'code') {
@@ -1028,7 +1311,7 @@ export function blocksToHtml(doc: Document, blocks: readonly Block[]): string {
           code.append(renderRichText(doc, block.content));
           element.append(code);
         } else {
-          element.append(renderRichText(doc, block.content));
+          textInto(element, block.content);
         }
       }
 
@@ -1085,7 +1368,8 @@ export function blocksToHtml(doc: Document, blocks: readonly Block[]): string {
       item.append(doc.createTextNode(block.checked ? '\u2611 ' : '\u2610 '));
     }
 
-    const text = renderRichText(doc, block.content);
+    item.style.whiteSpace = 'pre-wrap';
+    const text = renderRichText(doc, block.content, true);
 
     // Text that is only whitespace reads as the HTML's own formatting, and an
     // item with nothing else in it but a nested list is read as a holder for
@@ -2172,13 +2456,23 @@ function pushBlock(
   element: Element,
   depth: number,
   imagesAt?: number,
+  skip: SkipPredicate = isNestedList,
+  stripMarker: RegExp | null = null,
 ): void {
-  let runs = parseRichText(element, isNestedList);
+  let runs = readBlockText(element, skip);
+
+  // A Word list marker left in the text (see `wordListItemSanitized`).
+  if (stripMarker) {
+    runs = richDelete(runs, 0, stripMarker.exec(richToPlainText(runs))?.[0].length ?? 0);
+  }
+
   // Given a depth, the block hands its images on after it, as a list item
   // does: read as text, a heading's logo or a quote's screenshot was dropped.
+  // Not one in what the text skips: a Word item's picture bullet is its
+  // marker.
   const images =
     imagesAt !== undefined && containsImage(element)
-      ? textImages(element, isNestedList).filter(hasUsableImage)
+      ? textImages(element, skip).filter(hasUsableImage)
       : [];
 
   // A break that followed the image ended the image's line, not the text's.
@@ -2197,6 +2491,1615 @@ function pushBlock(
   }
 }
 
+/** Word's `mso-list:l0 level2 lfo1`: the paragraph is a list item at that level. */
+const WORD_LIST_LEVEL = /(?:^|;)\s*mso-list\s*:\s*[^;]*?\blevel(\d+)/i;
+/** The span Word keeps a list item's bullet or number in, as text. */
+const WORD_LIST_MARKER = /(?:^|;)\s*mso-list\s*:\s*ignore\b/i;
+/**
+ * A number with its punctuation: `1.`, `(2)`, a multilevel `1.1.` or `2.10.`.
+ */
+const WORD_PUNCTUATED_NUMBER = /^\(?\d+(?:\.\d+)*[.)]$/;
+/**
+ * A letter or a roman numeral with its punctuation: `a)`, `(iv)`, and a
+ * numeral of any length (`viii.`) -- three letters was the limit, so `viii.`
+ * was a bullet. Sanitised, one is a marker only with Word's spacer after it
+ * ({@link hasWordSpacer}): the first word of a List Paragraph with no
+ * numbering is as likely `Yes.`, `Dr.`, `Mild.` (a numeral, letter for
+ * letter) or `(c)` (R5-FMT-4).
+ */
+const WORD_PUNCTUATED_LETTER = /^\(?(?:[a-z]{1,3}|[ivxlcdm]+)[.)]$/i;
+/**
+ * A bare number: Word's "1 / 1.1 / 1.1.1" and legal `1.01` styles write no
+ * punctuation. In a `mso-list:Ignore` span that is a number; sanitised, it is
+ * one only with Word's spacer after it ({@link hasWordSpacer}), since there a
+ * bare number is as likely the year or the figure a paragraph starts with
+ * (`2024   Annual results`, R4-FMT-4).
+ */
+const WORD_BARE_NUMBER = /^\d+(?:\.\d+)*$/;
+/** Either: what is numbered. */
+const WORD_ORDERED_MARKER = /^(?:\(?(?:\d+(?:\.\d+)*|[a-z]{1,3}|[ivxlcdm]+)[.)]|\d+(?:\.\d+)*)$/i;
+/** The Unicode bullets Word draws a bullet with, as text: `·` in Symbol, `•`. */
+const WORD_BULLET_GLYPH = /^[\u00b7\u2022\u25aa\u25a0\u25e6\u25cb\u25cf\u2013\u27a2\u2713\u2714]$/;
+/**
+ * The characters that stand in for a bullet drawn in another font: `o` in
+ * Courier New, and Wingdings' `§` (a square), `Ø` (an arrow), `ü` (a tick),
+ * `v`, `q` and `n`, and a typed `*` or `-`. Each is also a character a
+ * paragraph can start with -- `o  clock`, `§  12` -- so, sanitised, one is a
+ * bullet only with Word's own spacer after it ({@link hasWordSpacer}).
+ */
+const WORD_BULLET_STAND_IN = /^[o\u00a7\u00d8\u00fcvqn*-]$/;
+/**
+ * The style of Word's spacer span, `font:7.0pt "Times New Roman"`, which
+ * WebKit's sanitizer keeps as `font-size: 7pt`.
+ */
+const WORD_SPACER_STYLE = /(?:^|;)\s*font(?:-size)?\s*:\s*(?:[^;]*\s)?7(?:\.0+)?pt\b/i;
+
+/** Whether the HTML being read is Word's own, `mso-` declarations and all. */
+let wordMarkup = false;
+
+/** What {@link wordListItem} says of a paragraph that is a Word list item. */
+interface WordListItem {
+  type: BlockType;
+  level: number;
+  /** What, at the start of its text, is the marker -- or null if none is. */
+  strip: RegExp | null;
+  /** What the text skips: the marker span, a picture bullet. */
+  skip: SkipPredicate;
+}
+
+/** Word's marker span: text that only draws a list item's bullet or number. */
+const isWordListMarker: SkipPredicate = (element, tag) =>
+  isNestedList(element, tag) || WORD_LIST_MARKER.test(element.getAttribute('style') ?? '');
+
+/**
+ * Word writes a list item as a `<p>` with `mso-list:… levelN …` in its style,
+ * and its bullet or number as text in a `mso-list:Ignore` span. The level is
+ * the depth; the marker says which kind of list it is -- a number or letter
+ * with its punctuation is numbered, anything else (`·`, `o`, `§`) a bullet.
+ * Null for any other paragraph.
+ */
+function wordListItem(element: Element): WordListItem | null {
+  const style = element.getAttribute('style') ?? '';
+  const level = WORD_LIST_LEVEL.exec(style);
+
+  if (!level) {
+    return wordListItemSanitized(element, style);
+  }
+
+  const walker = element.ownerDocument.createTreeWalker(element, SHOW_ELEMENT);
+  let marker = '';
+
+  for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
+    if (WORD_LIST_MARKER.test((found as Element).getAttribute('style') ?? '')) {
+      marker = subtreeText(found).replace(/[\s\u00a0]+/g, '');
+      break;
+    }
+  }
+
+  return {
+    type: WORD_ORDERED_MARKER.test(marker) ? 'numbered_list' : 'bulleted_list',
+    level: Math.max(1, Math.min(Number.parseInt(level[1]!, 10), MAX_LIST_NESTING)),
+    strip: null,
+    skip: isWordListMarker,
+  };
+}
+
+/**
+ * Emits a paragraph {@link wordListItem} recognised, without its marker, and
+ * then the pictures in its text as the item's children, as a list item's are.
+ */
+function pushWordListItem(out: Block[], element: Element, depth: number, word: WordListItem): void {
+  const itemDepth = depth + word.level - 1;
+
+  pushBlock(out, word.type, element, itemDepth, itemDepth + 1, word.skip, word.strip);
+}
+
+/** Word's own class for a list paragraph, which WebKit's sanitizer keeps. */
+const WORD_LIST_CLASS = /(?:^|\s)MsoListParagraph/;
+/**
+ * The marker and the run of spaces Word draws it apart with. Up to eight
+ * characters, for a multilevel `1.1.1.` or a roman `viii.`.
+ */
+const WORD_TEXT_MARKER = /^[ \t\n\r\f]*([^\s\u00a0]{1,8})[\s\u00a0]{2,}/;
+/** The same marker at the start of the text as read, with whatever gap is left. */
+const WORD_LEADING_MARKER = /^[^\s\u00a0]{1,8}[\s\u00a0]+/;
+/** A picture bullet's gap, left at the start of the text the picture is not in. */
+const WORD_PICTURE_GAP = /^[\s\u00a0]+/;
+/**
+ * The paragraph's indent, in whichever unit Word wrote it: points in most
+ * locales, inches from US and Mac Word (`.5in` a level), centimetres or
+ * millimetres from metric ones, and pixels once a browser has computed it.
+ */
+const MARGIN_LEFT = /(?:^|;)\s*margin-left\s*:\s*(\d*\.?\d+)\s*(pt|in|cm|mm|px)\b/i;
+/** Points per unit, for {@link MARGIN_LEFT}. */
+const POINTS_PER: Readonly<Record<string, number>> = {
+  pt: 1,
+  in: 72,
+  cm: 72 / 2.54,
+  mm: 72 / 25.4,
+  px: 0.75,
+};
+
+/**
+ * The same item after WebKit has sanitized it: a paste from another app or
+ * origin there comes through with every `mso-` declaration and the marker
+ * span's style stripped, leaving Word's `MsoListParagraph` class, its indent
+ * (36pt, or half an inch, a level) and the marker as the first text of the
+ * paragraph. Only that class, with a marker and Word's wide gap after it, is
+ * read as an item; the marker is then taken off the front of the text. A
+ * picture bullet is a bullet-sized picture first in the paragraph, with
+ * Word's spacer after it: a screenshot first, its caption after, is a picture
+ * (R4-FMT-3), and so is an icon a note starts with (R5-FMT-4).
+ *
+ * Never in HTML that still carries `mso-` declarations, which is Word's own
+ * and says what is an item: there a `MsoListParagraph` without `mso-list` is
+ * Word's "List Paragraph" style with no numbering, and its first word --
+ * `Caution:`, `Results.` -- is text. Nor is a first word a marker unless it
+ * is a bullet glyph or a punctuated number, wherever it comes from, or a
+ * letter, numeral or character that stands in for a bullet with Word's spacer
+ * after it.
+ */
+function wordListItemSanitized(element: Element, style: string): WordListItem | null {
+  if (wordMarkup || !WORD_LIST_CLASS.test(element.getAttribute('class') ?? '')) {
+    return null;
+  }
+
+  const text = subtreeText(element);
+  const marker = WORD_TEXT_MARKER.exec(text);
+  const picture = marker ? null : leadingPicture(element);
+
+  if (
+    marker
+      ? !isSanitizedWordMarker(marker[1]!, element)
+      : !picture ||
+        !isBulletSized(picture) ||
+        !/^[\s\u00a0]{2,}/.test(text) ||
+        !hasWordSpacer(element, picture)
+  ) {
+    return null;
+  }
+
+  const indent = MARGIN_LEFT.exec(style);
+  const margin = indent
+    ? Number.parseFloat(indent[1]!) * POINTS_PER[indent[2]!.toLowerCase()]!
+    : 36;
+  // Word indents a list 36pt (half an inch) a level.
+  const level = Number.isFinite(margin) ? Math.round(margin / 36) : 1;
+
+  return {
+    type: marker && WORD_ORDERED_MARKER.test(marker[1]!) ? 'numbered_list' : 'bulleted_list',
+    level: Math.max(1, Math.min(level, MAX_LIST_NESTING)),
+    strip: picture ? WORD_PICTURE_GAP : WORD_LEADING_MARKER,
+    skip: picture
+      ? (candidate, tag) => isNestedList(candidate, tag) || candidate === picture
+      : isNestedList,
+  };
+}
+
+/**
+ * Whether a sanitised paragraph's first word is a marker: a bullet glyph or a
+ * punctuated number is; a bare number, a punctuated letter or numeral, or a
+ * character that stands in for a bullet, is only with Word's spacer after it.
+ */
+function isSanitizedWordMarker(marker: string, element: Element): boolean {
+  return (
+    WORD_BULLET_GLYPH.test(marker) ||
+    WORD_PUNCTUATED_NUMBER.test(marker) ||
+    ((WORD_BARE_NUMBER.test(marker) ||
+      WORD_PUNCTUATED_LETTER.test(marker) ||
+      WORD_BULLET_STAND_IN.test(marker)) &&
+      hasWordSpacer(element))
+  );
+}
+
+/**
+ * Whether the gap after a paragraph's first word -- or after the picture it
+ * starts with -- is Word's spacer: the text node holding the word ends with
+ * it, and the next text is inside an element styled at 7pt ({@link
+ * WORD_SPACER_STYLE}). Typed spaces are never in one, however many there are
+ * -- and Word's own spacer after a Wingdings bullet is `&nbsp; `, the same
+ * characters two typed spaces make.
+ */
+function hasWordSpacer(element: Element, picture?: Element): boolean {
+  const walker = element.ownerDocument.createTreeWalker(element, SHOW_TEXT);
+
+  if (picture) {
+    walker.currentNode = picture;
+  } else {
+    let word: Node | null = walker.nextNode();
+
+    while (word !== null && !/[^\s\u00a0]/.test(word.nodeValue ?? '')) {
+      word = walker.nextNode();
+    }
+
+    if (word === null || /^[\s\u00a0]*[^\s\u00a0]+[\s\u00a0]/.test(word.nodeValue ?? '')) {
+      return false;
+    }
+  }
+
+  let gap: Node | null = walker.nextNode();
+
+  while (gap !== null && (gap.nodeValue ?? '') === '') {
+    gap = walker.nextNode();
+  }
+
+  for (let at = gap?.parentNode ?? null; at !== null && at !== element; at = at.parentNode) {
+    if (
+      at.nodeType === ELEMENT_NODE &&
+      WORD_SPACER_STYLE.test((at as Element).getAttribute('style') ?? '')
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/** The largest picture, in points, that is a bullet: 24px. */
+const BULLET_POINTS = 18;
+
+/** A picture's declared `width` and `height`, in the units {@link POINTS_PER} knows. */
+const PICTURE_SIDE = {
+  width: /(?:^|;)\s*width\s*:\s*(\d*\.?\d+)\s*(pt|in|cm|mm|px)\b/i,
+  height: /(?:^|;)\s*height\s*:\s*(\d*\.?\d+)\s*(pt|in|cm|mm|px)\b/i,
+};
+
+/** A picture's `width` or `height`, in points, from its style or else its attribute. */
+function pictureSide(image: Element, side: 'width' | 'height'): number | null {
+  const declared = PICTURE_SIDE[side].exec(image.getAttribute('style') ?? '');
+
+  if (declared) {
+    return Number.parseFloat(declared[1]!) * POINTS_PER[declared[2]!.toLowerCase()]!;
+  }
+
+  const attribute = /^\s*(\d*\.?\d+)\s*(?:px)?\s*$/i.exec(image.getAttribute(side) ?? '');
+
+  return attribute ? Number.parseFloat(attribute[1]!) * POINTS_PER.px! : null;
+}
+
+/**
+ * Whether a picture is the size of a bullet: a stated size, no side of it
+ * larger than 24px. One with no size it states is content, since nothing
+ * says it is not a screenshot.
+ */
+function isBulletSized(image: Element): boolean {
+  const sides = [pictureSide(image, 'width'), pictureSide(image, 'height')].filter(
+    (side): side is number => side !== null,
+  );
+
+  return sides.length > 0 && sides.every((side) => side <= BULLET_POINTS);
+}
+
+/** The `<img>` a paragraph starts with, before any text, if it starts with one. */
+function leadingPicture(element: Element): Element | null {
+  const walker = element.ownerDocument.createTreeWalker(element, SHOW_TEXT | SHOW_ELEMENT);
+
+  for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
+    if (found.nodeType === TEXT_NODE) {
+      if (/[^\s\u00a0]/.test(found.nodeValue ?? '')) {
+        return null;
+      }
+    } else if (tagNameOf(found) === 'IMG') {
+      return found as Element;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * How a block lays out its source whitespace: whether the block itself does so
+ * under `white-space: normal` (an element inside it that says otherwise is
+ * asked for its own text, in {@link sourceWhitespace}), whether any of its
+ * text has whitespace that would collapse, and, for each edge of its text,
+ * whether the whitespace there is a typed space rather than layout (present,
+ * and holding no line break). Also whether a later text node starts a line
+ * with whitespace -- after a `<br>`, or at the start or end of a block inside
+ * it (`lineStart`, R8-FMT-6) -- and the element its first character that is
+ * not whitespace stands in (`holder`, whose indentation Firefox gives the
+ * block's first line: R8-FMT-5).
+ *
+ * One walk over each node's children by index, as `blocksFromHtml` makes its
+ * own: stepping siblings with a tree walker costs the node's index in some
+ * DOMs, and a block of many inline elements paid it once per element.
+ */
+function blockWhitespace(
+  element: Element,
+  skip?: SkipPredicate,
+): {
+  collapses: boolean;
+  layout: boolean;
+  start: boolean;
+  end: boolean;
+  lineStart: boolean;
+  holder: Element | null;
+  solids: SolidHolders | null;
+} {
+  const none = {
+    collapses: false,
+    layout: false,
+    start: false,
+    end: false,
+    lineStart: false,
+    holder: null,
+    solids: null,
+  };
+
+  if (legacyOwnHtml || whiteSpaceOf(element) !== 'normal') {
+    return none;
+  }
+
+  let first: string | null = null;
+  let last: string | null = null;
+  let layout = false;
+  // Whether a text node after the first starts a line -- after a `<br>`, or
+  // at the start or the end of a block inside -- with whitespace.
+  let lineStart = false;
+  let atLineStart = false;
+  // The element the first character that is not whitespace stands in.
+  let holder: Element | null = null;
+  // Where the plain text decides: the element each solid character stands
+  // in, by text node ({@link SolidHolders}).
+  const solids: SolidHolders | null = plainArbiter ? { at: [], holders: [], total: 0 } : null;
+  // `null` marks the end of a block inside, which ends its line.
+  const stack: Array<Node | null> = [element];
+
+  while (stack.length > 0) {
+    const node = stack.pop();
+
+    if (node === null || node === undefined) {
+      atLineStart = true;
+      continue;
+    }
+
+    if (node.nodeType === TEXT_NODE) {
+      const value = node.nodeValue ?? '';
+
+      if (value.length > 0) {
+        lineStart ||= first !== null && atLineStart && /^[ \t\n\r\f]/.test(value);
+        atLineStart = false;
+        // WebKit writes the space a drag began at as a converted one, which
+        // is read as the ordinary space it was (`walkText`): so is it here,
+        // where the block's first text says whether a space starts it -- one
+        // that stays at a paste's start, as Chromium's copy of it does
+        // (R9-RV-FMT-4).
+        first ??=
+          node.parentElement !== null &&
+          (node.parentElement.getAttribute('class') ?? '')
+            .split(/\s+/)
+            .includes('Apple-converted-space')
+            ? value.replace(/\u00a0/g, ' ')
+            : value;
+        last = value;
+        layout ||= COLLAPSIBLE.test(value);
+
+        if (holder === null && /[^ \t\n\r\f]/.test(value)) {
+          holder = node.parentElement;
+        }
+
+        if (solids) {
+          let count = 0;
+
+          for (let index = 0; index < value.length; index += 1) {
+            const code = value.charCodeAt(index);
+
+            if (!isBlank(code) && code !== 0xa0) {
+              count += 1;
+            }
+          }
+
+          if (count > 0 && node.parentElement) {
+            solids.at.push(solids.total);
+            solids.holders.push(node.parentElement);
+            solids.total += count;
+          }
+        }
+      }
+
+      continue;
+    }
+
+    if (node !== element) {
+      if (node.nodeType !== ELEMENT_NODE) {
+        continue;
+      }
+
+      const tag = tagNameOf(node);
+
+      if (SKIP_TAGS.has(tag) || skip?.(node as Element, tag)) {
+        continue;
+      }
+
+      if (tag === 'BR') {
+        atLineStart = true;
+      } else if (breaksLine(tag)) {
+        atLineStart = true;
+        stack.push(null);
+      }
+    }
+
+    const children = node.childNodes;
+
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      stack.push(children[index]!);
+    }
+  }
+
+  const typed = (whitespace: string | undefined): boolean =>
+    whitespace !== undefined && !/[\n\r]/.test(whitespace);
+
+  return {
+    collapses: true,
+    layout,
+    start: typed(/^[ \t\n\r\f]+/.exec(first ?? '')?.[0]),
+    end: typed(/[ \t\n\r\f]+$/.exec(last ?? '')?.[0]),
+    lineStart,
+    holder,
+    solids,
+  };
+}
+
+/**
+ * The element each solid character of a block's text stands in -- every
+ * character but whitespace and the no-break space, as {@link solidsOf}
+ * counts them -- as the solid index each text node's first one has
+ * (`at`, ascending) and that text node's parent. `total` is how many there
+ * are: where it differs from the count the text read holds, the two are not
+ * the same characters, and none of it is used.
+ */
+interface SolidHolders {
+  at: number[];
+  holders: Element[];
+  total: number;
+}
+
+/** The first line feed in `text` from `from` up to `to`, or -1. Costs that stretch. */
+function firstLineFeed(text: string, from: number, to: number): number {
+  for (let index = from; index < to; index += 1) {
+    if (text.charCodeAt(index) === 10) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+const LINE_BLOCKS = new WeakMap<Element, Element | null>();
+
+/**
+ * The nearest element at or above `element` that starts and ends a line
+ * ({@link breaksLine}): two characters in the same one stand in one block.
+ * Remembered per element, so a chain is walked once.
+ */
+function lineBlock(element: Element | null): Element | null {
+  const walked: Element[] = [];
+  let node = element;
+  let found: Element | null = null;
+
+  while (node) {
+    const known = LINE_BLOCKS.get(node);
+
+    if (known !== undefined) {
+      found = known;
+      break;
+    }
+
+    walked.push(node);
+
+    if (breaksLine(tagNameOf(node))) {
+      found = node;
+      break;
+    }
+
+    node = node.parentElement;
+  }
+
+  for (const each of walked) {
+    LINE_BLOCKS.set(each, found);
+  }
+
+  return found;
+}
+
+/** The element the `solid`th solid character stands in ({@link SolidHolders}). */
+function solidHolder(solids: SolidHolders, solid: number): Element | null {
+  let low = 0;
+  let high = solids.at.length - 1;
+  let found = -1;
+
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+
+    if (solids.at[middle]! <= solid) {
+      found = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  return found === -1 ? null : solids.holders[found]!;
+}
+
+/**
+ * Whether the last source text a block holds ends in a line break -- a
+ * newline, or a CR, vertical tab or form feed, each read as one -- rather
+ * than a `<br>`, an image, or text after it. Walked from the end, so it costs
+ * what follows the last text. That text can be the formatting after a child
+ * block, which the walk drops, so the caller asks the text read as well.
+ */
+function endsWithSourceNewline(element: Element, skip?: SkipPredicate): boolean {
+  const stack: Node[] = [element];
+
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+
+    if (node.nodeType === TEXT_NODE) {
+      const value = node.nodeValue ?? '';
+
+      if (value.length > 0) {
+        return /[\n\r\v\f]$/.test(value);
+      }
+
+      continue;
+    }
+
+    if (node !== element) {
+      if (node.nodeType !== ELEMENT_NODE) {
+        continue;
+      }
+
+      const tag = tagNameOf(node);
+
+      if (SKIP_TAGS.has(tag) || skip?.(node as Element, tag)) {
+        continue;
+      }
+
+      if (tag === 'BR' || tag === 'IMG') {
+        return false;
+      }
+    }
+
+    // Children in document order onto the stack, so the last is popped first.
+    for (const child of node.childNodes) {
+      stack.push(child);
+    }
+  }
+
+  return false;
+}
+
+/** Whitespace a browser draws differently from how it stands in the source. */
+const COLLAPSIBLE = /[\t\n\r\f]| {2}/;
+
+/**
+ * A block's text, as a browser draws it.
+ *
+ * Every block used to be read with its whitespace as it stands, because this
+ * package's own clipboard wrote a soft line break as a raw newline inside the
+ * block. It writes a `<br>` now, and marks its blocks `white-space: pre-wrap`,
+ * so a block that does not say it preserves whitespace is one whose source
+ * whitespace is layout: Firefox copies a page's `<p>` with its source
+ * line-wrapping and indentation intact, and Word wraps its own source lines,
+ * and both pasted as several lines with the indentation kept. Here each run of
+ * whitespace is one space, none stands beside a line break, and none at either
+ * edge of the block -- except a typed space at the paste's own edge, which
+ * lands mid-line, as in the inline buffer.
+ */
+function readBlockText(element: Element, skip?: SkipPredicate): RichText {
+  const whitespace = blockWhitespace(element, skip);
+
+  if (!whitespace.collapses) {
+    let runs = parseRichText(element, skip);
+
+    // A source newline that ends a block a style preserves ends its last
+    // line, as it does where the plain text decides (`arbitrate`) and in a
+    // block that collapses: it draws no line after it. A `<br>` there is a
+    // break somebody made, and this writer's own blocks hold no other kind.
+    // Only if the text read ends in that newline: the last source text can
+    // be the formatting after a child block (`<p>abc</p>\n</td>`), which the
+    // walk drops, and then the last character is a letter (R4-FMT-1).
+    if (
+      !legacyOwnHtml &&
+      richToPlainText(runs).endsWith('\n') &&
+      endsWithSourceNewline(element, skip)
+    ) {
+      runs = richDelete(runs, richLength(runs) - 1, richLength(runs));
+    }
+
+    return plainArbiter ? arbitrate(null, runs) : runs;
+  }
+
+  let runs: RichText;
+
+  collapsingSource = true;
+  collapsing = true;
+
+  try {
+    runs = parseRichText(element, skip);
+  } finally {
+    collapsingSource = false;
+    collapsing = false;
+  }
+
+  // A space at the paste's edge stays, since the paste lands mid-line -- but
+  // only one somebody selected, never the indentation or line-wrapping of
+  // the source, which is whitespace holding a line break.
+  const edges = {
+    start: pasteFirst.has(element) && whitespace.start,
+    end: pasteLast.has(element) && whitespace.end,
+  };
+  const chars = runs.map((): string[] => []);
+  // The run the pending space belongs to, or -1 for none.
+  let space = -1;
+  // Whether a space here would start a line: at the start, or after a break.
+  let lineStart = !edges.start;
+  // The run holding a preserved line break that so far ends the text.
+  let lastBreak = -1;
+  // Whether the next character is one the text held, marks and all.
+  let literal = false;
+
+  const content = (index: number, char: string): void => {
+    if (space !== -1) {
+      chars[space]!.push(' ');
+    }
+
+    space = -1;
+    lineStart = false;
+    lastBreak = -1;
+    chars[index]!.push(char);
+  };
+
+  for (const [index, run] of runs.entries()) {
+    for (const char of run.text) {
+      if (literal) {
+        literal = false;
+        content(index, char);
+      } else if (char === LITERAL) {
+        literal = true;
+      } else if (char === STANDS) {
+        // A `<br>` after a preserved break: that break is a line of its own.
+        lastBreak = -1;
+      } else if (char === ' ') {
+        if (space === -1 && !lineStart) {
+          space = index;
+        }
+      } else if (char === '\n' || char === LINE_BREAK) {
+        // A `<br>` or a `pre-line` break takes the collapsible space before it.
+        space = -1;
+        lineStart = true;
+        lastBreak = char === LINE_BREAK ? index : -1;
+        chars[index]!.push('\n');
+      } else if (char === PRESERVED['\n']) {
+        // A `pre` one leaves it, as Chromium lays it out.
+        content(index, '\n');
+        lineStart = true;
+        lastBreak = index;
+      } else {
+        content(index, RESTORED[char] ?? char);
+      }
+    }
+  }
+
+  if (space !== -1 && edges.end) {
+    chars[space]!.push(' ');
+  }
+
+  // A preserved line break that ends the text ends its line, as a trailing
+  // `<br>` does: it draws no line after it.
+  if (lastBreak !== -1 && !edges.end) {
+    chars[lastBreak]!.pop();
+  }
+
+  const collapsed = normalizeRuns(
+    runs
+      .map((run, index) => ({ ...run, text: chars[index]!.join('') }))
+      .filter((run) => run.text.length > 0),
+  );
+
+  // Asked whenever collapsing changed something the plain text can confirm:
+  // whitespace a browser draws differently, or a space at a block's start --
+  // a `pre-wrap` verse's ` second, set in` has nothing else, and Firefox
+  // writes no leading space it did not draw (`<p> lead</p>` copies as
+  // `lead`; R6-FMT-2) -- except at the very start of a copy: a drag begun on
+  // the `H` of `<p>  Hello</p>` writes ` Hello`, and the paste's-edge space
+  // the collapsed reading keeps stays. A known limit (R9-FMT-3), since a
+  // drag begun after the period of `Sentence.  Next` writes the space it
+  // drew and selected as the same HTML and plain text, byte for byte.
+  // A space at the end only of a table cell -- a cell's
+  // ` f ` read `f` (R4-FMT-6a) -- since Firefox writes the one a
+  // pretty-printed `<li>first <code>x</code> </li>` ends with, drawn or not,
+  // and asking every block pasted a trailing space nobody saw (R5-FMT-2).
+  // And a space that starts a line inside it, after a `<br>` or at a block
+  // inside it: `one<br> two` in a pre-wrap `<p>` had nothing else to say so
+  // (R8-FMT-6), and Firefox leaves the space out where it is not drawn.
+  const tag = tagNameOf(element);
+  const cell = tag === 'TD' || tag === 'TH';
+  const asked =
+    (whitespace.layout || whitespace.start || whitespace.lineStart || (cell && whitespace.end)) &&
+    !declaresWhiteSpace(element);
+
+  return plainArbiter
+    ? arbitrate(
+        asked ? parseRichText(element, skip) : null,
+        collapsed,
+        whitespace.layout || cell,
+        plainIndent(plainArbiter, element),
+        // Where its text starts in a list, a quote or a definition the block
+        // is not -- a quote in a quote, a list in a cell (R8-FMT-5).
+        plainIndent(plainArbiter, whitespace.holder ?? element),
+        whitespace.solids,
+      )
+    : collapsed;
+}
+
+/**
+ * How far Firefox's plain text indents each line of an element's text: four
+ * spaces for each `<ul>`, `<ol>`, `<dd>` and `<blockquote>` it is or is in
+ * (measured: nested lists, an `<ol>`, a `<p>` or a table in a list item, a
+ * list in a quote, a `<dd>` in a `<dd>`; a `<menu>`'s items, a `<dt>`, a
+ * `<details>` and a margin are not indented). Its parent's indentation plus
+ * its own, remembered, so a document is walked once however deep it nests.
+ *
+ * A `<blockquote type="cite">` is counted like any quote, though Firefox
+ * starts each of its lines with `>` instead: no block's text is found past
+ * that prefix, so such a quote's whitespace reads collapsed whatever this
+ * answers (R8-FMT-8, a documented limit).
+ */
+function plainIndent(arbiter: PlainArbiter, element: Element | null): number {
+  const { indents } = arbiter;
+  const unknown: Element[] = [];
+  let node = element;
+  let indent = 0;
+
+  while (node) {
+    const known = indents.get(node);
+
+    if (known !== undefined) {
+      indent = known;
+      break;
+    }
+
+    unknown.push(node);
+    node = node.parentElement;
+  }
+
+  for (let index = unknown.length - 1; index >= 0; index -= 1) {
+    const name = unknown[index]!.localName;
+
+    if (name === 'ul' || name === 'ol' || name === 'dd' || name === 'blockquote') {
+      indent += PLAIN_INDENT;
+    }
+
+    indents.set(unknown[index]!, indent);
+  }
+
+  return indent;
+}
+
+/** The spaces Firefox's plain text indents a line by for each level ({@link plainIndent}). */
+const PLAIN_INDENT = 4;
+
+/**
+ * The clipboard's `text/plain`, while `blocksFromHtml` reads HTML it was given
+ * with (see {@link HtmlReadOptions.plain}). Null otherwise. Asked only of a
+ * block that does not say how its whitespace is drawn ({@link
+ * declaresWhiteSpace}); every block moves its cursor on.
+ *
+ * Kept as its solid characters -- everything but whitespace -- and where each
+ * stands, so a block is matched with one comparison of its own solid
+ * characters, never a search.
+ */
+interface PlainArbiter {
+  /** The plain text, spelled as {@link asPlain} spells it. */
+  readonly text: string;
+  /** Its characters other than {@link isBlank} whitespace, in order. */
+  readonly solid: string;
+  /** Where in `text` each character of `solid` stands. */
+  readonly at: Int32Array;
+  /** The index into `solid` of the first character of each line that has one. */
+  readonly heads: Int32Array;
+  /** Where in `text` each tab and line feed stands, in order. */
+  readonly breaks: Int32Array;
+  /** Where in `text` each line feed stands, in order. */
+  readonly lineEnds: Int32Array;
+  /** Each element's {@link plainIndent}, once asked. */
+  readonly indents: Map<Node, number>;
+  /** The index into `solid` of the first character no block has matched. */
+  next: number;
+  /**
+   * The first of `heads` the look-ahead may try: past the lines the blocks
+   * missed since the last match are taken to stand on. At or before the
+   * cursor's line otherwise, where it does not count.
+   */
+  head: number;
+}
+
+let plainArbiter: PlainArbiter | null = null;
+
+/**
+ * How many lines past the cursor a block that is not at the cursor is looked
+ * for. Firefox writes text a block does not hold -- an image's alt text, the
+ * quotes a `<q>` draws -- and a block can hold text Firefox leaves out, so
+ * one block not found must not lose every block after it. A bounded number of
+ * line starts keeps the cost of a block it cannot find at its own length times
+ * a constant.
+ */
+const RESYNC_LINES = 64;
+
+/** Whitespace in plain text, after {@link asPlain}: a no-break space is a space. */
+function isBlank(code: number): boolean {
+  return code === 32 || code === 9 || code === 10 || code === 12 || code === 13;
+}
+
+/** Text as a plain-text clipboard spells it: a no-break space is a space. */
+function asPlain(text: string): string {
+  return text.replace(/\u00a0/g, ' ');
+}
+
+function plainArbiterFor(plain: string): PlainArbiter {
+  // Cleaned as the blocks' own text is, so the two still agree.
+  const text = normalizeControlCharacters(asPlain(plain));
+  const at = new Int32Array(text.length);
+  const heads: number[] = [];
+  const breaks: number[] = [];
+  const lineEnds: number[] = [];
+  let solid = '';
+  let count = 0;
+  let from = 0;
+  let lineStart = true;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+
+    if (isBlank(code)) {
+      solid += text.slice(from, index);
+      from = index + 1;
+      lineStart ||= code === 10;
+
+      if (code === 9 || code === 10) {
+        breaks.push(index);
+      }
+
+      if (code === 10) {
+        lineEnds.push(index);
+      }
+
+      continue;
+    }
+
+    if (lineStart) {
+      heads.push(count);
+      lineStart = false;
+    }
+
+    at[count] = index;
+    count += 1;
+  }
+
+  solid += text.slice(from);
+
+  return {
+    text,
+    solid,
+    at: at.subarray(0, count),
+    heads: Int32Array.from(heads),
+    breaks: Int32Array.from(breaks),
+    lineEnds: Int32Array.from(lineEnds),
+    indents: new Map(),
+    next: 0,
+    head: 0,
+  };
+}
+
+/** A text's solid characters and where each stands in it. */
+function solidsOf(text: string): { solid: string; at: Int32Array } {
+  const at = new Int32Array(text.length);
+  let solid = '';
+  let count = 0;
+  let from = 0;
+
+  for (let index = 0; index < text.length; index += 1) {
+    if (isBlank(text.charCodeAt(index))) {
+      solid += text.slice(from, index);
+      from = index + 1;
+    } else {
+      at[count] = index;
+      count += 1;
+    }
+  }
+
+  solid += text.slice(from);
+
+  return { solid, at: at.subarray(0, count) };
+}
+
+/**
+ * Where a block's solid characters stand in the plain text: at the cursor,
+ * whatever whitespace lies between, or else at the start of one of the next
+ * {@link RESYNC_LINES} lines. The index into the arbiter's `solid` of its
+ * first character, or -1. The caller moves the cursor past it when found.
+ *
+ * Not found, the block is taken to stand on the `lines` lines -- as many as
+ * it holds -- from the cursor's, and the look-ahead for the
+ * block after it starts past them, while the cursor stays: that block is
+ * still tried at the cursor first, for a block the plain text left out. A
+ * window that never moved found nothing after 64 misses in a row
+ * (R4-FMT-2), Firefox's `<q>`s for one.
+ *
+ * A claim changes only where the look-ahead starts, never what it can reach:
+ * a block it does not find past the claimed lines is looked for on the
+ * {@link RESYNC_LINES} lines from the cursor's as well, since the claim can
+ * be wrong -- a block the plain text left out claims a line that belongs to
+ * the next, and a table cell spelled differently (`<img alt="flag">
+ * France`) claimed one per cell where Firefox writes the whole row on one,
+ * and every block after the table missed (R5-FMT-1). Each lookup costs the
+ * block's length times a constant, and a binary search for the cursor's
+ * line.
+ *
+ * A table cell after its row's first that is not found is tried once more,
+ * right after the next tab on its row's line ({@link nextCellStart}): once
+ * one cell of a row was spelled differently, the cursor stayed before it and
+ * every cell after it in the row missed (R6-FMT-3). That costs one more
+ * comparison per cell, and a binary search for the tab moves the row on past
+ * it. A row whose first cell is empty or not found is placed at the start of
+ * the first line after the last block matched ({@link placeRow}).
+ */
+function locate(arbiter: PlainArbiter, solid: string, lines: number): number {
+  if (solid.length === 0) {
+    // An empty cell still has its tab, which the next cell is after; an
+    // empty first cell places its row.
+    if (cellColumn > 0) {
+      nextCellStart(arbiter);
+    } else if (cellColumn === 0) {
+      placeRow(arbiter, Math.max(arbiter.head, firstAtOrAfter(arbiter.heads, arbiter.next)));
+    }
+
+    return -1;
+  }
+
+  // Found at the cursor, the blocks missed before it stood nowhere in the
+  // plain text, and the lines they were taken to stand on are given back.
+  if (arbiter.solid.startsWith(solid, arbiter.next)) {
+    arbiter.head = 0;
+
+    return arbiter.next;
+  }
+
+  const { heads } = arbiter;
+  // The first line starting at or after the cursor.
+  let low = 0;
+  let high = heads.length;
+
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+
+    if (heads[middle]! < arbiter.next) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+
+  const from = Math.max(arbiter.head, low);
+  const last = Math.min(heads.length, from + RESYNC_LINES);
+
+  for (let index = from; index < last; index += 1) {
+    // No reset here: every line a miss claimed is at or before this one,
+    // and the cursor moves past it.
+    if (arbiter.solid.startsWith(solid, heads[index]!)) {
+      return heads[index]!;
+    }
+  }
+
+  // The lines the misses claimed, from the cursor's: found there, they were
+  // claimed wrongly, and are given back.
+  const claimed = Math.min(from, low + RESYNC_LINES);
+
+  for (let index = low; index < claimed; index += 1) {
+    if (arbiter.solid.startsWith(solid, heads[index]!)) {
+      arbiter.head = 0;
+
+      return heads[index]!;
+    }
+  }
+
+  // A cell after its row's first: once more, after the next tab.
+  if (cellColumn > 0) {
+    const start = nextCellStart(arbiter);
+
+    if (start !== -1 && arbiter.solid.startsWith(solid, start)) {
+      return start;
+    }
+  }
+
+  // A block missed mid-line -- the text after an image Firefox wrote the alt
+  // text of -- starts on the line the cursor is in, which is not among them.
+  // A table cell after a row's first starts mid-line by definition, after
+  // the tab Firefox writes, and claims none.
+  const midLine = from === low && heads[low] !== arbiter.next;
+  const claims = cellColumn > 0 ? 0 : Math.max(0, midLine ? lines - 1 : lines);
+
+  // A row's first cell missed: its row is taken to start on the line it was
+  // looked for from, and the tabs after its cells are looked for from there.
+  if (cellColumn === 0) {
+    placeRow(arbiter, from);
+  }
+
+  arbiter.head = Math.min(heads.length, from + claims);
+
+  return -1;
+}
+
+/**
+ * The column of the table cell being read, or -1 for any other block. A
+ * block {@link locate} does not find claims the lines it holds, but a cell
+ * after its row's first does not: Firefox's plain text writes a whole row on
+ * one line.
+ */
+let cellColumn = -1;
+
+/**
+ * Where in the plain text the tab after the current row's next cell is
+ * looked for: past the last cell of the row found, or past the tab of the
+ * last one missed. -1 before the row has a place.
+ */
+let rowCursor = -1;
+
+/** The index of the first of a sorted list's values at or after `value`. */
+function firstAtOrAfter(list: Int32Array, value: number): number {
+  let low = 0;
+  let high = list.length;
+
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+
+    if (list[middle]! < value) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+
+  return low;
+}
+
+/**
+ * Places a row whose first cell is empty or was not found at the start of
+ * the line of `heads[line]` -- the first line at or after the cursor's that
+ * holds a character, past any the blocks missed before it claimed -- or
+ * nowhere. Firefox writes each row on a line of its own, so a cursor
+ * mid-line is the end of the last row matched, never this one's start, and
+ * an empty first cell starts its line with the tab the next cell is after
+ * (R7-FMT-2).
+ */
+function placeRow(arbiter: PlainArbiter, line: number): void {
+  const head = arbiter.heads[line];
+
+  if (head === undefined) {
+    rowCursor = -1;
+
+    return;
+  }
+
+  const before = firstAtOrAfter(arbiter.lineEnds, arbiter.at[head]!) - 1;
+
+  rowCursor = before < 0 ? 0 : arbiter.lineEnds[before]! + 1;
+}
+
+/**
+ * The index into the arbiter's `solid` of the first character after the
+ * next tab on the current row's line -- where the next cell starts, if that
+ * cell holds anything -- or -1. Moves the row past that tab, or to the end
+ * of the line when there is none. Every step is a binary search, so a row
+ * placed again and again on one long line costs nothing per row (R7-FMT-3:
+ * a walk to the tab crossed the line once per row).
+ */
+function nextCellStart(arbiter: PlainArbiter): number {
+  const { text, breaks } = arbiter;
+
+  if (rowCursor < 0) {
+    return -1;
+  }
+
+  const tab = firstAtOrAfter(breaks, rowCursor);
+
+  if (tab === breaks.length) {
+    rowCursor = text.length;
+
+    return -1;
+  }
+
+  const at = breaks[tab]!;
+
+  if (text.charCodeAt(at) === 10) {
+    rowCursor = at;
+
+    return -1;
+  }
+
+  rowCursor = at + 1;
+
+  // The cell's first character, unless another tab or the line's end comes
+  // before it.
+  const first = firstAtOrAfter(arbiter.at, at + 1);
+
+  if (
+    first === arbiter.at.length ||
+    (tab + 1 < breaks.length && breaks[tab + 1]! < arbiter.at[first]!)
+  ) {
+    return -1;
+  }
+
+  return first;
+}
+
+/** How many of a text's lines hold a character other than whitespace. */
+function solidLines(text: string): number {
+  let count = 0;
+  let open = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+
+    if (code === 10) {
+      open = false;
+    } else if (!open && !isBlank(code)) {
+      open = true;
+      count += 1;
+    }
+  }
+
+  return count;
+}
+
+/** After a line feed, or the tab Firefox's plain text puts between two cells. */
+function isLineOrCellStart(previous: number): boolean {
+  return previous === 10 || previous === 9;
+}
+
+/** Whether `text` holds `part` at `from`, compared without allocating. */
+function holdsAt(
+  text: string,
+  from: number,
+  part: string,
+  partFrom: number,
+  length: number,
+): boolean {
+  if (from < 0 || from + length > text.length) {
+    return false;
+  }
+
+  for (let index = 0; index < length; index += 1) {
+    if (text.charCodeAt(from + index) !== part.charCodeAt(partFrom + index)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Where the block matched at `found` would start its own leading spaces if
+ * Firefox indented its line by `indent` ({@link plainIndent}): the line's
+ * start plus `indent`, when the block is the first thing on its line and
+ * the line starts with at least that many spaces. -1 otherwise -- mid-line,
+ * after a cell's tab, or not indented that far. Costs two binary searches
+ * and the indentation's length.
+ */
+function indentedFrom(arbiter: PlainArbiter, found: number, indent: number): number {
+  if (indent === 0) {
+    return -1;
+  }
+
+  const { text, at, lineEnds, breaks } = arbiter;
+  const startsAt = at[found]!;
+  // The first character after the last line feed before the block.
+  const end = firstAtOrAfter(lineEnds, startsAt) - 1;
+  const lineStart = end < 0 ? 0 : lineEnds[end]! + 1;
+  // A solid character or a tab between it and the block: not its line's first.
+  const previous = found > 0 ? at[found - 1]! : -1;
+  const lastBreak = breaks[firstAtOrAfter(breaks, startsAt) - 1] ?? -1;
+
+  if (previous >= lineStart || lastBreak >= lineStart || startsAt - lineStart < indent) {
+    return -1;
+  }
+
+  for (let index = lineStart; index < lineStart + indent; index += 1) {
+    if (text.charCodeAt(index) !== 32) {
+      return -1;
+    }
+  }
+
+  return lineStart + indent;
+}
+
+/**
+ * Whether the plain text's gap `plainFrom`..`plainTo` is the source's gap
+ * `rawFrom`..`rawTo` with `indent` spaces after each line feed -- Firefox's
+ * indentation of the next line ({@link plainIndent}). Costs the shorter gap.
+ *
+ * Two lines Firefox writes differently: an empty one -- a line feed that the
+ * next one follows -- with no indentation at all (R8-FMT-3), and between two
+ * paragraphs of one block, where the source has one line feed, a blank line
+ * before the indentation (R8-FMT-5) -- an indentation of 0 included, in a
+ * table cell or a bare `<li>` (R9-FMT-2), where this is the exact match
+ * otherwise. Neither reads a character of its own.
+ */
+function holdsIndented(
+  plain: string,
+  plainFrom: number,
+  plainTo: number,
+  raw: string,
+  rawFrom: number,
+  rawTo: number,
+  indent: number,
+): boolean {
+  let cursor = plainFrom;
+
+  for (let index = rawFrom; index < rawTo; index += 1) {
+    const code = raw.charCodeAt(index);
+
+    if (cursor >= plainTo || plain.charCodeAt(cursor) !== code) {
+      return false;
+    }
+
+    cursor += 1;
+
+    if (code === 10) {
+      if (index + 1 < rawTo && raw.charCodeAt(index + 1) === 10) {
+        continue;
+      }
+
+      if (cursor < plainTo && plain.charCodeAt(cursor) === 10) {
+        cursor += 1;
+      }
+
+      if (plainTo - cursor < indent) {
+        return false;
+      }
+
+      for (let step = 0; step < indent; step += 1) {
+        if (plain.charCodeAt(cursor + step) !== 32) {
+          return false;
+        }
+      }
+
+      cursor += indent;
+    }
+  }
+
+  return cursor === plainTo;
+}
+
+/**
+ * Whether the plain text's gap `from`..`to` starts a line with Firefox's
+ * `indent` spaces ({@link plainIndent}): a line feed followed by that many.
+ * A gap that does is decided by {@link holdsIndented} alone, since the
+ * source's spaces after a break can be exactly as many (R8-FMT-4); one that
+ * does not, as any other. Costs the gap and one indentation.
+ */
+function showsIndent(plain: string, from: number, to: number, indent: number): boolean {
+  if (indent === 0) {
+    return false;
+  }
+
+  for (let index = from; index < to; index += 1) {
+    if (plain.charCodeAt(index) !== 10 || to - index - 1 < indent) {
+      continue;
+    }
+
+    let spaces = 0;
+
+    while (spaces < indent && plain.charCodeAt(index + 1 + spaces) === 32) {
+      spaces += 1;
+    }
+
+    if (spaces === indent) {
+      return true;
+    }
+
+    index += spaces;
+  }
+
+  return false;
+}
+
+/**
+ * Advances the plain-text cursor past a block read without a choice to make:
+ * a code block, a table cell, a callout. Without it the block after one would
+ * not be at the cursor.
+ */
+function passPlain(text: string): void {
+  if (plainArbiter) {
+    arbitrate(null, richFromText(text));
+  }
+}
+
+function richFromText(text: string): RichText {
+  return text.length > 0 ? [{ text }] : [];
+}
+
+/**
+ * A block's collapsed reading, with each run of whitespace in it as it stands
+ * in the source where the clipboard's plain text holds exactly that. Firefox
+ * writes a page's classes into the HTML rather than their computed style, so a
+ * `<p class="pw">` a stylesheet makes `pre-wrap` and a source-wrapped `<p>`
+ * look the same -- but its `text/plain` is the text as drawn, which tells
+ * them apart.
+ *
+ * The block is matched where it should stand -- at the cursor, the end of the
+ * last block matched -- by its solid characters, so the comparison costs its
+ * own length and an identical block elsewhere is never taken for it. Every
+ * block moves the cursor on, `raw` or not: one that has nothing to decide
+ * passes `null`.
+ *
+ * Then each gap between two of its solid characters is the source's when the
+ * plain text's gap there is the same characters, and the collapsed reading's
+ * otherwise -- so a paragraph's source line-wrapping collapses while the
+ * double space in its pre-wrap code stands. At the block's edges the plain
+ * text cannot tell the block's own whitespace from the gap between blocks
+ * when a line break is involved, so only spaces and tabs count there: a
+ * line's indentation, exactly, and what ends the line -- the last only when
+ * `trailing` says the end was asked about too ({@link readBlockText}). A
+ * pre-wrap block's last newline ends its last line, as a trailing `<br>`
+ * does, and draws none.
+ *
+ * Firefox indents every line of a list item, a `<dd>` and a quote by
+ * `indent` spaces ({@link plainIndent}). Where a line of the block starts
+ * with exactly that many spaces they are Firefox's, not the block's: its
+ * leading spaces are the ones after them, and a gap holding a line break
+ * matches with them after each break (R7-FMT-4). Where they are not there,
+ * the block is decided as any other. Where they are, such a gap matches only
+ * with them: the spaces after a `<br>` in a `normal` item, exactly as many,
+ * matched the plain text as they stand though nothing drew them (R8-FMT-4).
+ * The leading spaces are counted past `leadIndent`, the indentation of the
+ * element the text starts in, which can be deeper than the block's
+ * (R8-FMT-5) -- and where it is, a line break matches past either.
+ */
+function arbitrate(
+  raw: RichText | null,
+  collapsed: RichText,
+  trailing = true,
+  indent = 0,
+  leadIndent = indent,
+  solids: SolidHolders | null = null,
+): RichText {
+  const arbiter = plainArbiter;
+
+  if (!arbiter) {
+    return collapsed;
+  }
+
+  const collapsedText = asPlain(richToPlainText(collapsed));
+  const ours = solidsOf(collapsedText);
+  const found = locate(arbiter, ours.solid, solidLines(collapsedText));
+
+  if (found === -1) {
+    return collapsed;
+  }
+
+  const count = ours.solid.length;
+  const startsAt = arbiter.at[found]!;
+  const endsAt = arbiter.at[found + count - 1]! + 1;
+
+  arbiter.next = found + count;
+
+  if (cellColumn >= 0) {
+    rowCursor = Math.max(rowCursor, endsAt);
+  }
+
+  if (raw === null) {
+    return collapsed;
+  }
+
+  const rawText = asPlain(richToPlainText(raw));
+  const source = solidsOf(rawText);
+
+  if (source.solid !== ours.solid) {
+    return collapsed;
+  }
+
+  const plain = arbiter.text;
+  // Pieces of the result, each a slice of the source (`raw`) or of the
+  // collapsed reading, in order.
+  const pieces: Array<{ raw: boolean; from: number; to: number }> = [];
+  let anyRaw = false;
+  const take = (fromRaw: boolean, from: number, to: number): void => {
+    if (from >= to) {
+      return;
+    }
+
+    const last = pieces.at(-1);
+
+    if (last && last.raw === fromRaw && last.to === from) {
+      last.to = to;
+    } else {
+      pieces.push({ raw: fromRaw, from, to });
+    }
+
+    anyRaw ||= fromRaw;
+  };
+
+  // The indentation of the line it starts, exactly -- or of the table cell,
+  // which Firefox starts with a tab (R4-FMT-6a). Always after the cursor: the
+  // run before the block is whitespace, and the last block matched ended in
+  // a character that is not.
+  const lead = source.at[0]!;
+  const indented = indentedFrom(arbiter, found, leadIndent);
+  const leadRaw =
+    lead > 0 &&
+    !/[\n\r]/.test(rawText.slice(0, lead)) &&
+    (indented === -1
+      ? (startsAt - lead === 0 || isLineOrCellStart(plain.charCodeAt(startsAt - lead - 1))) &&
+        holdsAt(plain, startsAt - lead, rawText, 0, lead)
+      : startsAt - indented === lead && holdsAt(plain, indented, rawText, 0, lead));
+
+  if (leadRaw) {
+    take(true, 0, lead);
+  } else {
+    take(false, 0, ours.at[0]!);
+  }
+
+  // Line by line, by the element each line starts in, where the block has no
+  // indentation of its own and its characters are the ones counted there.
+  const perLine = indent === 0 && solids !== null && solids.total === count ? solids : null;
+
+  for (let index = 0; index < count; index += 1) {
+    take(true, source.at[index]!, source.at[index]! + 1);
+
+    if (index === count - 1) {
+      break;
+    }
+
+    const rawFrom = source.at[index]! + 1;
+    const rawTo = source.at[index + 1]!;
+    const plainFrom = arbiter.at[found + index]! + 1;
+    const plainTo = arbiter.at[found + index + 1]!;
+    const deeper = leadIndent > indent;
+    // With no indentation of its own -- a table cell, a bare `<li>` from a
+    // drag begun inside a list -- a block can still hold a list, a quote or
+    // a definition Firefox indents, so each line is matched past the
+    // indentation of the element its first character stands in. Where that
+    // is none, Firefox still writes the blank line between two paragraphs
+    // (R9-FMT-2), which `holdsIndented` allows -- with no indentation it is
+    // the exact match where the gap has no blank line. Where it is some, a
+    // gap that shows it is decided by it alone, as a list item's own lines
+    // are (R8-FMT-4): taking the blank line and then that indentation for
+    // the block's drawn spaces pasted four undrawn ones (R9-RV-FMT-1), and
+    // the spaces after a `<br>` in a `normal` item in a cell stood
+    // (R9-RV-FMT-3). Where the characters cannot be placed, as before.
+    // The whole gap as it was read before the per-line rule: by the
+    // indentation of the block and of the element its text starts in.
+    const asBefore = (): boolean =>
+      showsIndent(plain, plainFrom, plainTo, indent) ||
+      (deeper && showsIndent(plain, plainFrom, plainTo, leadIndent))
+        ? holdsIndented(plain, plainFrom, plainTo, rawText, rawFrom, rawTo, indent) ||
+          (deeper && holdsIndented(plain, plainFrom, plainTo, rawText, rawFrom, rawTo, leadIndent))
+        : plainTo - plainFrom === rawTo - rawFrom &&
+          holdsAt(plain, plainFrom, rawText, rawFrom, rawTo - rawFrom);
+    let asDrawn: boolean;
+
+    if (perLine) {
+      const holder = solidHolder(perLine, index + 1);
+      const next = plainIndent(arbiter, holder);
+      const line = (pFrom: number, pTo: number, rFrom: number): boolean =>
+        next === 0 || showsIndent(plain, pFrom, pTo, next)
+          ? holdsIndented(plain, pFrom, pTo, rawText, rFrom, rawTo, next)
+          : pTo - pFrom === rawTo - rFrom && holdsAt(plain, pFrom, rawText, rFrom, rawTo - rFrom);
+      const oursFrom = ours.at[index]! + 1;
+      const oursTo = ours.at[index + 1]!;
+      const rawFeed = firstLineFeed(rawText, rawFrom, rawTo);
+      const plainFeed = firstLineFeed(plain, plainFrom, plainTo);
+      const oursFeed = firstLineFeed(collapsedText, oursFrom, oursTo);
+
+      // Split at the first line feed (R9-RV2-FMT-1): judged whole, the
+      // spaces ending the line above rode along with the line below -- a
+      // `<dd>`'s trailing space, which Firefox writes drawn or not -- or,
+      // left out of the plain text, cost the line below its drawn lead. What
+      // ends a block there is the collapsed reading's, as a block's own end
+      // is where it is not asked -- unless the whole gap matched as it was
+      // read before (`asBefore`), so that nothing read right then is lost;
+      // within one block it stands where the plain text holds exactly it (a
+      // `pre-wrap` line's drawn trailing space). The rest is the line below,
+      // from the line feed on.
+      if (rawFeed > rawFrom && plainFeed !== -1 && oursFeed !== -1) {
+        const before = rawFeed - rawFrom;
+        const keepEnd =
+          plainFeed - plainFrom === before &&
+          holdsAt(plain, plainFrom, rawText, rawFrom, before) &&
+          (lineBlock(solidHolder(perLine, index)) === lineBlock(holder) || asBefore());
+
+        if (keepEnd) {
+          take(true, rawFrom, rawFeed);
+        } else {
+          take(false, oursFrom, oursFeed);
+        }
+
+        if (line(plainFeed, plainTo, rawFeed)) {
+          take(true, rawFeed, rawTo);
+        } else {
+          take(false, oursFeed, oursTo);
+        }
+
+        continue;
+      }
+
+      asDrawn = line(plainFrom, plainTo, rawFrom);
+    } else {
+      asDrawn = asBefore();
+    }
+
+    if (asDrawn) {
+      take(true, rawFrom, rawTo);
+    } else {
+      take(false, ours.at[index]! + 1, ours.at[index + 1]!);
+    }
+  }
+
+  // What ends its last line, exactly, up to the end of the line -- only when
+  // the end was asked about at all: Firefox writes an undrawn trailing space
+  // where it leaves out an undrawn leading one (R5-FMT-2). Not of a cell
+  // before the tab, either, where Firefox writes it too (`cell \tc2`).
+  const trailFrom = source.at[count - 1]! + 1;
+  const trailTo = rawText.endsWith('\n') ? rawText.length - 1 : rawText.length;
+  const trail = trailTo - trailFrom;
+  const trailRaw =
+    trailing &&
+    trail > 0 &&
+    !/[\n\r]/.test(rawText.slice(trailFrom, trailTo)) &&
+    holdsAt(plain, endsAt, rawText, trailFrom, trail) &&
+    (endsAt + trail === plain.length || plain.charCodeAt(endsAt + trail) === 10);
+
+  if (trailRaw) {
+    take(true, trailFrom, trailTo);
+  } else {
+    take(false, ours.at[count - 1]! + 1, collapsedText.length);
+  }
+
+  return anyRaw ? stitch(raw, collapsed, pieces) : collapsed;
+}
+
+/**
+ * The runs made of `pieces` -- slices of `raw` and of `collapsed` by character
+ * offset, each source's slices in order -- with each character's marks and
+ * link. One pass over each source, however many pieces.
+ */
+function stitch(
+  raw: RichText,
+  collapsed: RichText,
+  pieces: ReadonlyArray<{ raw: boolean; from: number; to: number }>,
+): RichText {
+  const cursors = [
+    { runs: raw, run: 0, start: 0 },
+    { runs: collapsed, run: 0, start: 0 },
+  ];
+  const out: TextRun[] = [];
+
+  for (const piece of pieces) {
+    const cursor = cursors[piece.raw ? 0 : 1]!;
+    let from = piece.from;
+
+    while (from < piece.to && cursor.run < cursor.runs.length) {
+      const run = cursor.runs[cursor.run]!;
+      const runEnd = cursor.start + run.text.length;
+
+      if (from >= runEnd) {
+        cursor.start = runEnd;
+        cursor.run += 1;
+        continue;
+      }
+
+      const to = Math.min(piece.to, runEnd);
+
+      out.push({ ...run, text: run.text.slice(from - cursor.start, to - cursor.start) });
+      from = to;
+    }
+  }
+
+  return normalizeRuns(out);
+}
+
 /** Our own serializer records depth explicitly; other sources have none. */
 function depthOf(element: Element, fallback: number): number {
   const declared = Number.parseInt((element as HTMLElement).dataset?.neditorDepth ?? '', 10);
@@ -2206,14 +4109,15 @@ function depthOf(element: Element, fallback: number): number {
 
 function pushCallout(out: Block[], element: Element, depth: number, icon: string): void {
   const runs = parseRichText(element, isNestedList);
+  passPlain(richToPlainText(runs));
   const block = createBlock('callout', runs, depthOf(element, depth));
-  block.icon = icon;
+  block.icon = normalizeControlCharacters(icon) || DEFAULT_CALLOUT_ICON;
   out.push(block);
 }
 
 /** Everything left below the bound, as one block rather than none. */
 function pushRemainder(out: Block[], node: Node, depth: number): void {
-  const text = subtreeText(node);
+  const text = normalizeControlCharacters(subtreeText(node));
 
   if (text.trim().length > 0) {
     out.push(createBlock('paragraph', text, depth));
@@ -2261,11 +4165,9 @@ function detachSummary(summary: Element, details: Element): void {
  */
 function visitDetails(doc: Document, element: Element, depth: number, out: Block[]): void {
   const summary = firstSummary(element);
-  const block = createBlock(
-    'toggle',
-    summary ? parseRichText(summary) : [],
-    depthOf(element, depth),
-  );
+  const title = summary ? parseRichText(summary) : [];
+  passPlain(richToPlainText(title));
+  const block = createBlock('toggle', title, depthOf(element, depth));
   block.collapsed = !element.hasAttribute('open');
   out.push(block);
 
@@ -2309,6 +4211,7 @@ function pushTable(out: Block[], element: Element, depth: number): void {
   // rather than text that silently goes nowhere.
   const caption = children.find((child) => tagNameOf(child) === 'CAPTION');
   const captionRuns = caption ? parseRichText(caption) : [];
+  passPlain(richToPlainText(captionRuns));
 
   if (!isRichEmpty(captionRuns)) {
     out.push(createBlock('paragraph', captionRuns, depthOf(element, depth)));
@@ -2340,11 +4243,24 @@ function pushTable(out: Block[], element: Element, depth: number): void {
   for (const row of rowElements) {
     const cells: RichText[] = [];
 
+    // A row has no place in the plain text until one of its cells is found.
+    rowCursor = -1;
+
     for (const cell of row.children) {
       const tag = tagNameOf(cell);
 
+      // A cell is drawn as any block is: its source whitespace collapses
+      // unless a style preserves it -- this writer marks its own cells
+      // pre-wrap -- and the plain text decides one a stylesheet preserves.
+      // Read as it stood, WebKit's undrawn space at a cell's end stayed.
       if (tag === 'TH' || tag === 'TD') {
-        cells.push(parseRichText(cell));
+        cellColumn = cells.length;
+
+        try {
+          cells.push(readBlockText(cell));
+        } finally {
+          cellColumn = -1;
+        }
       }
     }
 
@@ -2491,7 +4407,9 @@ function pushImage(out: Block[], element: Element, depth: number): boolean {
     depthOf(element, depth),
   );
   block.src = src ?? '';
-  block.alt = image?.getAttribute('alt') ?? element.getAttribute('data-neditor-alt') ?? '';
+  block.alt = normalizeControlCharacters(
+    image?.getAttribute('alt') ?? element.getAttribute('data-neditor-alt') ?? '',
+  );
   out.push(block);
 
   // An image in the caption -- a Wikipedia thumbnail's flag icon -- is handed
@@ -2707,7 +4625,7 @@ function visitListItemInner(
     (element) => tagNameOf(element) === 'INPUT' && element.getAttribute('type') === 'checkbox',
   );
   const state = item.getAttribute(TODO_ATTR);
-  let runs = parseRichText(item, skip);
+  let runs = readBlockText(item, skip);
   let type = fallback;
   let checked = false;
 
@@ -2751,7 +4669,7 @@ function visitListItemInner(
   if (!declared && isRichEmpty(runs)) {
     for (const block of blocks) {
       if (tagNameOf(block) === 'P') {
-        const text = parseRichText(block);
+        const text = readBlockText(block);
 
         // The first that holds text: a blank one is a blank line, and stays.
         if (richToPlainText(text).trim().length > 0) {
@@ -2971,13 +4889,62 @@ const STANDS = '\uFDD5';
 type WhiteSpace = 'normal' | 'pre' | 'pre-line';
 
 const WHITE_SPACE = new WeakMap<Element, WhiteSpace>();
+const DECLARES_WHITE_SPACE = new WeakMap<Element, boolean>();
+
+/**
+ * Whether an element's own `style`, or an ancestor's, says how its whitespace
+ * is drawn. Chromium and WebKit write the computed `white-space` on what they
+ * copy, and that is believed, whatever the plain text says; Firefox writes
+ * only what the page wrote inline, so the rest of its HTML is decided by the
+ * plain text (see `arbitrate`) -- a block at a time, so one inline `pre` span
+ * leaves the paragraph around it, and its stylesheet-preserved `<code>`, to
+ * the plain text as before. Remembered per element, as {@link whiteSpaceOf}.
+ */
+function declaresWhiteSpace(element: Element | null): boolean {
+  const chain: Element[] = [];
+  let declares = false;
+
+  for (let at = element; at; at = at.parentElement) {
+    const known = DECLARES_WHITE_SPACE.get(at);
+
+    if (known !== undefined) {
+      declares = known;
+      break;
+    }
+
+    chain.push(at);
+  }
+
+  for (const at of chain.reverse()) {
+    declares ||= declaredWhiteSpace(at) !== null;
+    DECLARES_WHITE_SPACE.set(at, declares);
+  }
+
+  return declares;
+}
+
+/**
+ * Elements whose text is never collapsed unless they say so themselves: the
+ * two whose browser default is `white-space: pre`. An inherited `normal` --
+ * the computed style Chromium writes on the element around a copy -- does not
+ * count; only a declaration on the element itself does.
+ *
+ * Not `<code>`, `<kbd>` or `<samp>`, whose default is `normal`: a page
+ * paragraph's source-wrapped `<code>npm\n      install</code>` is drawn on
+ * one line. GitHub's `code { white-space: break-spaces }` arrives from Firefox
+ * as a bare `<code>` all the same -- it copies classes, not computed style --
+ * and is told apart by the clipboard's plain text (see `arbitrate`), as any
+ * other element a stylesheet preserves is.
+ */
+const PRESERVING_TAGS = new Set(['PRE', 'TEXTAREA']);
 
 /**
  * How an element lays out its whitespace, from the nearest inline `style` that
  * says: Google Docs, VS Code and a browser's copy of a `pre-wrap` region mark
  * their text this way, and collapsing it lost tabs and runs of spaces.
  * `pre`, `pre-wrap` and `break-spaces` preserve it all; `pre-line` only its
- * line breaks. Remembered per element, so a deep chain is walked once.
+ * line breaks. A {@link PRESERVING_TAGS} element with no declaration of its
+ * own is `pre`. Remembered per element, so a deep chain is walked once.
  */
 function whiteSpaceOf(element: Element | null): WhiteSpace {
   const chain: Element[] = [];
@@ -2995,7 +4962,7 @@ function whiteSpaceOf(element: Element | null): WhiteSpace {
   }
 
   for (const at of chain.reverse()) {
-    mode = declaredWhiteSpace(at) ?? mode;
+    mode = declaredWhiteSpace(at) ?? (PRESERVING_TAGS.has(tagNameOf(at)) ? 'pre' : mode);
     WHITE_SPACE.set(at, mode);
   }
 
@@ -3592,11 +5559,45 @@ function visitBlocksInner(
     // the paste there is nothing for it to stand between, and
     // `blocksFromHtml` trims it.
     const blankLine = buffer.some(holdsBreak);
+    // A run says how its whitespace is drawn when everything in it does: its
+    // container declares it, or -- as Chromium and WebKit copy a phrase --
+    // each element in it carries its own computed `white-space`. One inline
+    // `pre` span among Firefox's bare text does not speak for the text.
+    const declared = buffer.every(
+      (inline) =>
+        (inline.nodeType === TEXT_NODE && !/[^ \t\n\r\f]/.test(inline.nodeValue ?? '')) ||
+        declaresWhiteSpace(
+          inline.nodeType === ELEMENT_NODE ? (inline as Element) : inline.parentElement,
+        ),
+    );
+
+    // Where it stands, for the indentation Firefox gives its lines.
+    const runParent = buffer[0]!.parentElement;
 
     buffer = [];
+    // Read as it stands before `collapseWhitespace` marks the copy's text, so
+    // the plain text can decide a `<div class>` a stylesheet made pre-wrap as
+    // it decides a paragraph (see `arbitrate`): a chat message or a comment is
+    // the commonest of them. Asked, as a block is (`readBlockText`), about
+    // whitespace a browser draws differently and about a space it starts
+    // with, but not one it ends with (R6-FMT-2).
+    // And about a space that starts a line after a `<br>`, which
+    // `subtreeText` does not hold (R8-FMT-6).
+    const asks = plainArbiter !== null && !declared;
+    const source = asks ? subtreeText(wrapper) : '';
+    const layout = COLLAPSIBLE.test(source);
+    const lead = /^[ \t\n\r\f]+/.exec(source)?.[0];
+    const raw =
+      layout ||
+      (lead !== undefined && !/[\n\r]/.test(lead)) ||
+      (asks && blockWhitespace(wrapper).lineStart)
+        ? parseRichText(wrapper)
+        : null;
     const collapsed = collapseWhitespace(wrapper, edges);
     const opened = lineOpen;
-    let runs = collapsed.runs;
+    let runs = plainArbiter
+      ? arbitrate(raw, collapsed.runs, layout, plainIndent(plainArbiter, runParent))
+      : collapsed.runs;
 
     // A run that starts with a break on an open line -- after an inline
     // image, or a wrapper's own text -- ends that line rather than leaving a
@@ -3692,7 +5693,13 @@ function visitBlocksInner(
 
     if (tag === 'DETAILS') {
       flushInline();
-      visitDetails(doc, element, depth, out);
+
+      if (HEADLESS_DETAILS.has(element)) {
+        visitBlocks(doc, element, depth, out);
+      } else {
+        visitDetails(doc, element, depth, out);
+      }
+
       continue;
     }
 
@@ -3704,7 +5711,10 @@ function visitBlocksInner(
       // instead. It is inert -- parsing happens in a detached template and this
       // is text either way -- but it is still somebody else's code appearing in
       // the user's document.
-      out.push(createBlock('code', codeText(element), depthOf(element, depth)));
+      const code = normalizeControlCharacters(codeText(element));
+
+      passPlain(code);
+      out.push(createBlock('code', code, depthOf(element, depth)));
       continue;
     }
 
@@ -3752,6 +5762,21 @@ function visitBlocksInner(
     // bare lost.
     // Not one holding a display block either: that block's line breaks are
     // read from it where it stands, and copying its text out lost them.
+    //
+    // Nor a Word list item. A picture bullet sits in the marker span, which
+    // the item's text skips, so it is the item's marker and no image; taken
+    // for content, it kept the paragraph from being an item, left the
+    // marker's spacer in the text and made a web picture an image block of
+    // its own. Any other picture in the item is its child, as a list item's
+    // is -- split around instead, the bullet beside it became an image too.
+    const pictured = containsImage(element) && tag === 'P' ? wordListItem(element) : null;
+
+    if (pictured) {
+      flushInline();
+      pushWordListItem(out, element, depth, pictured);
+      continue;
+    }
+
     if (
       containsImage(element) &&
       !DISPLAY_BLOCK_TAGS.has(tag) &&
@@ -3776,7 +5801,15 @@ function visitBlocksInner(
 
     if (tag === 'P') {
       flushInline();
-      pushBlock(out, 'paragraph', element, depth);
+
+      const word = wordListItem(element);
+
+      if (word) {
+        pushWordListItem(out, element, depth, word);
+      } else {
+        pushBlock(out, 'paragraph', element, depth);
+      }
+
       continue;
     }
 
@@ -3829,8 +5862,400 @@ function inertDocument(doc: Document): Document {
   return doc.implementation.createHTMLDocument('');
 }
 
+/** How {@link blocksFromHtml} reads what the HTML does not say for itself. */
+export interface HtmlReadOptions {
+  /**
+   * `'auto'` (the default) reads whitespace as a browser draws it: kept where
+   * a style or a `<pre>` preserves it, collapsed everywhere else. `'preserve'`
+   * reads every block's text as it stands, which is how HTML stored from
+   * `blocksToHtml` up to 0.1.3 has to be read: that writer put a soft line
+   * break in a block as a raw newline and a run of spaces as it stood, and
+   * marked only nested and checked blocks, so HTML with no such block cannot
+   * be told apart from a page's line-wrapped source.
+   */
+  readonly whitespace?: 'auto' | 'preserve';
+  /**
+   * The `text/plain` that came with the HTML, if any. Where the HTML declares
+   * no `white-space` at all -- Firefox copies a page's classes, not their
+   * computed style -- each block is matched where it stands in the plain
+   * text, and each run of whitespace in it that the plain text holds exactly
+   * as written is kept, because that text is what was drawn.
+   */
+  readonly plain?: string;
+}
+
+/**
+ * Takes out what a browser writes for the line break a selection crossed to
+ * start or end at a block's edge -- a drag begun just past the end of the line
+ * above, or ended at the start of the line below. That break is outside the
+ * text the reader selected, and read as content it opened (or closed) the
+ * paste with an empty line, or split the paragraph it was pasted into.
+ *
+ * Chromium and WebKit write it as a `<br class="Apple-interchange-newline">`
+ * that is the fragment's first or last leaf -- at its top level, or inside
+ * the first block when the drag reaches a second one, the block is a list
+ * item or it starts with a link (`<p><br class=...>beta two</p>`) -- so the
+ * walk goes down through the first (or last) child at each level. A break of
+ * that class anywhere else is a break like any other. The elements that held
+ * nothing but that break go with it, whatever `white-space` the engine wrote
+ * on them, up to the first that holds something else and never into a
+ * table's parts: WebKit writes the break a drag begun in a closed
+ * `<details>` crossed inside the `<details>` and its content slot.
+ *
+ * Firefox writes it as the block the selection left, emptied -- with the
+ * inline elements it held still in it (`<p id="s1"><a href="…"></a></p>`,
+ * `<h2><span></span></h2>`), or the source's indentation on a pretty-printed
+ * page -- and its plain text cannot be asked: on a pretty-printed page it
+ * starts with the source's own newlines. A block whose subtree draws nothing
+ * ({@link drawsNothing}: no text but layout whitespace, no `<br>`, no picture
+ * or control) draws no line in the page it was copied from, so at either
+ * edge of a fragment that holds anything else it goes, unless it declares its
+ * own `white-space`: this editor's writer marks every block that way, and an
+ * empty paragraph it wrote is a line the reader copied. It is looked for down
+ * the same edge as the break, since Chromium writes the list item a drag ended
+ * at inside its list. Anything else at an edge is kept, and so is a fragment
+ * of nothing but empty blocks.
+ *
+ * ProseMirror (and so Tiptap) says itself where its copy's edges are: its
+ * first element carries `data-pm-slice="<openStart> <openEnd> …"`, and an end
+ * whose open depth is 0 is closed -- a select-all copy -- so the empty blocks
+ * there are whole blocks the reader selected, and are kept. An open end is a
+ * drag's, and goes as any other.
+ */
+function dropSelectionEdges(fragment: DocumentFragment): void {
+  const isLayout = (node: Node): boolean =>
+    node.nodeType === COMMENT_NODE ||
+    (node.nodeType === TEXT_NODE && (node.nodeValue ?? '').trim() === '') ||
+    (node.nodeType === ELEMENT_NODE && NON_CONTENT_EDGE_TAGS.has((node as Element).localName));
+  const isInterchange = (node: Node): boolean =>
+    node.nodeType === ELEMENT_NODE &&
+    (node as Element).localName === 'br' &&
+    (node as Element).classList.contains('Apple-interchange-newline');
+  // Remembered, since the walk down an edge asks it again at every level.
+  const empty = new Map<Node, boolean>();
+  const isEmptyBlock = (node: Node): boolean =>
+    node.nodeType === ELEMENT_NODE &&
+    EDGE_BLOCK_TAGS.has((node as Element).localName) &&
+    declaredWhiteSpace(node as Element) === null &&
+    drawsNothing(node, empty);
+  const edgeChild = (parent: Node, from: 'start' | 'end'): Node | null => {
+    let node = from === 'start' ? parent.firstChild : parent.lastChild;
+
+    while (node && isLayout(node)) {
+      node = from === 'start' ? node.nextSibling : node.previousSibling;
+    }
+
+    return node;
+  };
+  const edgeLeaf = (from: 'start' | 'end'): Node | null => {
+    let node = edgeChild(fragment, from);
+
+    for (let depth = 0; node && depth < MAX_BLOCK_NESTING; depth += 1) {
+      const child = edgeChild(node, from);
+
+      if (!child) {
+        break;
+      }
+
+      node = child;
+    }
+
+    return node;
+  };
+
+  const crossed: Node[] = [];
+
+  for (const from of ['start', 'end'] as const) {
+    const leaf = edgeLeaf(from);
+
+    if (leaf && isInterchange(leaf) && leaf.parentNode) {
+      crossed.push(leaf.parentNode);
+      leaf.parentNode.removeChild(leaf);
+    }
+  }
+
+  // A fragment of nothing but empty blocks has no edge to tell them from: the
+  // empty blocks are all there is, and are kept.
+  if (!holdsContent(fragment)) {
+    return;
+  }
+
+  // What held nothing but the break goes with it, up to the first element
+  // that holds something else -- whatever `white-space` it declares, since
+  // Chromium and WebKit write their computed style on every element they
+  // copy. WebKit writes the break a drag begun in a closed `<details>`
+  // crossed inside the `<details>` and its content slot (R7-FMT-1). Never a
+  // table's part: a cell is the table's, however empty.
+  for (let node of crossed) {
+    for (let depth = 0; depth < MAX_BLOCK_NESTING; depth += 1) {
+      const parent = node.parentNode;
+
+      if (
+        !parent ||
+        node.nodeType !== ELEMENT_NODE ||
+        TABLE_PART_TAGS.has((node as Element).localName) ||
+        !drawsNothing(node, empty)
+      ) {
+        break;
+      }
+
+      parent.removeChild(node);
+      node = parent;
+    }
+  }
+
+  const closed = closedSliceEnds(edgeChild(fragment, 'start'));
+
+  // A `<details>` on the copy's start edge with no summary of its own is a
+  // drag begun in its body -- or one of the start tags WebKit writes first
+  // for every closed `<details>` a drag crosses, around everything after
+  // them. Read as a toggle it had an empty title and took the copy in under
+  // it, splitting and indenting the reader's paragraph (R8-FMT-1, R8-FMT-2),
+  // so its body is read in its place, at its depth. The whole start edge is
+  // walked, through any element: the page's own wrapper (`<div class="faq">`,
+  // `<section>`), Chromium's `<slot>` and WebKit's `<span>` holding a nested
+  // `<details>`, an editor's content `<div>` (R9-FMT-1) -- asking only the
+  // first element was not enough. Only on that edge, where the summary is what
+  // the drag left behind: one with its summary -- a direct child, or in
+  // WebKit's content slot, which `firstSummary` finds; the edge then runs
+  // into that summary -- is a toggle as before, and so is a whole one a
+  // closed ProseMirror slice starts with, one pasted after other content, and
+  // one that draws nothing, which the edge rule below decides.
+  //
+  // Marked, not unwrapped: each stays in the tree as the container it is
+  // read as ({@link HEADLESS_DETAILS}), so what it holds keeps the
+  // `white-space` the engine wrote on it, and nothing is moved -- moving
+  // one level at a time moved the rest of the chain with it at every level.
+  for (
+    let node = closed.start ? null : edgeChild(fragment, 'start'), depth = 0;
+    depth < MAX_BLOCK_NESTING && node?.nodeType === ELEMENT_NODE;
+    node = edgeChild(node, 'start'), depth += 1
+  ) {
+    if (
+      (node as Element).localName === 'details' &&
+      firstSummary(node as Element) === null &&
+      !drawsNothing(node, empty)
+    ) {
+      HEADLESS_DETAILS.add(node as Element);
+    }
+  }
+
+  // Down the same edge as the break: Chromium writes the list item a drag
+  // ended at the start of inside its list (`<ul><li><p>two</p></li><li></li>`).
+  for (const from of ['start', 'end'] as const) {
+    if (closed[from]) {
+      continue;
+    }
+
+    let node = edgeChild(fragment, from);
+
+    for (let depth = 0; node && depth < MAX_BLOCK_NESTING; depth += 1) {
+      if (isEmptyBlock(node)) {
+        node.parentNode?.removeChild(node);
+        break;
+      }
+
+      // Not into a table: a selection that crosses cells takes whole cells,
+      // so a block in an edge cell that draws nothing is the cell's own, and
+      // without it the cell's last text read as the paste's edge, keeping
+      // the space a line end drops (`<td>t <div><span></span></div></td>`).
+      if (node.nodeType === ELEMENT_NODE && (node as Element).localName === 'table') {
+        break;
+      }
+
+      node = edgeChild(node, from);
+    }
+  }
+}
+
+/**
+ * Which ends of a ProseMirror copy are closed, from the `data-pm-slice` its
+ * first element carries (`"0 0 []"` for a select-all, `"1 1 []"` for a drag
+ * inside one paragraph): an open depth of 0 is a closed end. Neither, for
+ * anything else.
+ */
+function closedSliceEnds(first: Node | null): { start: boolean; end: boolean } {
+  const slice =
+    first?.nodeType === ELEMENT_NODE ? (first as Element).getAttribute('data-pm-slice') : null;
+  const open = /^\s*(\d+)\s+(\d+)/.exec(slice ?? '');
+
+  return { start: open?.[1] === '0', end: open?.[2] === '0' };
+}
+
+/**
+ * Whether a node draws nothing in the page it was copied from: a comment,
+ * whitespace that collapses (none at all where a style or a `<pre>` keeps
+ * it), or an element holding only those -- through any inline or block
+ * element, and past what is never read ({@link SKIP_TAGS}), but never a
+ * `<br>` or anything {@link DRAWN_WITHOUT_TEXT}. A no-break space draws.
+ *
+ * Bounded as the readers are, since a hostile paste nests as deep as it likes:
+ * past {@link MAX_BLOCK_NESTING} levels a node is taken to draw something, and
+ * so is kept. Remembered in `known`, so asking again down an edge costs
+ * nothing.
+ */
+function drawsNothing(node: Node, known: Map<Node, boolean>, depth = 0): boolean {
+  if (node.nodeType === COMMENT_NODE) {
+    return true;
+  }
+
+  if (node.nodeType === TEXT_NODE) {
+    return !textDraws(node);
+  }
+
+  if (node.nodeType !== ELEMENT_NODE || depth > MAX_BLOCK_NESTING) {
+    return false;
+  }
+
+  const remembered = known.get(node);
+
+  if (remembered !== undefined) {
+    return remembered;
+  }
+
+  const element = node as Element;
+  const name = element.localName;
+  const answer =
+    !DRAWN_WITHOUT_TEXT.has(name) &&
+    (SKIP_TAGS.has(tagNameOf(element)) ||
+      [...element.childNodes].every((child) => drawsNothing(child, known, depth + 1)));
+
+  known.set(node, answer);
+
+  return answer;
+}
+
+/** Whether a text node draws anything: a character, or whitespace a style keeps. */
+function textDraws(node: Node): boolean {
+  const value = node.nodeValue ?? '';
+
+  return (
+    !/^[ \t\n\f\r]*$/.test(value) || (value !== '' && whiteSpaceOf(node.parentElement) !== 'normal')
+  );
+}
+
+/**
+ * Whether a fragment holds anything but blocks that draw nothing ({@link
+ * dropSelectionEdges}) and what is around them: text that draws, a `<br>`, a
+ * picture or a control, or a block that declares its own `white-space` --
+ * which is never dropped, so it is something to tell the edges from.
+ */
+function holdsContent(fragment: DocumentFragment): boolean {
+  const stack: Node[] = [];
+
+  for (const child of fragment.childNodes) {
+    stack.push(child);
+  }
+
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+
+    if (node.nodeType === TEXT_NODE) {
+      if (textDraws(node)) {
+        return true;
+      }
+
+      continue;
+    }
+
+    if (node.nodeType !== ELEMENT_NODE) {
+      continue;
+    }
+
+    const element = node as Element;
+    const name = element.localName;
+
+    if (
+      DRAWN_WITHOUT_TEXT.has(name) ||
+      (EDGE_BLOCK_TAGS.has(name) && declaredWhiteSpace(element) !== null)
+    ) {
+      return true;
+    }
+
+    if (NON_CONTENT_EDGE_TAGS.has(name) || SKIP_TAGS.has(tagNameOf(element))) {
+      continue;
+    }
+
+    for (const child of element.childNodes) {
+      stack.push(child);
+    }
+  }
+
+  return false;
+}
+
+/**
+ * The blocks a browser writes, emptied, for the one a selection left at its
+ * edge. A `<details>` is one: the walk tests each block before it goes into
+ * it, so an emptied `<p>` or `<summary>` inside one goes with its
+ * `<details>`, which left behind read as a toggle -- it split the paragraph
+ * a paste went into, or turned the reader's text into a collapsed toggle
+ * (R7-FMT-1). An emptied `<summary>` needs no entry of its own: the toggle
+ * an emptied one heads reads the same with it or without it.
+ */
+const EDGE_BLOCK_TAGS: ReadonlySet<string> = new Set([
+  'p',
+  'div',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'li',
+  'blockquote',
+  'pre',
+  'details',
+]);
+
+/** A table and the elements only a table holds. */
+const TABLE_PART_TAGS: ReadonlySet<string> = new Set([
+  'table',
+  'caption',
+  'colgroup',
+  'col',
+  'thead',
+  'tbody',
+  'tfoot',
+  'tr',
+  'td',
+  'th',
+]);
+
+/**
+ * What draws in a block that holds no text: a line break, a picture, a
+ * player, a control, a rule, a formula, a table. A block holding one is never
+ * an emptied one.
+ */
+const DRAWN_WITHOUT_TEXT: ReadonlySet<string> = new Set([
+  'br',
+  'img',
+  'picture',
+  'svg',
+  'video',
+  'audio',
+  'canvas',
+  'iframe',
+  'object',
+  'embed',
+  'input',
+  'select',
+  'textarea',
+  'button',
+  'hr',
+  'math',
+  'table',
+]);
+
+/** What a browser writes around a copied fragment that holds no content. */
+const NON_CONTENT_EDGE_TAGS: ReadonlySet<string> = new Set(['meta', 'style', 'link', 'title']);
+
 /** Parses an HTML string into blocks, for a multi-block paste. */
-export function blocksFromHtml(doc: Document, html: string): Block[] {
+export function blocksFromHtml(
+  doc: Document,
+  html: string,
+  options: HtmlReadOptions = {},
+): Block[] {
   // Never `doc`: every scratch node a reader makes is made by the document
   // threaded through it, and one the live document makes loads what it holds.
   const inert = inertDocument(doc);
@@ -3845,6 +6270,22 @@ export function blocksFromHtml(doc: Document, html: string): Block[] {
   listNesting = 0;
   inlineNesting = 0;
   lineOpen = false;
+  // Asked for, or ours from before the writer marked its blocks -- which can
+  // only be recognised when a block of it carries a `data-neditor-*` mark:
+  // see `legacyOwnHtml` and `HtmlReadOptions.whitespace`.
+  legacyOwnHtml =
+    options.whitespace === 'preserve' ||
+    (/\sdata-neditor-/.test(html) && !/white-space:\s*pre-wrap/i.test(html));
+  // Not in this editor's own HTML from before its writer marked every block:
+  // an empty paragraph there is a line it wrote, and holds no `white-space`
+  // to say so.
+  if (!legacyOwnHtml) {
+    dropSelectionEdges(template.content);
+  }
+
+  wordMarkup = /mso-/i.test(html);
+  plainArbiter =
+    options.plain !== undefined && !legacyOwnHtml ? plainArbiterFor(options.plain) : null;
 
   // The paste's first and last content -- text that is not layout, a line
   // break, an image. Only text is an edge: a paste that starts or ends with a
@@ -3912,6 +6353,8 @@ export function blocksFromHtml(doc: Document, html: string): Block[] {
   } finally {
     pasteFirst = new Set();
     pasteLast = new Set();
+    plainArbiter = null;
+    wordMarkup = false;
   }
 
   // A blank line at either end stands between nothing.

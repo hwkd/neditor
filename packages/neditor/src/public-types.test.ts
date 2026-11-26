@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
 import { afterEach, expect, test } from 'vitest';
 
-import type { CellCoords, NEditorLabels, SlashCommandLabel } from './index.ts';
-import { createEditor } from './index.ts';
+import type { CellCoords, HtmlReadOptions, NEditorLabels, SlashCommandLabel } from './index.ts';
+import { blockText, blocksFromHtml, createEditor } from './index.ts';
 import type { NEditor } from './editor.ts';
 
 /**
@@ -75,4 +75,16 @@ test('SlashCommandLabel names what NEditorLabels.slashCommands holds', () => {
   editors.push(editor);
 
   expect(labels.slashCommands?.paragraph).toBe(paragraph);
+});
+
+test('HtmlReadOptions names what blocksFromHtml takes', () => {
+  // A host reading HTML it stored from an older release has to be able to
+  // name the option it passes, and a paste handler the plain text beside it.
+  const stored: HtmlReadOptions = { whitespace: 'preserve' };
+  const pasted: HtmlReadOptions = { plain: 'a  b' };
+
+  expect(blocksFromHtml(document, '<p>a\nb</p>', stored).map(blockText)).toEqual(['a\nb']);
+  expect(blocksFromHtml(document, '<p class="pw">a  b</p>', pasted).map(blockText)).toEqual([
+    'a  b',
+  ]);
 });

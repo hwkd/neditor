@@ -132,6 +132,151 @@ const linkEditorInput = (): HTMLInputElement =>
 const linkEditorApply = (): HTMLButtonElement =>
   document.querySelector<HTMLButtonElement>('.neditor-link-editor__button')!;
 
+// The link editor a click on a link opens comes in a task after the click
+// (`#handleClick`: WebKit collapses a pressed range and focuses the host only
+// after the click's listeners). Anything newer than the click in between --
+// a press, a key, a new document, a lock (a real switch to read-only), or,
+// for a pointer's click, focus no longer in the link's own host -- drops the
+// open rather than taking the caret from it. `destroy` cancels nothing: the
+// task finds no link to resolve.
+describe('a click on a link opens the link editor after the click', () => {
+  const linked = (): Block =>
+    block({ id: 'p', content: [{ text: 'Go ' }, { text: 'there', link: 'https://a.test/' }] });
+  const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+  const open = (): boolean => {
+    const popover = document.querySelector<HTMLElement>('.neditor-link-editor');
+    return popover !== null && !popover.hidden;
+  };
+  const host = (editor: NEditor): HTMLElement =>
+    editor.element.querySelector<HTMLElement>('.neditor-block__content')!;
+  // A pointer's click (`detail` 1), whose press focused the link's host, as
+  // the browser's own does.
+  const click = (editor: NEditor): void => {
+    host(editor).focus();
+    editor.element
+      .querySelector('a.neditor-link')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }));
+  };
+
+  test('alone, it opens', async () => {
+    const editor = mount([linked()]);
+    click(editor);
+    expect(open()).toBe(false);
+    await tick();
+    expect(open()).toBe(true);
+  });
+
+  for (const [label, between] of [
+    [
+      'a press',
+      () => document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })),
+    ],
+    [
+      'a key',
+      () => document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true })),
+    ],
+    ['a new document', (editor: NEditor) => editor.setDocument(editor.getDocument())],
+    ['a lock', (editor: NEditor) => editor.setEditable(false)],
+    ['destroy', (editor: NEditor) => editor.destroy()],
+  ] as const) {
+    test(`${label} before the task drops it`, async () => {
+      const editor = mount([linked()]);
+      click(editor);
+      between(editor);
+      await tick();
+      expect(open()).toBe(false);
+    });
+  }
+
+  // A script's click (`detail` 0) is not held to the focus check, so this
+  // depends on the lock's own cancel. A host re-asserting `setEditable(true)`
+  // (on a render, on `selection`) switches nothing, and must not cancel it.
+  for (const [label, between, opens] of [
+    [
+      'a lock and an unlock drops it',
+      (editor: NEditor) => {
+        editor.setEditable(false);
+        editor.setEditable(true);
+      },
+      false,
+    ],
+    [
+      'a setEditable(true) that changes nothing keeps it',
+      (editor: NEditor) => editor.setEditable(true),
+      true,
+    ],
+  ] as const) {
+    test(`after a script click, ${label}`, async () => {
+      const editor = mount([linked()]);
+      editor.element.querySelector<HTMLElement>('a.neditor-link')!.click();
+      between(editor);
+      await tick();
+      expect(open()).toBe(opens);
+    });
+  }
+
+  // A lock that stays: `openLinkEditor` refuses a read-only view on its own,
+  // so the popover alone cannot tell; the task would still have selected the
+  // link's text and focused its host. happy-dom focuses a read-only host,
+  // which a browser does not, so this is the one place the lock's own cancel
+  // shows -- kept on an unlock instead, the link text ended up selected.
+  test('after a script click, a lock that stays places nothing', async () => {
+    const editor = mount([linked()]);
+    getSelection()!.removeAllRanges();
+    editor.element.querySelector<HTMLElement>('a.neditor-link')!.click();
+    editor.setEditable(false);
+    await tick();
+    expect(open()).toBe(false);
+    expect(getSelection()!.toString()).toBe('');
+  });
+
+  // A page's own click listener that moves focus has the last word: to a
+  // button of its own, or to a caret it places through `focus()`.
+  test('a page that moved focus in its own click listener keeps it', async () => {
+    const editor = mount([linked()]);
+    const button = document.createElement('button');
+    document.body.append(button);
+    document.addEventListener('click', () => button.focus(), { once: true });
+    click(editor);
+    await tick();
+    expect(open()).toBe(false);
+    expect(document.activeElement).toBe(button);
+    button.remove();
+  });
+
+  test('a page that placed the caret through focus() keeps it', async () => {
+    const editor = mount([linked(), block({ id: 'q', content: [{ text: 'Next' }] })]);
+    document.addEventListener('click', () => editor.focus('q', 4), { once: true });
+    click(editor);
+    await tick();
+    expect(open()).toBe(false);
+    expect(editor.getSelectionState()).toMatchObject({ blockId: 'q', range: { start: 4, end: 4 } });
+  });
+
+  // A script's `click()` (`detail` 0) put focus nowhere and asks for the
+  // link editor wherever focus is.
+  test('a script click opens it with focus elsewhere', async () => {
+    const editor = mount([linked()]);
+    const button = document.createElement('button');
+    document.body.append(button);
+    button.focus();
+    editor.element.querySelector<HTMLElement>('a.neditor-link')!.click();
+    await tick();
+    expect(open()).toBe(true);
+    button.remove();
+  });
+
+  // Destroyed in between, nothing is placed: the link is not selected.
+  test('destroy before the task places nothing', async () => {
+    const editor = mount([linked()]);
+    click(editor);
+    getSelection()!.removeAllRanges();
+    editor.destroy();
+    await tick();
+    expect(getSelection()!.toString()).toBe('');
+  });
+});
+
 describe('the link popover addresses the cell it was opened from', () => {
   const linked = (): Block =>
     block({
@@ -142,11 +287,16 @@ describe('the link popover addresses the cell it was opened from', () => {
       ],
     });
 
-  test('clicking a link in a cell rewrites that cell, not the header', () => {
+  test('clicking a link in a cell rewrites that cell, not the header', async () => {
     const editor = mount([linked()]);
     const anchor = cell(editor, '1:1').querySelector<HTMLAnchorElement>('a.neditor-link')!;
 
-    anchor.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    // A pointer's click (`detail` 1), whose press focused the cell, as the
+    // browser's own does.
+    cell(editor, '1:1').focus();
+    anchor.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }));
+    // The link editor opens in a task after the click (`#handleClick`).
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     linkEditorInput().value = 'https://b.test/';
     linkEditorApply().click();

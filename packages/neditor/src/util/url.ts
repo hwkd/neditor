@@ -2,6 +2,17 @@
 const SAFE_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:']);
 
 /**
+ * `local@domain.tld`, then nothing, or a query or fragment -- `?subject=hi` is
+ * how a `mailto:` carries one -- whatever is in it. No path, port or bracket
+ * in the address: `user@host/path` and `user@host:8080` are URLs.
+ */
+const SCHEMELESS_EMAIL =
+  /^[^\s@/\\:?#<>]+@[^\s@/\\:?#<>.]+(?:\.[^\s@/\\:?#<>.]+)+(?:[?#][\s\S]*)?$/;
+
+/** Schemes whose URLs can carry a user name and password before the host. */
+const AUTHORITY_SCHEMES = new Set(['http:', 'https:']);
+
+/**
  * Normalizes a user-supplied link, or returns null when it is not safe.
  *
  * A link travels with the document, so it can arrive from a paste, an import,
@@ -20,6 +31,23 @@ export function sanitizeUrl(input: string): string | null {
   }
 
   const hasScheme = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(trimmed);
+
+  // `me@example.com` is an address, not a host: resolved like `example.com`
+  // below it became `https://me@example.com/`, a page on example.com with
+  // `me` as its user name. Only a token whose address part is nothing but an
+  // address -- no `/`, `:`, `<` or backslash before its `?` or `#` -- so
+  // `user@host/path` is still a URL and a `<` left over from an unclosed
+  // angled destination never reads as one. Whatever follows the `?` or `#`
+  // is the mailto's own and is percent-encoded by the URL parser: a query
+  // with a space in it, or a fragment, used to fall through to the host test
+  // below, which then dropped `me@` as a user name and linked the website.
+  if (!hasScheme && SCHEMELESS_EMAIL.test(trimmed)) {
+    try {
+      return new URL(`mailto:${trimmed}`).href;
+    } catch {
+      return null;
+    }
+  }
 
   // With no scheme this resolves against the page, which is http or https --
   // "special" schemes, where the URL parser folds a backslash into a slash.
@@ -71,7 +99,20 @@ export function sanitizeUrl(input: string): string | null {
     return null;
   }
 
-  return SAFE_SCHEMES.has(parsed.protocol) ? parsed.href : null;
+  if (!SAFE_SCHEMES.has(parsed.protocol)) {
+    return null;
+  }
+
+  // A user name and password are dropped, never kept: no browser sends them
+  // from a click any more, and what they still do is disguise the host --
+  // `https://google.com@evil.test` reads as Google and opens evil.test. The
+  // href names the host the link actually reaches.
+  if (AUTHORITY_SCHEMES.has(parsed.protocol) && (parsed.username || parsed.password)) {
+    parsed.username = '';
+    parsed.password = '';
+  }
+
+  return parsed.href;
 }
 
 /** Image sources may also be inline data, which cannot execute in an `<img>`. */

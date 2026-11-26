@@ -1,4 +1,4 @@
-import type { Mark } from '../model/rich-text.ts';
+import type { Mark, RichText } from '../model/rich-text.ts';
 import { sanitizeUrl } from '../util/url.ts';
 
 /**
@@ -79,7 +79,9 @@ const INLINE_RULES: readonly InlineRule[] = [
   { closer: '~', pattern: new RegExp(`~~${body('~')}~~$`), open: 2, mark: 'strikethrough' },
   // Backticks deliberately keep their spaces: a code span is delimited by
   // backtick runs rather than by flanking, so `` ` a ` `` really is code in
-  // CommonMark. Emphasis is the construct with the flanking rule.
+  // CommonMark. Emphasis is the construct with the flanking rule. Matched by
+  // `codeSpanAt`, which pairs runs by length; the pattern is the shape of its
+  // single-backtick case.
   { closer: '`', pattern: /`([^`]+)`$/, open: 1, mark: 'code' },
   // Markdown has no underline, so `toMarkdown` writes the HTML tag; this is
   // what reads it back rather than leaving seven junk characters in the text.
@@ -173,27 +175,38 @@ function balancedParens(destination: string): boolean {
  * Only what is behind the caret is known, so a run whose closer never arrives
  * still reads as open here.
  */
-function openCodeRun(text: string): number {
+function openCodeRun(text: string, before: number = text.length): number {
+  return openCodeRunAt(text, before).length;
+}
+
+/** {@link openCodeRun}, with where the open run starts (-1 when none is open). */
+function openCodeRunAt(
+  text: string,
+  before: number = text.length,
+): { readonly at: number; readonly length: number } {
   let open = 0;
+  let openAt = -1;
   let at = text.indexOf('`');
 
-  while (at !== -1) {
+  while (at !== -1 && at < before) {
     let end = at;
 
-    while (text.charCodeAt(end) === 96) {
+    while (end < before && text.charCodeAt(end) === 96) {
       end += 1;
     }
 
     if (open === 0) {
       open = end - at;
+      openAt = at;
     } else if (end - at === open) {
       open = 0;
+      openAt = -1;
     }
 
-    at = text.indexOf('`', end);
+    at = end < before ? text.indexOf('`', end) : -1;
   }
 
-  return open;
+  return { at: openAt, length: open };
 }
 
 /**
@@ -239,7 +252,7 @@ function closesLabel(window: string, close: number): boolean {
  * does not: whether a destination open at the caret closes later on it.
  */
 export interface DestinationAhead {
-  /** Whether a `>)` ends the `](<` form before any `<`, `>` or whitespace. */
+  /** Whether a `>)` ends the `](<` form before any `<`, `>` or line break. */
   readonly angledCloses: () => boolean;
   /**
    * Whether a `)` ends the plain form before any whitespace, given the
@@ -259,14 +272,15 @@ export interface DestinationAhead {
  * holds no whitespace; a hinge without a label is passed over rather than
  * ending the search, since a foreign destination may hold a `](` of its own.
  *
- * Neither spelling of a destination the writer emits holds whitespace (it
- * percent-encodes it in the `<…>` form too), and stopping at it is what keeps
- * an unclosed `](<` from swallowing the rest of a line of prose.
- *
- * The cost is foreign Markdown: the angled link rule itself admits a space, so
- * in `[a](<https://a.test/my docs/__init__.py>)` the text after the space is
- * not protected and `__init__` is emboldened out of the URL. Telling that
- * destination from prose needs the `>)` that has not been typed yet.
+ * The plain form holds no whitespace, so a space ends it. The `](<` form is
+ * delimited instead: the angled link rule admits a space, so a space does not
+ * end it, and only a `<`, a `>` or a line break does. Stopping at the space
+ * left the rest of a foreign destination unprotected -- in
+ * `[a](<https://a.test/my docs/__init__.py>)` the `__init__` was emboldened
+ * out of the URL, pasted or typed. The writer never emits a space there (it
+ * percent-encodes one), so this only ever reads foreign Markdown; the price is
+ * that an unclosed `](<` holds the marks off the rest of a typed line, which
+ * the reader, knowing the line, does not.
  *
  * `ahead` is the other half of the same question, which only the Markdown
  * reader can answer: a destination that never closes on the line is not a
@@ -283,6 +297,21 @@ function inOpenDestination(
   ahead?: DestinationAhead,
   before: number = window.length,
 ): boolean {
+  // Only the last `](<` can be open in the angled form: an earlier one would
+  // hold this one's `<`, which that form does not admit.
+  const angled = window.lastIndexOf('](<');
+
+  if (
+    angled !== -1 &&
+    angled + 2 <= before &&
+    window.lastIndexOf('<') === angled + 2 &&
+    window.lastIndexOf('>') < angled &&
+    window.lastIndexOf('\n') < angled &&
+    closesLabel(window, angled)
+  ) {
+    return ahead?.angledCloses() ?? true;
+  }
+
   let at = window.lastIndexOf('](');
   // Everything from here to the caret is known to hold no whitespace, so each
   // character is looked at once however many hinges are passed over. A label
@@ -309,8 +338,9 @@ function inOpenDestination(
 
   const tail = window.slice(at + 2);
 
+  // The angled form was answered above; a `](<` that reaches here is not open.
   if (tail.startsWith('<')) {
-    return /^<[^<>\s]*$/.test(tail) && (ahead?.angledCloses() ?? true);
+    return false;
   }
 
   // The plain form is the link rule's own: no `<` to open it, any after, no
@@ -330,6 +360,61 @@ function inOpenDestination(
   }
 
   return ahead?.plainCloses(depth) ?? true;
+}
+
+/**
+ * The code span the backtick run ending at the caret closes, as a match of the
+ * code rule's shape: group 1 is the content. Null when the run closes nothing.
+ *
+ * A code span is delimited by backtick runs, and a run closes only the open
+ * one of its own length, as in CommonMark. Matching a single backtick back to
+ * the nearest other one ignored that: in `` `` a`b `` `` the inner backtick
+ * closed a span at once with the second of the opening pair, so the code came
+ * out as ` ab ` with its backtick moved out after it -- typed and pasted, since
+ * the reader replays this. A span opened by two or more backticks also drops
+ * one space from each end when both ends have one, which is how CommonMark
+ * lets such a span begin or end with a backtick; a single-backtick span keeps
+ * its spaces, as it always has here.
+ *
+ * Typing only knows what is behind the caret, so a run is read as it stands
+ * when its last backtick arrives: a span is closed by `` `a` `` before a
+ * second backtick could be typed after it.
+ */
+function codeSpanAt(window: string): { match: RegExpExecArray; open: number } | null {
+  let closing = window.length - 1;
+
+  while (closing > 0 && window.charCodeAt(closing - 1) === 96) {
+    closing -= 1;
+  }
+
+  const length = window.length - closing;
+  const open = openCodeRunAt(window, closing);
+
+  if (open.length !== length || closing - (open.at + length) < 1) {
+    return null;
+  }
+
+  let content = window.slice(open.at + length, closing);
+  let pad = 0;
+
+  if (
+    length > 1 &&
+    content.length > 2 &&
+    content.startsWith(' ') &&
+    content.endsWith(' ') &&
+    content.trim() !== ''
+  ) {
+    content = content.slice(1, -1);
+    pad = 1;
+  }
+
+  const match = Object.assign([window.slice(open.at), content], {
+    index: open.at,
+    input: window,
+    groups: undefined,
+  }) as RegExpExecArray;
+
+  return { match, open: length + pad };
 }
 
 export interface InlineRuleMatch {
@@ -532,6 +617,8 @@ export function matchInlineRule(
     // lost the link outright once a URL carried enough of them.
     let searchedFrom = 0;
     let match: RegExpExecArray | null = null;
+    // A code span's opening delimiter: its backtick run, and a stripped space.
+    let codeOpen: number | undefined;
 
     if (rule.isLink) {
       const opener = linkOpener(window, rule.angled === true);
@@ -549,6 +636,11 @@ export function matchInlineRule(
       if (match && !rule.angled && !balancedParens(match[2] ?? '')) {
         continue;
       }
+    } else if (rule.mark === 'code' && closer === '`') {
+      const span = codeSpanAt(window);
+
+      match = span?.match ?? null;
+      codeOpen = span?.open;
     } else {
       match = rule.pattern.exec(window);
     }
@@ -572,11 +664,33 @@ export function matchInlineRule(
       continue;
     }
 
-    // The HTML tag rules share that precedence: a tag shown in code --
-    // `` `<em>hi</em>` `` -- is code, not emphasis with its tags gone.
+    // Every other rule shares that precedence: nothing closes inside a code
+    // span that opened before it, as in CommonMark, where a code span binds
+    // tighter than emphasis, links and inline HTML. Only the tag rules used to
+    // ask, so `` `<em>hi</em>` `` stayed code while `` `__init__` `` lost its
+    // underscores to bold before the closing backtick arrived, and
+    // `` `[x](y)` `` became a link -- typed and pasted alike, since the reader
+    // replays these rules. The cost is a backtick that never closes: typing
+    // cannot know it will not, so a stray one holds the rest of the block
+    // literal -- across soft breaks, not just to the end of its line -- and so
+    // does a paste, which replays the same rules.
+    //
+    // The same holds for a code span that opened *after* the opener and is
+    // still open where the closing delimiter starts: `` *y `a*b` z* `` is
+    // emphasis around a code span, and closing the emphasis on the `*` inside
+    // it took that star and the opening backtick out of the text and split the
+    // span in two. An autolink and a `<code>` tag are the exceptions: each
+    // shares the code span's precedence, so whichever opened first wins, and a
+    // backtick after the opener is its own (the writer spells a code run that
+    // holds a backtick `<code>a`b</code>`). This widens the cost above: a
+    // stray backtick also holds back an emphasis opened before it, since
+    // typing cannot know that it will never close either.
     if (
-      (rule.autolink || (closer === '>' && rule.mark !== undefined)) &&
-      openCodeRun(window.slice(0, searchedFrom + match.index)) !== 0
+      !(rule.mark === 'code' && closer === '`') &&
+      (openCodeRun(window, searchedFrom + match.index) !== 0 ||
+        (!rule.autolink &&
+          rule.mark !== 'code' &&
+          openCodeRun(window, searchedFrom + match.index + rule.open + inner.length) !== 0))
     ) {
       continue;
     }
@@ -594,7 +708,7 @@ export function matchInlineRule(
         run -= 1;
       }
 
-      if (openCodeRun(window.slice(0, run)) !== 0) {
+      if (openCodeRun(window, run) !== 0) {
         continue;
       }
 
@@ -654,7 +768,7 @@ export function matchInlineRule(
     }
 
     // The opening delimiter is the rule's own; the closing one is the rest.
-    const openLength = rule.open;
+    const openLength = codeOpen ?? rule.open;
     const closeLength = whole.length - openLength - inner.length;
 
     return {
@@ -668,4 +782,68 @@ export function matchInlineRule(
   }
 
   return null;
+}
+
+/**
+ * A code run's text as the rules see it: each character that is not
+ * whitespace replaced by the placeholder, so nothing in it can open or close a
+ * span, while offsets stay aligned and the whitespace a destination or a bare
+ * URL stops at stays where it is.
+ *
+ * The Markdown reader does the same to a code span the moment it closes. Read
+ * raw, a backtick inside an existing code run paired with the next one typed:
+ * format ``a`b`` as code with Mod+E, type `` and `c` ``, and the code rule took
+ * `b and ` for its span and deleted the backtick out of the code.
+ */
+export function projectCode(text: string): string {
+  return text.replace(/\S/g, ESCAPED_PLACEHOLDER);
+}
+
+/**
+ * {@link matchInlineRule} for typed text, given the block's runs and the
+ * caret: a code run's characters are projected away (see {@link projectCode}),
+ * as the Markdown reader projects a code span it has closed, so typing a line
+ * and pasting it agree on what an existing code run holds open.
+ *
+ * Typed backticks are not code yet, so the code rule itself sees what it
+ * always saw. A link's href is read from the real text whenever its
+ * destination crosses a projected run.
+ */
+export function matchTypedInlineRule(content: RichText, caret: number): InlineRuleMatch | null {
+  let text = '';
+  let projected = '';
+
+  for (const run of content) {
+    if (text.length >= caret) {
+      break;
+    }
+
+    text += run.text;
+    projected += run.marks?.includes('code') ? projectCode(run.text) : run.text;
+  }
+
+  text = text.slice(0, caret);
+  projected = projected.slice(0, caret);
+
+  if (projected === text) {
+    return matchInlineRule(text);
+  }
+
+  const match = matchInlineRule(projected, { projection: true });
+
+  if (!match?.link) {
+    return match;
+  }
+
+  const innerEnd = match.end - match.closeLength;
+  const closing = projected.slice(innerEnd, match.end);
+
+  if (!closing.includes(ESCAPED_PLACEHOLDER)) {
+    return match;
+  }
+
+  const real = text.slice(innerEnd, match.end);
+  const href = sanitizeUrl(closing.startsWith('](<') ? real.slice(3, -2) : real.slice(2, -1));
+
+  return href ? { ...match, link: href } : null;
 }

@@ -714,6 +714,165 @@ describe('touch', () => {
     expect(editor.getSelectedBlocks()).toHaveLength(0);
   });
 
+  /*
+   * R5-PTR-6. The gutter is offered on a touch pointerdown, and the
+   * compatibility mousedown and click that end the same tap are hit-tested
+   * after it is drawn: a tap (or a long press) just beside the text landed
+   * them on the `+`, which opened an empty paragraph and moved the caret into
+   * it. The probe's event order, verbatim: pointerdown and pointerup on the
+   * block, then mousedown and click on the control.
+   */
+  describe('the tap that reveals the gutter does not press it', () => {
+    function tapBeside(editor: NEditor): void {
+      const root = editor.element.querySelector<HTMLElement>('.neditor-block')!;
+      touch('pointerdown', root, { clientX: 4, clientY: 10 });
+      touch('pointerup', root, { clientX: 4, clientY: 10 });
+    }
+
+    function compatibilityClick(control: Element): void {
+      control.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+      control.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    }
+
+    test('a tap beside the text adds no block', () => {
+      const editor = mount([block({ content: [{ text: 'Alpha one' }] })]);
+      tapBeside(editor);
+      expect(
+        editor.element.querySelector<HTMLElement>('.neditor-gutter')?.dataset.visible,
+        'precondition: the tap offered the gutter',
+      ).toBe('true');
+
+      compatibilityClick(editor.element.querySelector('.neditor-gutter__add')!);
+
+      expect(editor.getDocument().blocks.map((b) => blockText(b))).toEqual(['Alpha one']);
+    });
+
+    test('a long press beside the text adds no block', async () => {
+      const editor = mount([block({ content: [{ text: 'Alpha one' }] })]);
+      const root = editor.element.querySelector<HTMLElement>('.neditor-block')!;
+      touch('pointerdown', root, { clientX: 4, clientY: 10 });
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      touch('pointerup', root, { clientX: 4, clientY: 10 });
+
+      compatibilityClick(editor.element.querySelector('.neditor-gutter__add')!);
+
+      expect(editor.getDocument().blocks).toHaveLength(1);
+    });
+
+    test('a tap beside the text does not select through the handle', () => {
+      const editor = mount([
+        block({ content: [{ text: 'Alpha one' }] }),
+        block({ content: [{ text: 'Bravo two' }] }),
+      ]);
+      tapBeside(editor);
+
+      compatibilityClick(editor.element.querySelector('.neditor-gutter__handle')!);
+
+      expect(editor.getSelectedBlocks()).toEqual([]);
+    });
+
+    test('a second, separate tap on the revealed + still adds', () => {
+      const editor = mount([block({ content: [{ text: 'Alpha one' }] })]);
+      tapBeside(editor);
+      const add = editor.element.querySelector('.neditor-gutter__add')!;
+      // The first tap's own click went to the text, say: the flag is left set.
+      touch('pointerdown', add, { clientX: 4, clientY: 10 });
+      touch('pointerup', add, { clientX: 4, clientY: 10 });
+      compatibilityClick(add);
+
+      expect(editor.getDocument().blocks).toHaveLength(2);
+    });
+
+    /*
+     * R6-PTR-2. The flag outlived its tap. The probe's order in WebKit: a tap
+     * on the second block's text reveals the gutter there, and its click goes
+     * to the text, leaving the flag set; then a tap 12px left of the visible
+     * `+` puts its pointerdown on that same block, and WebKit retargets the
+     * click onto the `+` -- which was swallowed, and no block was added.
+     */
+    test('a later tap just off the visible + that lands its click on it adds', () => {
+      const editor = mount([
+        block({ content: [{ text: 'Alpha one' }] }),
+        block({ content: [{ text: 'Bravo two' }] }),
+      ]);
+      const second = editor.element.querySelectorAll<HTMLElement>('.neditor-block')[1]!;
+      const text = hosts(editor)[1]!;
+      touch('pointerdown', text, { clientX: 30, clientY: 30 });
+      touch('pointerup', text, { clientX: 30, clientY: 30 });
+      compatibilityClick(text);
+      expect(
+        editor.element.querySelector<HTMLElement>('.neditor-gutter')?.dataset.visible,
+        'precondition: the tap on the text offered the gutter',
+      ).toBe('true');
+
+      touch('pointerdown', second, { clientX: 4, clientY: 30 });
+      touch('pointerup', second, { clientX: 4, clientY: 30 });
+      compatibilityClick(editor.element.querySelector('.neditor-gutter__add')!);
+
+      expect(editor.getDocument().blocks).toHaveLength(3);
+    });
+
+    /*
+     * R7-PTR-1. "Already showing for this block" is not "drawn under the
+     * finger". The probe: a tap on p2's text offers the gutter for p2; the
+     * phone turns (or text typed above wraps onto another line), which moves
+     * p2 with no event the gutter hears; a tap beside p2's text re-places the
+     * controls under the finger, and its click landed on the `+` and added a
+     * paragraph. happy-dom lays nothing out, so the move is p2's `offsetTop`
+     * changing, which is all the gutter reads; the real resize is pinned in
+     * touch.spec.ts.
+     */
+    test('a tap that moves the + under the finger from a stale offset adds nothing', () => {
+      const editor = mount([
+        block({ content: [{ text: 'A long first paragraph' }] }),
+        block({ content: [{ text: 'Bravo two' }] }),
+        block({ content: [{ text: 'Charlie three' }] }),
+      ]);
+      const second = editor.element.querySelectorAll<HTMLElement>('.neditor-block')[1]!;
+      let top = 120;
+      Object.defineProperty(second, 'offsetTop', { configurable: true, get: () => top });
+      const text = hosts(editor)[1]!;
+      touch('pointerdown', text, { clientX: 30, clientY: 130 });
+      touch('pointerup', text, { clientX: 30, clientY: 130 });
+      compatibilityClick(text);
+      const gutter = editor.element.querySelector<HTMLElement>('.neditor-gutter')!;
+      expect(gutter.style.top, 'precondition: offered for p2').toBe('120px');
+
+      // Turned on its side: the first paragraph wraps onto fewer lines.
+      top = 70;
+      touch('pointerdown', second, { clientX: 4, clientY: 80 });
+      touch('pointerup', second, { clientX: 4, clientY: 80 });
+      expect(gutter.style.top, 'precondition: the press re-placed it').toBe('70px');
+      compatibilityClick(editor.element.querySelector('.neditor-gutter__add')!);
+
+      expect(editor.getDocument().blocks).toHaveLength(3);
+    });
+
+    test('a later press outside the editor ends the gesture that revealed the +', () => {
+      const editor = mount([block({ content: [{ text: 'Alpha one' }] })]);
+      tapBeside(editor);
+      compatibilityClick(hosts(editor)[0]!);
+
+      touch('pointerdown', document.body, { clientX: 4, clientY: 300 });
+      touch('pointerup', document.body, { clientX: 4, clientY: 300 });
+      compatibilityClick(editor.element.querySelector('.neditor-gutter__add')!);
+
+      expect(editor.getDocument().blocks).toHaveLength(2);
+    });
+
+    test('a cancelled press ends the gesture that revealed the +', () => {
+      const editor = mount([block({ content: [{ text: 'Alpha one' }] })]);
+      const root = editor.element.querySelector<HTMLElement>('.neditor-block')!;
+      touch('pointerdown', root, { clientX: 4, clientY: 10 });
+      // The touch became a scroll: no click of its own follows.
+      touch('pointercancel', root, { clientX: 4, clientY: 10 });
+
+      compatibilityClick(editor.element.querySelector('.neditor-gutter__add')!);
+
+      expect(editor.getDocument().blocks).toHaveLength(2);
+    });
+  });
+
   test('a cancelled drag releases rather than wedging the editor', () => {
     const editor = mount([
       block({ content: [{ text: 'a' }] }),
@@ -1145,7 +1304,7 @@ describe('a composed word is one entry, and survives a render that keeps its hos
   };
 
   /**
-   * `#applyArmedMarks` committed the marks on top of the entry
+   * `#formatComposed` (then `#applyArmedMarks`) committed the marks on top of the entry
    * `#handleCompositionEnd` had already recorded, so a bolded IME word took two
    * undo steps -- the first of which showed the word with the bold stripped off.
    */

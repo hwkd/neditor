@@ -11,6 +11,7 @@ import {
   parseRichText,
   parseRichTextFromHtml,
   renderRichText,
+  richTextToHtml,
 } from './rich-dom.ts';
 
 function render(content: RichText): string {
@@ -1047,6 +1048,38 @@ describe('the clipboard round trip is idempotent', () => {
   });
 });
 
+describe('a copied text range reads back as the runs it was written from', () => {
+  // `richTextToHtml` is what a text-range copy puts in `text/html`. A paste
+  // into neditor reads the runs from our own type instead, so this is the path
+  // for a clipboard that lost that type -- and for every other application.
+  const round = (content: RichText): RichText[] =>
+    blocksFromHtml(document, richTextToHtml(document, content)).map((block) => block.content);
+
+  test('a newline is a <br>, with no block element around the phrase', () => {
+    expect(richTextToHtml(document, [{ text: 'one\ntwo' }])).toBe(
+      '<span style="white-space: pre-wrap;">one<br>two</span>',
+    );
+  });
+
+  test.each<[string, RichText]>([
+    [
+      'marks and a link',
+      [
+        { text: 'a ' },
+        { text: 'b', marks: ['bold', 'italic'] },
+        { text: 'c', link: 'https://e.test/' },
+      ],
+    ],
+    ['a break inside a mark', [{ text: 'x\ny', marks: ['bold'] }]],
+    ['a break between runs', [{ text: 'x\n' }, { text: 'y', marks: ['code'] }]],
+    ['two breaks in a row', [{ text: 'x\n\ny' }]],
+    ['a trailing break', [{ text: 'line\n' }]],
+    ['a linked break', [{ text: 'a\nb', link: 'https://e.test/' }]],
+  ])('%s', (_, content) => {
+    expect(round(content)).toEqual([content]);
+  });
+});
+
 describe('the DOM to work in is the one passed in', () => {
   test('parsing never reaches for the global Node or NodeFilter', () => {
     // README promises the serializers take a Document so they run on a server
@@ -1709,13 +1742,16 @@ describe('a summary is the toggle title once, wherever it sits', () => {
     // The summary belongs to the `<details>` it sits in. Searching the whole
     // subtree gave the outer toggle the inner one's title, and the inner
     // toggle -- whose summary was then taken out of the copy as the outer
-    // title -- came back with none.
+    // title -- came back with none. After a paragraph: at the very start of
+    // a copy a `<details>` with no summary of its own is a drag begun in its
+    // body, and is read as its body (R8-FMT-1).
     expect(
       blocksFromHtml(
         document,
-        '<details><p>outer body</p><details><summary>inner</summary>b</details></details>',
+        '<p>before</p><details><p>outer body</p><details><summary>inner</summary>b</details></details>',
       ).map((one) => [one.type, one.depth, blockText(one)]),
     ).toEqual([
+      ['paragraph', 0, 'before'],
       ['toggle', 0, ''],
       ['paragraph', 1, 'outer body'],
       ['toggle', 1, 'inner'],
@@ -1764,9 +1800,13 @@ describe('content a skipped element holds is not read by any query either', () =
   });
 
   test('a summary inside a noscript is not the toggle title', () => {
+    // After a paragraph, as the toggle above (R8-FMT-1).
     expect(
-      shape('<details><noscript><summary>hidden summary</summary></noscript><p>b</p></details>'),
+      shape(
+        '<p>a</p><details><noscript><summary>hidden summary</summary></noscript><p>b</p></details>',
+      ),
     ).toEqual([
+      ['paragraph', null, 'a'],
       ['toggle', null, ''],
       ['paragraph', null, 'b'],
     ]);
@@ -2047,17 +2087,20 @@ describe('audit 29: list items holding blocks', () => {
         '<ol><li><img src="https://a.test/1.png"> Step one</li><li><img src="https://a.test/2.png"> Step two</li></ol>',
       ),
     ).toEqual([
-      { type: 'numbered_list', depth: 0, text: ' Step one' },
+      // The space after the icon starts the item's text once the icon is a
+      // block of its own, and a browser draws none there.
+      { type: 'numbered_list', depth: 0, text: 'Step one' },
       { type: 'image', depth: 1, text: '' },
-      { type: 'numbered_list', depth: 0, text: ' Step two' },
+      { type: 'numbered_list', depth: 0, text: 'Step two' },
       { type: 'image', depth: 1, text: '' },
     ]);
   });
 
   // An image the reader cannot use is no block, so it splits nothing.
   test('an unusable image inside the text splits nothing', () => {
+    // The two spaces it stood between are one, as a browser draws them.
     expect(shape('<ul><li>Click <img src="cid:x"> to open</li></ul>')).toEqual([
-      { type: 'bulleted_list', depth: 0, text: 'Click  to open' },
+      { type: 'bulleted_list', depth: 0, text: 'Click to open' },
     ]);
   });
 
@@ -2169,7 +2212,7 @@ describe('audit 30', () => {
       'Before\nAfter',
     ],
     ['<ul><li>Before<hr>After</li></ul>', 'Before\nAfter'],
-    ['<ul><li>Click <img src="https://a.test/i.png"> to open</li></ul>', 'Click  to open'],
+    ['<ul><li>Click <img src="https://a.test/i.png"> to open</li></ul>', 'Click to open'],
   ])('%s reads its text as %j', (html, text) => {
     expect(shape(html)[0]?.text).toBe(text);
   });
@@ -2375,10 +2418,7 @@ describe('audit 31', () => {
       '<ul><li>a<a href="https://l.test/"><p><img src="https://i.test/x.png"></p></a>b</li></ul>',
       'a\nb',
     ],
-    [
-      '<ul><li>a <a href="https://l.test/"><img src="https://i.test/x.png"></a> b</li></ul>',
-      'a  b',
-    ],
+    ['<ul><li>a <a href="https://l.test/"><img src="https://i.test/x.png"></a> b</li></ul>', 'a b'],
   ])('%s reads its text as %j', (html, text) => {
     expect(shape(html)[0]?.text).toBe(text);
   });
@@ -2417,7 +2457,7 @@ describe('audit 32', () => {
       'an image in a promoted paragraph',
       '<ol><li><p><a href="https://a.test/a.png"><img src="https://a.test/a.png"></a></p><p>Click the <a href="https://a.test/g.png"><img src="https://a.test/g.png"></a> icon.</p></li></ol>',
       [
-        { type: 'numbered_list', depth: 0, text: 'Click the  icon.' },
+        { type: 'numbered_list', depth: 0, text: 'Click the icon.' },
         { type: 'image', depth: 1, text: '', src: 'https://a.test/g.png' },
         { type: 'image', depth: 1, text: '', src: 'https://a.test/a.png' },
       ],
@@ -2434,7 +2474,7 @@ describe('audit 32', () => {
       "an image in the item's own paragraph",
       '<ul><li><p>Click <img src="https://a.test/i.png"> here</p></li></ul>',
       [
-        { type: 'bulleted_list', depth: 0, text: 'Click  here' },
+        { type: 'bulleted_list', depth: 0, text: 'Click here' },
         { type: 'image', depth: 1, text: '', src: 'https://a.test/i.png' },
       ],
     ],
@@ -2588,12 +2628,14 @@ describe('audit 33', () => {
   });
 
   // An empty block after text adds no line: the break before it waits for text.
+  // (A cell's source whitespace collapses as a block's does, so the space
+  // that ends its line goes too: R3-FMT-2.)
   test('an empty block after text adds no line break', () => {
     const [table] = blocksFromHtml(
       document,
       '<table><tr><td>t <div><span></span></div></td></tr></table>',
     );
-    expect(richToPlainText(table?.rows?.[0]?.[0] ?? [])).toBe('t ');
+    expect(richToPlainText(table?.rows?.[0]?.[0] ?? [])).toBe('t');
   });
 
   // A list the item does not hold directly is never visited as a block, so it
@@ -2914,9 +2956,12 @@ describe('audit 37', () => {
   });
 
   // A block before the paste's first text, or after its last, starts or ends
-  // a line there: the text is no edge.
+  // a line there: the text is no edge. (An empty `<p></p>` first is the block
+  // Firefox writes, emptied, for one a selection left, and is not read at
+  // all: R5-FMT-3.)
   test.each([
-    ['<p></p><hr> text more<p>q</p>', ['', '', 'text more', 'q']],
+    ['<p></p><hr> text more<p>q</p>', ['', 'text more', 'q']],
+    ['<p><br></p><hr> text more<p>q</p>', ['', '', 'text more', 'q']],
     ['<hr> text', ['', 'text']],
     ['text <hr>', ['text', '']],
   ])('%j reads %j', (html, expected) => {
@@ -3311,10 +3356,16 @@ describe('audit 41', () => {
     expect(text(`<p>s</p><b>x<object>${I}</object>y</b><p>e</p>`)).toEqual(['s', 'xy', 'e']);
   });
 
-  // Space-only runs are looked past only while whitespace is collapsed; a
-  // paragraph reads its whitespace as it stands.
-  test('a paragraph keeps a space between a break and a block', () => {
-    expect(text('<p>a<br> <center>b</center></p>')).toEqual(['a\n \nb']);
+  // Space-only runs are looked past while whitespace is collapsed, and a
+  // paragraph that does not preserve its whitespace collapses it too: the
+  // space after the `<br>` starts a line, so a browser draws neither it nor a
+  // line for it. (It used to read 'a\n \nb', when every paragraph read its
+  // whitespace as it stood; one that says `pre-wrap` still does.)
+  test('a paragraph draws no space between a break and a block', () => {
+    expect(text('<p>a<br> <center>b</center></p>')).toEqual(['a\nb']);
+    expect(text('<p style="white-space:pre-wrap">a<br> <center>b</center></p>')).toEqual([
+      'a\n \nb',
+    ]);
   });
 });
 
@@ -3340,7 +3391,8 @@ describe('audit 43', () => {
     ],
     [
       '<blockquote><p><img src="https://x.test/n.png"> Note: careful</p></blockquote>',
-      ['quote: Note: careful', '[img n.png]'],
+      // The space stood after the image, which goes to a block of its own.
+      ['quote:Note: careful', '[img n.png]'],
     ],
     [
       '<table><tr><td><a href="https://x.test/"><img src="https://x.test/banner.jpg"></a></td></tr><tr><td>text</td></tr></table>',
@@ -3586,7 +3638,7 @@ describe('audit 46', () => {
       show(
         '<ul><li><figure><figcaption>Cap <img src="https://x.test/flag.png"></figcaption></figure></li></ul>',
       ),
-    ).toEqual(['bulleted_list@0:Cap ', '[img flag.png]@1:']);
+    ).toEqual(['bulleted_list@0:Cap', '[img flag.png]@1:']);
   });
 
   // Only the first caption is the figure's; a second one is content, so the
@@ -4069,7 +4121,9 @@ describe('audit 51', () => {
       read(
         '<p>q<span style="display:inline-block"><span style="display:inline-flex"><span>item <span style="display:block">x</span> y</span></span></span></p>',
       ),
-    ).toEqual(['paragraph:q\nitem \nx\n y']);
+      // The spaces either side of the block start and end a line, where a
+      // browser draws none.
+    ).toEqual(['paragraph:q\nitem\nx\ny']);
   });
 
   test('a <br> declared a block is still one line break', () => {
@@ -4184,12 +4238,13 @@ describe('audit 53', () => {
       ),
     ).toEqual(['paragraph:a\ny\nz']);
     // A cell that pushes no gap -- after a space, or holding only a line
-    // break or a zero-width space -- keeps all it holds.
+    // break or a zero-width space -- keeps all it holds, except the space a
+    // line break takes, which a browser does not draw.
     expect(
       read(
         '<p><span style="display:table-cell">a </span><span style="display:table-cell"><br></span>b</p>',
       ),
-    ).toEqual(['paragraph:a \nb']);
+    ).toEqual(['paragraph:a\nb']);
     expect(
       read(
         '<p><span style="display:table-cell">a </span><span style="display:table-cell">\u200b</span>b</p>',
@@ -4239,5 +4294,3432 @@ describe("Safari's converted spaces", () => {
 
   test('every other non-breaking space is kept', () => {
     expect(parseRichTextFromHtml(document, '<p>a b</p>')).toEqual([{ text: 'a b' }]);
+  });
+});
+
+describe("a link's underline is how links look, not a mark", () => {
+  /**
+   * Chromium and WebKit copy a link out of this editor with its computed
+   * `text-decoration` inlined on the `<a>`, and Google Docs underlines a span
+   * inside every link. Both pasted back as a link that was underlined too, and
+   * the Markdown then read `[<u>docs</u>](…)`.
+   */
+  test("the editor's own link, as Chromium copies it", () => {
+    expect(
+      fromHtml(
+        '<span style="white-space: pre-wrap;">the </span><a class="neditor-link" href="https://example.com/docs" rel="noopener noreferrer" style="box-sizing: inherit; color: inherit; text-decoration: underline rgba(55, 53, 47, 0.78); text-underline-offset: 2px; white-space: pre-wrap;">docs</a>',
+      ),
+    ).toEqual([{ text: 'the ' }, { text: 'docs', link: 'https://example.com/docs' }]);
+  });
+
+  test('a Google Docs link', () => {
+    const blocks = blocksFromHtml(
+      document,
+      '<meta charset="utf-8"><b style="font-weight:normal;" id="docs-internal-guid-x"><span style="font-size:11pt;font-family:Arial;color:#000000;font-weight:400;white-space:pre-wrap;">See </span><a href="https://example.com/x" style="text-decoration:none;"><span style="font-size:11pt;font-family:Arial;color:#1155cc;background-color:transparent;font-weight:400;font-style:normal;font-variant:normal;text-decoration:underline;-webkit-text-decoration-skip:none;text-decoration-skip-ink:none;vertical-align:baseline;white-space:pre;white-space:pre-wrap;">the docs</span></a></b>',
+    );
+
+    expect(blocks.map((block) => block.content)).toEqual([
+      [{ text: 'See ' }, { text: 'the docs', link: 'https://example.com/x' }],
+    ]);
+  });
+
+  test('a <u> inside a link is still an underline', () => {
+    expect(fromHtml('<a href="https://a.test/" style="text-decoration:none"><u>x</u></a>')).toEqual(
+      [{ text: 'x', marks: ['underline'], link: 'https://a.test/' }],
+    );
+  });
+
+  test('an underline around a link is still one', () => {
+    expect(
+      fromHtml('<span style="text-decoration:underline">a <a href="https://a.test/">b</a></span>'),
+    ).toEqual([
+      { text: 'a ', marks: ['underline'] },
+      { text: 'b', marks: ['underline'], link: 'https://a.test/' },
+    ]);
+  });
+
+  test('a strikethrough inside a link is still read', () => {
+    expect(
+      fromHtml('<a href="https://a.test/"><span style="text-decoration:line-through">x</span></a>'),
+    ).toEqual([{ text: 'x', marks: ['strikethrough'], link: 'https://a.test/' }]);
+  });
+
+  test('outside a link, a styled underline is one as before', () => {
+    expect(fromHtml('<span style="text-decoration:underline">x</span>')).toEqual([
+      { text: 'x', marks: ['underline'] },
+    ]);
+  });
+});
+
+describe('a Word list is a list', () => {
+  /**
+   * Word writes a list item as a paragraph styled `mso-list:l0 levelN lfo1`,
+   * with its bullet or number as text in a `mso-list:Ignore` span behind an
+   * `<![if !supportLists]>` conditional. Read as paragraphs, they kept the
+   * marker as text ("·      Bullet one") and lost their nesting, though the
+   * README promises Word content keeps its structure.
+   */
+  const item = (marker: string, text: string, level: number, font = ''): string =>
+    `<p class=MsoListParagraphCxSpMiddle style='margin-left:${36 * level}.0pt;mso-add-space:auto;text-indent:-18.0pt;mso-list:l0 level${level} lfo1'><![if !supportLists]><span style='${font}'><span style='mso-list:Ignore'>${marker}<span style='font:7.0pt "Times New Roman"'>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; </span></span></span><![endif]><span lang=EN-US>${text}<o:p></o:p></span></p>`;
+  const html =
+    `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word"><body><!--StartFragment-->` +
+    item('·', 'Bullet one', 1, 'font-family:Symbol;mso-fareast-font-family:Symbol') +
+    item('o', 'Bullet nested', 2, 'font-family:"Courier New"') +
+    item('·', 'Bullet two', 1, 'font-family:Symbol') +
+    `<p class=MsoNormal>Between<o:p></o:p></p>` +
+    item('1.', 'Numbered one', 1) +
+    item('2.', 'Numbered two', 1) +
+    `<!--EndFragment--></body></html>`;
+
+  test("the auditor's paste", () => {
+    expect(
+      blocksFromHtml(document, html).map((block) => [block.type, block.depth, blockText(block)]),
+    ).toEqual([
+      ['bulleted_list', 0, 'Bullet one'],
+      ['bulleted_list', 1, 'Bullet nested'],
+      ['bulleted_list', 0, 'Bullet two'],
+      ['paragraph', 0, 'Between'],
+      ['numbered_list', 0, 'Numbered one'],
+      ['numbered_list', 0, 'Numbered two'],
+    ]);
+  });
+
+  test.each([
+    ['a.', 'numbered_list'],
+    ['iv.', 'numbered_list'],
+    ['(1)', 'numbered_list'],
+    ['3)', 'numbered_list'],
+    ['§', 'bulleted_list'],
+    ['-', 'bulleted_list'],
+    ['o', 'bulleted_list'],
+  ])('the marker %j makes a %s', (marker, type) => {
+    expect(blocksFromHtml(document, item(marker, 'x', 1)).map((block) => block.type)).toEqual([
+      type,
+    ]);
+  });
+
+  test('formatting in the item survives, and the marker does not', () => {
+    const blocks = blocksFromHtml(
+      document,
+      `<p style='mso-list:l0 level1 lfo1'><span style='mso-list:Ignore'>·<span>&nbsp; </span></span><b>Bold</b> rest</p>`,
+    );
+
+    expect(blocks.map((block) => block.content)).toEqual([
+      [{ text: 'Bold', marks: ['bold'] }, { text: ' rest' }],
+    ]);
+  });
+
+  test('a paragraph that is not a list item is untouched', () => {
+    expect(
+      blocksFromHtml(document, `<p style='mso-list:none'>Plain</p>`).map((block) => block.type),
+    ).toEqual(['paragraph']);
+  });
+});
+
+describe('the clipboard writes breaks and spaces other applications keep', () => {
+  /**
+   * A soft line break went out as a raw newline inside the `<p>` and a run of
+   * spaces as it stood, which only this package's reader kept: Gmail, Google
+   * Docs and a plain contenteditable collapse both, and so did this reader
+   * whenever WebKit dropped `application/x-neditor` on a paste between two
+   * origins. Neither is something happy-dom lays out, so the emitted markup is
+   * what is pinned here, beside the round trip.
+   */
+  const blocks: Block[] = [
+    { id: 'a', type: 'paragraph', content: [{ text: 'two  spaces   three' }], depth: 0 },
+    { id: 'b', type: 'quote', content: [{ text: 'line\nbreak' }], depth: 0 },
+    { id: 'c', type: 'paragraph', content: [{ text: 'soft\nbreak ', marks: ['bold'] }], depth: 1 },
+    { id: 'd', type: 'heading2', content: [{ text: 'H  two\nlines' }], depth: 0 },
+    { id: 'e', type: 'bulleted_list', content: [{ text: 'item\n  more' }], depth: 0 },
+    { id: 'f', type: 'bulleted_list', content: [{ text: '\tnested\n' }], depth: 1 },
+    { id: 'g', type: 'toggle', content: [{ text: 'sum\nmary' }], depth: 0, collapsed: false },
+    { id: 'h', type: 'callout', content: [{ text: 'a\n\nb' }], depth: 0, icon: '💡' },
+    {
+      id: 'i',
+      type: 'table',
+      content: [],
+      depth: 0,
+      rows: [[[{ text: 'c  1\nc2' }], [{ text: 'x' }]]],
+    },
+    { id: 'j', type: 'code', content: [{ text: 'x  =  1\n\n  y' }], depth: 0 },
+  ];
+  const shape = (list: readonly Block[]) =>
+    list.map((block) => [
+      block.type,
+      block.depth,
+      block.type === 'table' ? block.rows : block.content,
+    ]);
+
+  test('a line break is a <br>, never a raw newline, outside a code block', () => {
+    const html = blocksToHtml(document, blocks);
+    const outsideCode = html.replace(/<pre>[\s\S]*?<\/pre>/g, '');
+
+    expect(outsideCode).not.toContain('\n');
+    expect(html).toContain('line<br>break');
+    expect(html).toContain('<strong>soft<br>break </strong>');
+    expect(html).toContain('<pre><code>x  =  1\n\n  y</code></pre>');
+  });
+
+  test('every element holding text says it preserves whitespace', () => {
+    const host = document.createElement('div');
+    host.innerHTML = blocksToHtml(document, blocks);
+
+    for (const selector of ['p', 'blockquote', 'h2', 'li', 'summary', 'th, td']) {
+      const found = [...host.querySelectorAll<HTMLElement>(selector)];
+
+      expect([selector, found.length > 0]).toEqual([selector, true]);
+      expect([selector, ...found.map((element) => element.style.whiteSpace)]).toEqual([
+        selector,
+        ...found.map(() => 'pre-wrap'),
+      ]);
+    }
+  });
+
+  test('and it reads back exactly, depth included', () => {
+    expect(shape(blocksFromHtml(document, blocksToHtml(document, blocks)))).toEqual(shape(blocks));
+  });
+
+  test('a trailing break keeps its filler', () => {
+    // `renderRichText` appends a `<br>` after a final newline as filler, which
+    // the reader reads back as nothing; the newline itself is the one before.
+    const trailing: Block[] = [
+      { id: 'a', type: 'paragraph', content: [{ text: 'a\n' }], depth: 0 },
+      { id: 'b', type: 'paragraph', content: [{ text: 'b \n ' }], depth: 0 },
+    ];
+    const html = blocksToHtml(document, trailing);
+
+    expect(html).toContain('a<br><br>');
+    expect(shape(blocksFromHtml(document, html))).toEqual(shape(trailing));
+  });
+
+  test('HTML this package wrote before still reads its raw newlines', () => {
+    // No `pre-wrap` anywhere, and a marker only this writer emits.
+    expect(
+      blocksFromHtml(
+        document,
+        '<ul data-neditor-list=""><li>soft\nbreak</li></ul><p data-neditor-depth="1">x\n  y</p>',
+      ).map((block) => [block.type, block.depth, richToPlainText(block.content)]),
+    ).toEqual([
+      ['bulleted_list', 0, 'soft\nbreak'],
+      ['paragraph', 1, 'x\n  y'],
+    ]);
+  });
+});
+
+describe('a foreign paragraph draws its source whitespace as one space', () => {
+  /**
+   * Firefox copies a page's `<p>` with its source line-wrapping and
+   * indentation as they are in the HTML -- Sphinx, Hugo, Jekyll and MkDocs all
+   * wrap it -- and every block used to keep its whitespace as it stood, so the
+   * paragraph a page showed on one line pasted as three, indented.
+   */
+  test("the auditor's page", () => {
+    expect(
+      blocksFromHtml(
+        document,
+        '<p id="w1">The quick brown fox jumps over\n    the lazy dog, and then it\n    runs away.</p>\n<p id="w2">Second paragraph\n    also wrapped.</p>',
+      ).map((block) => [block.type, richToPlainText(block.content)]),
+    ).toEqual([
+      ['paragraph', 'The quick brown fox jumps over the lazy dog, and then it runs away.'],
+      ['paragraph', 'Second paragraph also wrapped.'],
+    ]);
+  });
+
+  test('Word wraps its own source lines', () => {
+    expect(
+      blocksFromHtml(
+        document,
+        '<p class=MsoNormal>A sentence Word\r\nwrapped in its <b>source</b>,\r\nas it does.<o:p></o:p></p>',
+      ).map((block) => block.content),
+    ).toEqual([
+      [
+        { text: 'A sentence Word wrapped in its ' },
+        { text: 'source', marks: ['bold'] },
+        { text: ', as it does.' },
+      ],
+    ]);
+  });
+
+  test('a <br> still breaks the line, and takes the spaces either side', () => {
+    expect(
+      blocksFromHtml(document, '<p>one  \n  <br>\n  two</p>').map((block) =>
+        richToPlainText(block.content),
+      ),
+    ).toEqual(['one\ntwo']);
+  });
+
+  test('a heading, a quote and a list item read the same way', () => {
+    expect(
+      blocksFromHtml(
+        document,
+        '<h2>\n  A wrapped\n  heading\n</h2><blockquote>\n  quoted\n  text\n</blockquote><ul>\n  <li>\n    an item\n    wrapped\n  </li>\n</ul>',
+      ).map((block) => [block.type, richToPlainText(block.content)]),
+    ).toEqual([
+      ['heading2', 'A wrapped heading'],
+      ['quote', 'quoted text'],
+      ['bulleted_list', 'an item wrapped'],
+    ]);
+  });
+
+  test('whitespace a style or a <pre> preserves is kept', () => {
+    expect(
+      blocksFromHtml(
+        document,
+        '<p style="white-space:pre-wrap">a  b\nc</p><p>x <span style="white-space:pre">  y</span></p>',
+      ).map((block) => richToPlainText(block.content)),
+    ).toEqual(['a  b\nc', 'x   y']);
+  });
+
+  test('a typed space at the edge of a paste stays, its indentation does not', () => {
+    // The paste lands mid-line, so a space somebody selected matters; the
+    // source's own line-wrapping at the same edge was never selected.
+    expect(
+      blocksFromHtml(document, '<p>quick brown </p>').map((block) =>
+        richToPlainText(block.content),
+      ),
+    ).toEqual(['quick brown ']);
+    expect(
+      blocksFromHtml(document, '<p>\n    quick brown\n</p>').map((block) =>
+        richToPlainText(block.content),
+      ),
+    ).toEqual(['quick brown']);
+  });
+});
+
+describe('a Word list WebKit has sanitized is still a list', () => {
+  // What WebKit hands a page for the same Word payload: every `mso-`
+  // declaration and the marker span's style gone, Word's class and indent
+  // kept, the marker the first text of the paragraph.
+  const item = (marker: string, text: string, level: number): string =>
+    `<p class="MsoListParagraphCxSpMiddle" style="color: rgb(0, 0, 0); white-space: normal; text-decoration: none; margin-left: ${36 * level}pt; text-indent: -18pt;"><span style="font-family: Symbol;"><span>${marker}<span style="font-size: 7pt; font-family: Times New Roman;">     <span class="Apple-converted-space"> </span></span></span></span><span lang="EN-US">${text}<o:p></o:p></span></p>`;
+
+  test("the auditor's paste, as WebKit delivers it", () => {
+    expect(
+      blocksFromHtml(
+        document,
+        `<head><meta charset="UTF-8"></head>${item('·', 'Bullet one', 1)}${item('o', 'Bullet nested', 2)}<p class="MsoNormal">Between<o:p></o:p></p>${item('1.', 'Numbered one', 1)}`,
+      ).map((block) => [block.type, block.depth, blockText(block)]),
+    ).toEqual([
+      ['bulleted_list', 0, 'Bullet one'],
+      ['bulleted_list', 1, 'Bullet nested'],
+      ['paragraph', 0, 'Between'],
+      ['numbered_list', 0, 'Numbered one'],
+    ]);
+  });
+
+  test('a list paragraph with no marker in front stays a paragraph', () => {
+    expect(
+      blocksFromHtml(document, '<p class="MsoListParagraph">Just text here</p>').map(
+        (block) => block.type,
+      ),
+    ).toEqual(['paragraph']);
+  });
+
+  // R2-PARSE-5: US and Mac Word write the indent in inches, and WebKit keeps
+  // Word's unit; only `pt` was read, so every item came back at depth 0.
+  test.each([
+    ['.5in', '1.0in', '1.5in'],
+    ['0.5in', '1in', '1.5in'],
+    ['1.27cm', '2.54cm', '3.81cm'],
+    ['12.7mm', '25.4mm', '38.1mm'],
+    ['48px', '96px', '144px'],
+  ])('an indent of %s, %s, %s is three levels', (one, two, three) => {
+    const at = (marker: string, text: string, margin: string): string =>
+      item(marker, text, 1).replace('margin-left: 36pt', `margin-left: ${margin}`);
+
+    expect(
+      blocksFromHtml(
+        document,
+        at('·', 'One', one) +
+          at('o', 'Nested', two) +
+          at('§', 'Deeper', three) +
+          at('·', 'Two', one),
+      ).map((block) => [block.type, block.depth, blockText(block)]),
+    ).toEqual([
+      ['bulleted_list', 0, 'One'],
+      ['bulleted_list', 1, 'Nested'],
+      ['bulleted_list', 2, 'Deeper'],
+      ['bulleted_list', 0, 'Two'],
+    ]);
+  });
+
+  test.each(['1.1.', 'viii.', '(xii)'])('the marker %j is numbered here too', (marker) => {
+    expect(blocksFromHtml(document, item(marker, 'x', 1)).map((block) => block.type)).toEqual([
+      'numbered_list',
+    ]);
+  });
+});
+
+describe('Word numbers past three letters, and pictures for bullets', () => {
+  // R2-PARSE-6: a multilevel `1.1.` and a roman `viii.` were read as bullets,
+  // since the numbered test stopped at three letters; a picture bullet -- an
+  // `<img>` in the marker span -- kept the item from being an item at all, its
+  // spacer stayed in the text as three no-break spaces, and a web picture
+  // became an image block of its own.
+  const item = (marker: string, text: string, level = 1): string =>
+    `<p class=MsoListParagraphCxSpMiddle style='margin-left:${36 * level}.0pt;mso-list:l0 level${level} lfo1'><![if !supportLists]><span style='mso-list:Ignore'>${marker}<span style='font:7.0pt "Times New Roman"'>&nbsp;&nbsp;&nbsp;&nbsp; </span></span><![endif]>${text}<o:p></o:p></p>`;
+
+  test.each(['1.1.', '1.1.1.', '2.10.', 'viii.', 'VIII.', '(xii)', 'xlii)'])(
+    '%j is numbered',
+    (marker) => {
+      expect(blocksFromHtml(document, item(marker, 'x')).map((block) => block.type)).toEqual([
+        'numbered_list',
+      ]);
+    },
+  );
+
+  test("the auditor's picture bullets", () => {
+    const html =
+      `<p class=MsoListParagraphCxSpFirst style='text-indent:-.25in;mso-list:l0 level1 lfo1'><![if !supportLists]><span style='mso-list:Ignore'><img width=11 height=11 src="file:///C:/Temp/clip_image001.gif" alt="*"><span style='font:7.0pt "Times New Roman"'>&nbsp;&nbsp; </span></span><![endif]>Picture bullet<o:p></o:p></p>` +
+      `<p class=MsoListParagraphCxSpLast style='text-indent:-.25in;mso-list:l0 level1 lfo1'><![if !supportLists]><span style='mso-list:Ignore'><img src="https://i.test/b.png" alt="*"><span>&nbsp;&nbsp; </span></span><![endif]>Web bullet<o:p></o:p></p>`;
+
+    expect(
+      blocksFromHtml(document, html).map((block) => [block.type, block.depth, block.content]),
+    ).toEqual([
+      ['bulleted_list', 0, [{ text: 'Picture bullet' }]],
+      ['bulleted_list', 0, [{ text: 'Web bullet' }]],
+    ]);
+  });
+
+  test('a picture in the item text, past the marker, is still a picture', () => {
+    const html = `<p style='mso-list:l0 level1 lfo1'><span style='mso-list:Ignore'>·<span>&nbsp; </span></span>See <img src="https://i.test/x.png" alt="x"></p>`;
+
+    expect(blocksFromHtml(document, html).map((block) => block.type)).toContain('image');
+  });
+});
+
+describe('a converted space stays a space when the block collapses', () => {
+  // R2-PARSE-11: WebKit writes a run of spaces at a boundary as alternating
+  // no-break and ordinary spaces inside `Apple-converted-space`. Converted to
+  // spaces first and collapsed second, three became one.
+  const html = 'x<span class="Apple-converted-space">&nbsp; &nbsp;</span>y';
+
+  test('in a paragraph', () => {
+    expect(blocksFromHtml(document, `<p>${html}</p>`).map((block) => block.content)).toEqual([
+      [{ text: 'x   y' }],
+    ]);
+  });
+
+  test('as inline content', () => {
+    expect(blocksFromHtml(document, html).map((block) => block.content)).toEqual([
+      [{ text: 'x   y' }],
+    ]);
+    expect(fromHtml(html)).toEqual([{ text: 'x   y' }]);
+  });
+
+  test('a lone one in source whitespace collapses with it', () => {
+    // R3-FMT-2: one converted space is an ordinary space, and the source
+    // layout either side of it holds no space that was drawn.
+    expect(
+      blocksFromHtml(
+        document,
+        '<p>x\n    <span class="Apple-converted-space">&nbsp;</span>\n    y</p>',
+      ).map(blockText),
+    ).toEqual(['x y']);
+  });
+});
+
+describe('whitespace is decided per text, not per block', () => {
+  // R2-PARSE-2: one inline element declaring `pre` made the whole block read
+  // raw, so a source-wrapped paragraph around it pasted its indentation as
+  // real lines.
+  test("the auditor's paragraph", () => {
+    expect(
+      blocksFromHtml(
+        document,
+        '<p>One\n    two <span style="white-space:pre">x  y</span>\n    three</p>',
+      ).map((block) => block.content),
+    ).toEqual([[{ text: 'One two x  y three' }]]);
+  });
+
+  test('a preserved line break inside it stands, and so does a tab', () => {
+    expect(
+      blocksFromHtml(
+        document,
+        '<p>a\n  b <span style="white-space:pre-wrap">c\n\td</span>\n  e</p>',
+      ).map(blockText),
+    ).toEqual(['a b c\n\td e']);
+  });
+
+  test('pre-line keeps its breaks and collapses its spaces', () => {
+    expect(
+      blocksFromHtml(
+        document,
+        '<p>a\n  <span style="white-space:pre-line">b   c\n  d</span>\n  e</p>',
+      ).map(blockText),
+    ).toEqual(['a b c\nd e']);
+  });
+
+  test('text that already holds the internal marks reads as itself', () => {
+    expect(
+      blocksFromHtml(
+        document,
+        '<p>\uFDD0a\n  <span style="white-space:pre">\uFDD2 b</span></p>',
+      ).map(blockText),
+    ).toEqual(['\uFDD0a \uFDD2 b']);
+  });
+
+  test('a list item reads its own text that way, and its nested list is its own', () => {
+    expect(
+      blocksFromHtml(
+        document,
+        '<ul><li>a\n    <span style="white-space:pre">x  y</span>\n    <ul><li>n\n  m</li></ul></li></ul>',
+      ).map((block) => [block.depth, blockText(block)]),
+    ).toEqual([
+      [0, 'a x  y'],
+      [1, 'n m'],
+    ]);
+  });
+});
+
+describe('code keeps the spaces the plain text shows', () => {
+  // R2-PARSE-1: Firefox copies a page's class, not its computed style, so
+  // GitHub's `code { white-space: break-spaces }` arrived as a bare `<code>`
+  // and its spaces collapsed. Its plain text shows them, and decides (R3-FMT-1:
+  // without it, code is drawn `normal` like the paragraph around it).
+  test.each(['code', 'kbd', 'samp'])('in <%s>', (tag) => {
+    expect(
+      blocksFromHtml(document, `<p>Run <${tag}>npm  install  --save</${tag}> now.</p>`, {
+        plain: 'Run npm  install  --save now.',
+      }).map((block) => richToPlainText(block.content)),
+    ).toEqual(['Run npm  install  --save now.']);
+  });
+
+  test.each(['code', 'kbd', 'samp'])('and without it, <%s> collapses', (tag) => {
+    expect(
+      blocksFromHtml(document, `<p>Run <${tag}>npm  install  --save</${tag}> now.</p>`).map(
+        (block) => richToPlainText(block.content),
+      ),
+    ).toEqual(['Run npm install --save now.']);
+  });
+
+  test('a style on the code element itself still decides', () => {
+    expect(
+      blocksFromHtml(document, '<p>Run <code style="white-space: normal">a  b</code> now.</p>').map(
+        blockText,
+      ),
+    ).toEqual(['Run a b now.']);
+  });
+
+  test('as inline content too', () => {
+    expect(fromHtml('Run <code>a  b</code>')).toEqual([
+      { text: 'Run ' },
+      { text: 'a  b', marks: ['code'] },
+    ]);
+  });
+});
+
+describe('the plain text decides what a stylesheet preserved', () => {
+  // R2-PARSE-1: Firefox's HTML names the page's classes, not their computed
+  // whitespace, so `<p class="pw">` styled `pre-wrap` and a source-wrapped
+  // `<p>` look the same. Its `text/plain` is the text as drawn: where the HTML
+  // declares no `white-space` at all, the block's text as it stands is kept
+  // when the plain text holds it, and collapsed when it does not.
+  const read = (html: string, plain: string): string[] =>
+    blocksFromHtml(document, html, { plain }).map(blockText);
+
+  test.each([
+    [
+      'pre-wrap by class',
+      '<div id="s"><p class="pw">two  spaces\tand tab\nnext line</p></div>',
+      'two  spaces\tand tab\nnext line',
+      'two  spaces\tand tab\nnext line',
+    ],
+    [
+      'pre by class',
+      '<div id="s"><p class="art"> /\\_/\\\n( o.o )\n &gt; ^ &lt;</p></div>',
+      ' /\\_/\\\n( o.o )\n > ^ <',
+      ' /\\_/\\\n( o.o )\n > ^ <',
+    ],
+    [
+      'pre-line by class',
+      '<div id="s"><p class="poem">Roses are red,\n  violets blue</p></div>',
+      'Roses are red,\n  violets blue',
+      'Roses are red,\n  violets blue',
+    ],
+    [
+      'source line-wrapping',
+      '<div id="s"><p>The quick brown fox\n    jumps over the dog.</p></div>',
+      'The quick brown fox jumps over the dog.',
+      'The quick brown fox jumps over the dog.',
+    ],
+  ])('%s', (_, html, plain, expected) => {
+    expect(read(html, plain)).toEqual([expected]);
+  });
+
+  test('each block asks for itself', () => {
+    expect(
+      read('<p class="pw">a  b</p>\n<p>c\n   d</p>\n<p class="pw">e\tf</p>', 'a  b\n\nc d\n\ne\tf'),
+    ).toEqual(['a  b', 'c d', 'e\tf']);
+  });
+
+  test('without the plain text the old reading stands', () => {
+    expect(blocksFromHtml(document, '<p class="pw">two  spaces\nnext</p>').map(blockText)).toEqual([
+      'two spaces next',
+    ]);
+  });
+
+  test('a block that declares its whitespace is believed, whatever the plain text says', () => {
+    expect(read('<p style="white-space: normal">a  b</p>', 'a  b')).toEqual(['a b']);
+    expect(read('<div style="white-space: normal">a  b</div>', 'a  b')).toEqual(['a b']);
+    expect(
+      read('<div style="white-space: normal"><p>a  b</p></div><p>c\n  d</p>', 'a  b\n\nc d'),
+    ).toEqual(['a b', 'c d']);
+  });
+
+  test('one that does not is decided by the plain text, beside one that does', () => {
+    // R3-FMT-1: declared anywhere in the HTML, the plain text was not asked at
+    // all -- so once `<code>` stopped preserving by default, Firefox's copy of
+    // a paragraph with one inline `pre` span lost its code's spaces.
+    expect(read('<p style="white-space: normal">a  b</p><p>c  d</p>', 'a b\n\nc  d')).toEqual([
+      'a b',
+      'c  d',
+    ]);
+    expect(
+      read(
+        '<div id="foreign"><style>#foreign code { white-space: break-spaces }</style><p id="w1">Run <code>npm  install  --save</code> now, then\n    <span style="white-space: pre">x  y</span>\n    as well.</p></div>',
+        'Run npm  install  --save now, then x  y as well.',
+      ),
+    ).toEqual(['Run npm  install  --save now, then x  y as well.']);
+    // The same phrase as Firefox copies it from inside the paragraph: bare
+    // inline content, one element of which declares.
+    expect(
+      read(
+        'Run <code>npm  install  --save</code> now, then\n    <span style="white-space: pre">x  y</span>\n    as well.',
+        'Run npm  install  --save now, then x  y as well.',
+      ),
+    ).toEqual(['Run npm  install  --save now, then x  y as well.']);
+  });
+
+  test('a phrase whose every element declares its whitespace is believed', () => {
+    // As Chromium and WebKit copy one: each element carries its computed style.
+    expect(
+      read(
+        '<span style="white-space: normal">a  b </span><code style="white-space: normal">c  d</code>',
+        'a  b c  d',
+      ),
+    ).toEqual(['a b c d']);
+  });
+
+  test('a block found nowhere in the plain text collapses', () => {
+    expect(read('<p>a  b</p>', 'something else')).toEqual(['a b']);
+  });
+
+  test('looks for each block near the last one, never through the whole plain text', () => {
+    // A search of the whole plain text per block cost the plain text's length
+    // for every block: here 2,000 blocks against 2 MB that holds none of them.
+    // Bounded, the plain text costs a few kilobytes a block on top of the read.
+    const html = Array.from({ length: 2000 }, (_, i) => `<p>line ${i}\n   wrapped</p>`).join('');
+    const plain = 'z'.repeat(2_000_000);
+    const time = (options: { plain?: string }): number => {
+      const start = performance.now();
+      blocksFromHtml(document, html, options);
+      return performance.now() - start;
+    };
+
+    time({});
+    const without = Math.min(time({}), time({}));
+    const withPlain = Math.min(time({ plain }), time({ plain }));
+
+    expect(withPlain / without).toBeLessThan(4);
+  });
+});
+
+describe('HTML from an older writer can be read as it was written', () => {
+  // R2-PARSE-3: releases up to 0.1.3 wrote a soft break as a raw newline and
+  // a run of spaces as it stood, marking only nested and checked blocks
+  // `data-neditor-*`. Stored HTML with no such block cannot be told apart
+  // from a page's source-wrapped paragraphs, so the caller says.
+  const old = '<p>soft\nbreak  two</p><h2>H\tx</h2>';
+
+  test('auto: an unmarked paragraph collapses as a browser draws it', () => {
+    expect(blocksFromHtml(document, old).map(blockText)).toEqual(['soft break two', 'H x']);
+  });
+
+  test("preserve: read raw, as that writer's own reader did", () => {
+    expect(
+      blocksFromHtml(document, old, { whitespace: 'preserve' }).map((block) => [
+        block.type,
+        blockText(block),
+      ]),
+    ).toEqual([
+      ['paragraph', 'soft\nbreak  two'],
+      ['heading2', 'H\tx'],
+    ]);
+  });
+
+  test('preserve leaves structure alone', () => {
+    expect(
+      blocksFromHtml(
+        document,
+        '<ul><li>a  b<ul><li>c\nd</li></ul></li></ul><p data-neditor-depth="1">e</p>',
+        { whitespace: 'preserve' },
+      ).map((block) => [block.type, block.depth, blockText(block)]),
+    ).toEqual([
+      ['bulleted_list', 0, 'a  b'],
+      ['bulleted_list', 1, 'c\nd'],
+      ['paragraph', 1, 'e'],
+    ]);
+  });
+});
+
+describe('a copied text range keeps its spaces in other applications', () => {
+  // R2-PARSE-4 / R2-EDIT-3: the text-range writer put runs of spaces and tabs
+  // in the HTML raw, with nothing saying they are preserved, so every other
+  // application -- and this reader, when WebKit drops our own type between
+  // origins -- collapsed them: `def f():\n    return  1` from a code block
+  // pasted as `def f():\nreturn 1`. happy-dom lays nothing out, so the mark is
+  // pinned here beside the round trip.
+  const round = (content: RichText): RichText[] =>
+    blocksFromHtml(document, richTextToHtml(document, content)).map((block) => block.content);
+
+  test('the HTML says its whitespace is preserved', () => {
+    expect(richTextToHtml(document, [{ text: 'a  b' }])).toBe(
+      '<span style="white-space: pre-wrap;">a  b</span>',
+    );
+  });
+
+  test.each<[string, RichText]>([
+    ['double spaces', [{ text: 'a  b   c' }]],
+    ['tabs', [{ text: 'a\tb\t\tc' }]],
+    ['a leading indent', [{ text: '    return  1' }]],
+    ['edge spaces', [{ text: ' a ' }]],
+    ['edge spaces across marks', [{ text: ' a ', marks: ['bold'] }, { text: '  b\t' }]],
+    ['indented lines', [{ text: 'def f():\n    return  1' }]],
+  ])('%s', (_, content) => {
+    expect(round(content)).toEqual([content]);
+  });
+
+  test('a range from a code block is written as code', () => {
+    const content: RichText = [{ text: 'def f():\n    return  1' }];
+    const html = richTextToHtml(document, content, { code: true });
+
+    expect(html).toMatch(/^<pre\b/);
+    expect(blocksFromHtml(document, html)).toEqual([
+      expect.objectContaining({ type: 'code', content }),
+    ]);
+  });
+});
+
+describe('the plain text is read where each block stands in it', () => {
+  // R3-FMT-4/5: each block was searched for in a window past the last one
+  // found -- quadratic on periodic text, accepted anywhere in the window, and
+  // moved on only by blocks that had whitespace to collapse. Every block is
+  // now matched at the cursor, whitespace aside, and moves it on.
+  const read = (html: string, plain: string): string[] =>
+    blocksFromHtml(document, html, { plain }).map(blockText);
+
+  test('a periodic block costs its length, not its length squared', () => {
+    // The auditor's pair: one block `ab…ab  ab…ab`, its plain text three
+    // copies of `ab…ab `. Searched for, 100k characters took 650 ms against
+    // 7 ms without the plain text.
+    const half = 'ab'.repeat(50_000);
+    const html = `<p>${half}  ${half}</p>`;
+    const plain = `${half} `.repeat(3);
+    const time = (options: { plain?: string }): number => {
+      const start = performance.now();
+      blocksFromHtml(document, html, options);
+      return performance.now() - start;
+    };
+
+    // Best of five each, and 8x: the defect this guards ran 90x slower, while
+    // the honest ratio sits near 2-3 and a loaded machine pushed a best of two
+    // past 4 in rounds 8 and 9 alike (measured, R10 gate) -- a flaky guard is
+    // one nobody believes.
+    time({});
+    const best = (options: { plain?: string }) =>
+      Math.min(...Array.from({ length: 5 }, () => time(options)));
+    const without = best({});
+    const withPlain = best({ plain });
+
+    expect(withPlain / without).toBeLessThan(8);
+  });
+
+  test('blocks the cursor misses are looked for a bounded number of lines on', () => {
+    // Each of 4,000 blocks matches all but its last character at the start of
+    // every line, so each is tried at each line it is looked for at: bounded,
+    // that is a constant times its length; unbounded, the plain text's length.
+    const line = 'x'.repeat(49);
+    const html = Array.from({ length: 4000 }, () => `<p>${line}q\n  w</p>`).join('');
+    const plain = Array.from({ length: 4000 }, () => `${line}z w`).join('\n');
+    const time = (options: { plain?: string }): number => {
+      const start = performance.now();
+      blocksFromHtml(document, html, options);
+      return performance.now() - start;
+    };
+
+    time({});
+    const without = Math.min(time({}), time({}));
+    const withPlain = Math.min(time({ plain }), time({ plain }));
+
+    expect(withPlain / without).toBeLessThan(4);
+  });
+
+  test('a block after many single-line paragraphs is still found', () => {
+    // Fifty short paragraphs moved nothing on, so the pre-wrap block after
+    // them was past the window and collapsed. A hundred, so that it is past
+    // the lines a block the cursor missed is looked for in, too: only a
+    // cursor every block moves on reaches it.
+    const filler = Array.from(
+      { length: 100 },
+      (_, i) => `Paragraph ${i} ${'lorem ipsum dolor '.repeat(5)}end.`,
+    );
+    const html = `<div id="s">${filler.map((text) => `<p>${text}</p>`).join('')}<p class="pw">line1\nline2  x</p></div>`;
+    const plain = `${filler.join('\n\n')}\n\nline1\nline2  x`;
+
+    expect(read(html, plain).at(-1)).toBe('line1\nline2  x');
+  });
+
+  test('two blocks with the same text are each read against their own place', () => {
+    // A match anywhere in the window took the second block's drawn text for
+    // the first, and the pair came back swapped.
+    expect(read('<div id="s"><p>a\n b</p><p class="pw">a\n b</p></div>', 'a b\n\na\n b')).toEqual([
+      'a b',
+      'a\n b',
+    ]);
+  });
+
+  test("a pre-wrap block's last newline draws none when the HTML says pre-wrap, too", () => {
+    // Chromium and WebKit write the computed style, so the same paragraph
+    // arrives declared; its source newline is still the end of its last line.
+    // A `<br>` there is a line break somebody made, and stays.
+    const style = 'white-space: pre-wrap;';
+
+    expect(
+      blocksFromHtml(
+        document,
+        `<p style="${style}">line1\nline2\n</p><p style="${style}">next</p><p style="${style}">soft<br><br></p><p style="${style}">then\n<br></p>`,
+      ).map(blockText),
+    ).toEqual(['line1\nline2', 'next', 'soft\n', 'then\n']);
+  });
+
+  test("a pre-wrap block's last newline ends its last line and draws none", () => {
+    expect(
+      read('<div id="s"><p class="pw">line1\nline2\n</p><p>next</p></div>', 'line1\nline2\n\nnext'),
+    ).toEqual(['line1\nline2', 'next']);
+  });
+
+  test('a block the plain text does not hold is passed over, and the next found', () => {
+    // Firefox writes an image's alt text into the plain text; the paragraph's
+    // own text has none, so it is not found -- but the block after it is.
+    expect(
+      read(
+        '<div id="s"><p>a <img alt="ALT" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="> b</p><p class="pw">c  d</p></div>',
+        'a ALT b\n\nc  d',
+      ).at(-1),
+    ).toBe('c  d');
+  });
+
+  test('a source line break before the text is no line of its own', () => {
+    // The newlines before a block in the plain text are the gap between
+    // blocks, not the block's own: they never decide its leading whitespace.
+    expect(read('<p>one</p><p>\ntwo  three\n</p>', 'one\n\ntwo  three')).toEqual([
+      'one',
+      'two  three',
+    ]);
+  });
+
+  test('whitespace is decided gap by gap', () => {
+    // A paragraph whose code a stylesheet makes pre-wrap: the source wrap is
+    // collapsed and the code's double space kept, as Firefox drew them.
+    expect(
+      read('<p>Some text\n   wrapped <code>a  b</code></p>', 'Some text wrapped a  b'),
+    ).toEqual(['Some text wrapped a  b']);
+  });
+
+  test('more misses in a row than the look-ahead still find the block after them', () => {
+    // R4-FMT-2: a block not found never moved the cursor, so after 64 of them
+    // in a row -- Firefox writes a `<q>` with its quote marks -- the window
+    // never reached past them again. The auditor's page, 70 such paragraphs.
+    const quoted = Array.from({ length: 70 }, (_, i) => `<p>Item ${i} <q>quoted</q> text</p>`);
+    const html = `<div id="s"><p class="pw">top  one</p>${quoted.join('')}<p class="pw">keep  two  spaces</p><pre>pre  x</pre><p class="pw">last  one</p></div>`;
+    const plain = [
+      'top  one',
+      ...Array.from({ length: 70 }, (_, i) => `Item ${i} "quoted" text`),
+      'keep  two  spaces',
+      'pre  x',
+      'last  one',
+    ].join('\n\n');
+    const texts = read(html, plain);
+
+    expect(texts.slice(0, 2)).toEqual(['top  one', 'Item 0 quoted text']);
+    expect(texts.slice(-3)).toEqual(['keep  two  spaces', 'pre  x', 'last  one']);
+  });
+
+  test('a block the plain text leaves out moves on no further than its own lines', () => {
+    // A missed block is taken to stand on the next line or lines past the
+    // cursor; one the plain text does not hold at all must not cost the
+    // block after it its place, which is still at the cursor -- nor, once
+    // that block is found there, the blocks after it theirs.
+    expect(
+      read(
+        '<div id="s"><p class="pw">a  b</p><p>hidden</p><p>gone</p><p class="pw">c  d</p><p>x <q>y</q></p><p class="pw">e  f</p></div>',
+        'a  b\n\nc  d\n\nx "y"\n\ne  f',
+      ),
+    ).toEqual(['a  b', 'hidden', 'gone', 'c  d', 'x y', 'e  f']);
+  });
+
+  test('a claim moves where the look-ahead starts, never what it can reach', () => {
+    // R5-FMT-1: a block the plain text left out claimed the line the next
+    // block stood on, a block spelled differently (a `<q>`) claimed another,
+    // and the look-ahead for every block after started past its own line.
+    // The auditor's replay cases.
+    expect(
+      read(
+        '<p>hidden one</p><p>say <q>hi</q></p><p>Z  z</p><p>W  w</p>',
+        'say “hi”\n\nZ  z\n\nW  w',
+      ),
+    ).toEqual(['hidden one', 'say hi', 'Z  z', 'W  w']);
+    expect(
+      read(
+        '<p>hidden one</p><p>say <q>hi</q></p><p>say <q>ho</q></p><p>Z  z</p>',
+        'say “hi”\n\nsay “ho”\n\nZ  z',
+      ),
+    ).toEqual(['hidden one', 'say hi', 'say ho', 'Z  z']);
+  });
+
+  test('a table whose first cells are spelled differently costs the blocks after it nothing', () => {
+    // R5-FMT-1: every cell of a row stands on one line of Firefox's plain
+    // text, but each missed cell claimed a line of its own, so the table
+    // claimed rows x columns lines and every block after it missed and
+    // collapsed. The auditor's Firefox copies: a flag's alt text Firefox
+    // writes, and a `<q>`'s quote marks.
+    const after = (html: string, plain: string): string[] =>
+      blocksFromHtml(document, html, { plain })
+        .filter((block) => block.type === 'paragraph')
+        .map(blockText);
+    const flag =
+      '<img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="flag" width="8" height="8">';
+
+    expect(
+      after(
+        `<p id="first">before</p><table><tbody><tr><td>${flag} France</td><td class="pw">a  b</td><td class="pw">c  d</td></tr><tr><td>${flag} Spain</td><td class="pw">e  f</td><td class="pw">g  h</td></tr></tbody></table><p class="pw">Z  z</p><p class="pw">W   w</p><p class="pw" id="last">end  end</p>`,
+        'before\nflag France\ta  b\tc  d\nflag Spain\te  f\tg  h\n\nZ  z\n\nW   w\n\nend  end',
+      ),
+    ).toEqual(['before', 'Z  z', 'W   w', 'end  end']);
+    expect(
+      after(
+        '<p id="first">before</p><table><tbody><tr><td><q>quoted</q></td><td class="pw">a  b</td><td>x</td></tr><tr><td>plain</td><td class="pw">e  f</td><td>y</td></tr></tbody></table><p class="pw">Z  z</p><p class="pw">W   w</p><p class="pw" id="last">end  end</p>',
+        'before\n"quoted"\ta  b\tx\nplain\te  f\ty\n\nZ  z\n\nW   w\n\nend  end',
+      ),
+    ).toEqual(['before', 'Z  z', 'W   w', 'end  end']);
+  });
+
+  test('a cell after the first in its row claims no line', () => {
+    // The flag table again, with more rows than the look-ahead: the block
+    // after it is past the reach of a search from the cursor, so it is found
+    // only if the claims put the look-ahead on it -- a line per row, where
+    // Firefox writes the row, not one per cell.
+    const flag =
+      '<img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="flag" width="8" height="8">';
+    const rows = Array.from({ length: 70 }, (_, i) => i);
+    const blocks = blocksFromHtml(
+      document,
+      `<p>before</p><table><tbody>${rows.map((i) => `<tr><td>${flag} Land ${i}</td><td>a</td><td>b</td></tr>`).join('')}</tbody></table><p class="pw">Z  z</p>`,
+      {
+        plain: `before\n${rows.map((i) => `flag Land ${i}\ta\tb`).join('\n')}\n\nZ  z`,
+      },
+    );
+
+    expect(blocks.filter((block) => block.type === 'paragraph').map(blockText)).toEqual([
+      'before',
+      'Z  z',
+    ]);
+  });
+
+  test("a cell's edge spaces stand where the plain text has them, after a tab too", () => {
+    // R4-FMT-6a: the leading-space rule asked for a line start, and every
+    // cell but a row's first follows a tab in Firefox's plain text, so
+    // `<td class=pw> f </td>` read `f`. The auditor's table, as Firefox wrote
+    // it. A cell's end counts only at the end of its row: before the tab,
+    // Firefox writes a trailing space whether the cell draws it or not
+    // (`cell `, `mid `), so there the plain text cannot tell -- and the space
+    // a pre-wrap `x ` does draw collapses, as it did before.
+    const cells = (html: string, plain: string): string[][] | undefined =>
+      blocksFromHtml(document, html, { plain })[0]?.rows?.map((row) => row.map(richToPlainText));
+
+    expect(
+      cells(
+        '<div id="s"><table><tbody><tr><td class="pw">a  b</td><td>c</td></tr><tr><td class="pw">d\ne</td><td class="pw"> f </td></tr></tbody></table><p class="pw">p  q</p></div>',
+        'a  b\tc\nd\ne\t f \n\np  q',
+      ),
+    ).toEqual([
+      ['a  b', 'c'],
+      ['d\ne', ' f '],
+    ]);
+    expect(
+      cells(
+        '<div id="s"><table><tbody><tr><td>cell </td><td> mid </td><td>last </td></tr><tr><td class="pw">x </td><td class="pw"> y </td><td class="pw">z </td></tr></tbody></table><p>after</p></div>',
+        'cell \tmid \tlast\nx \t y \tz \n\nafter',
+      ),
+    ).toEqual([
+      ['cell', 'mid', 'last'],
+      ['x', ' y', 'z '],
+    ]);
+  });
+
+  test('a block that is not a cell is not asked about a space at its edge', () => {
+    // R5-FMT-2: asking every block about its edge spaces (for the cells'
+    // sake) pasted the space a pretty-printed `<li>first <code>x</code> </li>`
+    // ends with, which Firefox's plain text writes whether it was drawn or
+    // not. The auditor's Firefox copies.
+    const typed = (html: string, plain: string): string[] =>
+      blocksFromHtml(document, html, { plain }).map((block) => `${block.type}:${blockText(block)}`);
+
+    expect(
+      typed(
+        '<p id="first">before</p><ul><li><a href="https://x.test/">Link</a> </li><li>text <b>bold</b> </li><li>plain end </li><li><span>sp</span> </li></ul><p id="last">after</p>',
+        'before\n\n    Link\n    text bold\n    plain end\n    sp \n\nafter',
+      ),
+    ).toEqual([
+      'paragraph:before',
+      'bulleted_list:Link',
+      'bulleted_list:text bold',
+      'bulleted_list:plain end',
+      'bulleted_list:sp',
+      'paragraph:after',
+    ]);
+    expect(
+      typed(
+        '<p id="first">before</p><ol><li>first <code>x</code> </li></ol><p id="last">after</p>',
+        'before\n\n    first x \n\nafter',
+      ),
+    ).toEqual(['paragraph:before', 'numbered_list:first x', 'paragraph:after']);
+    expect(
+      typed(
+        '<p id="first">before</p><p>text <span>x</span> </p><h2>Title <small>v1</small> </h2><blockquote>q <i>i</i> </blockquote><p id="last">after</p>',
+        'before\n\ntext x\nTitle v1\n\n    q i \n\nafter',
+      ),
+    ).toEqual([
+      'paragraph:before',
+      'paragraph:text x',
+      'heading2:Title v1',
+      'quote:q i',
+      'paragraph:after',
+    ]);
+  });
+
+  test("a block's own edge spaces stand where the plain text has them", () => {
+    // The indentation of the line a block starts, and what ends its last
+    // line, are the block's when the plain text holds exactly them there.
+    expect(
+      read(
+        '<div id="s"><p>one</p><div class="pw">  indented  x</div><p class="pw">tail  </p><p>next</p></div>',
+        'one\n  indented  x\ntail  \n\nnext',
+      ),
+    ).toEqual(['one', '  indented  x', 'tail  ', 'next']);
+  });
+
+  test('a block read with no choice to make still moves the cursor on', () => {
+    // A code block's text is its own, but the paragraph after it with the
+    // same characters must be matched past it, not at it, or it takes the
+    // code's single space for its own double one.
+    expect(read('<div id="s"><pre>x y</pre><p class="pw">x  y</p></div>', 'x y\n\nx  y')).toEqual([
+      'x y',
+      'x  y',
+    ]);
+  });
+
+  test('a list item is matched past the indentation Firefox writes for it', () => {
+    expect(
+      read(
+        '<div id="s"><ul><li class="pw">one  two</li><li>three\n  four</li></ul></div>',
+        '    one  two\n    three four',
+      ),
+    ).toEqual(['one  two', 'three four']);
+  });
+});
+
+describe('code is collapsed unless something says it is drawn otherwise', () => {
+  // R3-FMT-1: a browser's default for `code`, `kbd` and `samp` is
+  // `white-space: normal`, so a page paragraph's source-wrapped
+  // `<code>npm\n      install</code>` is drawn on one line -- and Firefox
+  // pastes it with the plain text that says so. Only `<pre>` and
+  // `<textarea>` preserve by default; a stylesheet's pre-wrap code is told
+  // apart by the plain text, like any other element.
+  test("the auditor's paragraph, with Firefox's plain text", () => {
+    expect(
+      blocksFromHtml(
+        document,
+        '<div id="s"><p>Run <code>npm\n      install</code> now, then <code>a  b</code>.</p></div>',
+        { plain: 'Run npm install now, then a b.' },
+      ).map((block) => block.content),
+    ).toEqual([
+      [
+        { text: 'Run ' },
+        { text: 'npm install', marks: ['code'] },
+        { text: ' now, then ' },
+        { text: 'a b', marks: ['code'] },
+        { text: '.' },
+      ],
+    ]);
+  });
+
+  test.each(['kbd', 'samp'])('<%s> too', (tag) => {
+    expect(
+      blocksFromHtml(document, `<p>Press <${tag}>Ctrl\n   C</${tag}> to copy.</p>`, {
+        plain: 'Press Ctrl C to copy.',
+      }).map(blockText),
+    ).toEqual(['Press Ctrl C to copy.']);
+  });
+
+  test('code a stylesheet preserves keeps its spaces when the plain text shows them', () => {
+    expect(
+      blocksFromHtml(
+        document,
+        '<p>Run <code>npm\n      install</code> now, then <code>a  b</code>.</p>',
+        { plain: 'Run npm\n      install now, then a  b.' },
+      ).map(blockText),
+    ).toEqual(['Run npm\n      install now, then a  b.']);
+  });
+
+  test('<pre> still preserves with nothing to say so', () => {
+    expect(blocksFromHtml(document, '<pre>a  b\n  c</pre>').map(blockText)).toEqual(['a  b\n  c']);
+  });
+});
+
+describe('a block-level element styled by class is decided by the plain text', () => {
+  // R3-FMT-3: the plain-text check ran only for paragraphs, headings, quotes
+  // and list items, so the commonest pre-wrap of all -- a chat message or a
+  // comment, a `<div class>` -- still collapsed in Firefox.
+  test("the auditor's chat", () => {
+    expect(
+      blocksFromHtml(
+        document,
+        '<div id="s"><div class="msg"><b>Ann</b><div class="pw">first line\nsecond  line</div></div><div class="msg"><b>Bob</b><div class="pw">ok\n\nthanks</div></div></div>',
+        { plain: 'Ann\nfirst line\nsecond  line\nBob\nok\n\nthanks' },
+      ).map(blockText),
+    ).toEqual(['Ann', 'first line\nsecond  line', 'Bob', 'ok\n\nthanks']);
+  });
+
+  test.each(['div', 'section', 'article'])('<%s class="pw">', (tag) => {
+    expect(
+      blocksFromHtml(document, `<${tag} class="pw">first line\nsecond  line</${tag}>`, {
+        plain: 'first line\nsecond  line',
+      }).map(blockText),
+    ).toEqual(['first line\nsecond  line']);
+  });
+
+  test('<dd class="pw">', () => {
+    expect(
+      blocksFromHtml(document, '<dl><dt>k</dt><dd class="pw">first line\nsecond  line</dd></dl>', {
+        plain: 'k\nfirst line\nsecond  line',
+      }).map(blockText),
+    ).toEqual(['k', 'first line\nsecond  line']);
+  });
+
+  test('a source-wrapped <div> still collapses', () => {
+    expect(
+      blocksFromHtml(document, '<div>first line\n    second  line</div>', {
+        plain: 'first line second line',
+      }).map(blockText),
+    ).toEqual(['first line second line']);
+  });
+});
+
+describe('a lone converted space is an ordinary space', () => {
+  // R3-FMT-2: WebKit writes a space it did not draw -- the last of a line, the
+  // last of a block -- as a no-break space in `Apple-converted-space`. Every
+  // one was kept, so these arrived with trailing spaces and exported as
+  // `&#32;`. Only a run of them, or one beside another space, is drawn.
+  const style = 'font-size: medium; white-space: normal; color: rgb(0, 0, 0);';
+
+  test("the auditor's line ends and heading", () => {
+    expect(
+      blocksFromHtml(
+        document,
+        `<head><meta charset="UTF-8"></head><p style="${style}">line one<span class="Apple-converted-space">\u00a0</span><br>line two<span class="Apple-converted-space">\u00a0</span></p><h2 style="${style}">Title<span class="Apple-converted-space">\u00a0</span></h2><p style="${style}">x</p>`,
+      ).map(blockText),
+    ).toEqual(['line one\nline two', 'Title', 'x']);
+  });
+
+  test('at the end of bold, and between words', () => {
+    expect(
+      blocksFromHtml(
+        document,
+        `<p style="${style}">a<span class="Apple-converted-space">\u00a0</span><b>bold<span class="Apple-converted-space">\u00a0</span></b></p><p style="${style}">y</p>`,
+      ).map((block) => block.content),
+    ).toEqual([[{ text: 'a ' }, { text: 'bold', marks: ['bold'] }], [{ text: 'y' }]]);
+  });
+
+  test('in a table cell', () => {
+    expect(
+      blocksFromHtml(
+        document,
+        '<table><tbody><tr><td>cell<span class="Apple-converted-space">\u00a0</span></td><td>two</td></tr></tbody></table>',
+      )[0]?.rows,
+    ).toEqual([[[{ text: 'cell' }], [{ text: 'two' }]]]);
+  });
+
+  test('beside a typed space it is the second space', () => {
+    expect(
+      blocksFromHtml(document, '<p>x <span class="Apple-converted-space">\u00a0</span>y</p>').map(
+        blockText,
+      ),
+    ).toEqual(['x  y']);
+  });
+
+  // R9-RV-FMT-4: a drag begun after `Sentence.` in `Sentence.  Next words`
+  // selects the drawn space, and WebKit writes it as a lone converted space
+  // at the copy's very start. Read as one, it was a space that starts a line
+  // and collapsed, though a space at the paste's edge stays -- and stays from
+  // Chromium's copy of the same drag. The real copies, by a mouse drag.
+  const webkit =
+    'color: rgb(17, 17, 17); font-family: system-ui, sans-serif; font-size: medium; font-style: normal; font-variant-caps: normal; font-weight: 400; letter-spacing: normal; orphans: 2; text-align: start; text-indent: 0px; text-transform: none; white-space: normal; widows: 2; word-spacing: 0px; -webkit-tap-highlight-color: rgba(0, 0, 0, 0.4); -webkit-text-stroke-width: 0px; background-color: rgb(255, 255, 255); text-decoration: none;';
+  const chromium =
+    'color: rgb(17, 17, 17); font-family: system-ui, sans-serif; font-size: medium; font-style: normal; font-variant-ligatures: normal; font-variant-caps: normal; font-weight: 400; letter-spacing: normal; orphans: 2; text-align: start; text-indent: 0px; text-transform: none; widows: 2; word-spacing: 0px; -webkit-text-stroke-width: 0px; white-space: normal; background-color: rgb(255, 255, 255); text-decoration-thickness: initial; text-decoration-style: initial; text-decoration-color: initial;';
+
+  test.each([
+    [
+      'WebKit',
+      `<!DOCTYPE html><head></head><p id="a" style="${webkit}"><span class="Apple-converted-space">\u00a0</span>Next words</p><p id="b" style="${webkit}">Second</p>`,
+    ],
+    [
+      'Chromium',
+      `<p id="a" style="${chromium}"><span>\u00a0</span>Next words</p><p id="b" style="${chromium}">Second</p>`,
+    ],
+  ])('%s: the space a drag began at, at the start of a copy, stays', (_engine, html) => {
+    const blocks = blocksFromHtml(document, html, { plain: ' Next words\n\nSecond' });
+
+    expect(blocks.map(blockText).map((text) => text.replace(/\u00a0/g, ' '))).toEqual([
+      ' Next words',
+      'Second',
+    ]);
+  });
+
+  test('anywhere but the start of a copy a lone one still starts its line unseen', () => {
+    expect(
+      blocksFromHtml(
+        document,
+        `<p style="${style}">before</p><p style="${style}"><span class="Apple-converted-space">\u00a0</span>after</p>`,
+      ).map(blockText),
+    ).toEqual(['before', 'after']);
+  });
+});
+
+describe('a Word list paragraph is an item only when Word numbered it', () => {
+  // R3-FMT-6: Word writes "List Paragraph" style without numbering as a bare
+  // `MsoListParagraph` with no `mso-list`. That fell to the heuristic for
+  // WebKit's sanitised lists, which took any first word for a marker.
+  const head = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word"><head><meta name=Generator content="Microsoft Word 15"><style>p.MsoListParagraph, li.MsoListParagraph {margin-top:0in;margin-right:0in;margin-bottom:0in;margin-left:.5in;mso-add-space:auto;}</style></head><body lang=EN-US><!--StartFragment-->`;
+  const tail = '<!--EndFragment--></body></html>';
+
+  test("the auditor's raw Word paste", () => {
+    expect(
+      blocksFromHtml(
+        document,
+        `${head}<p class=MsoNormal>Steps for the rig:</p><p class=MsoListParagraphCxSpFirst>Caution:&nbsp; never touch the blade.</p><p class=MsoListParagraphCxSpLast>Results.&nbsp; The test passed.</p>${tail}`,
+      ).map((block) => [block.type, blockText(block)]),
+    ).toEqual([
+      ['paragraph', 'Steps for the rig:'],
+      ['paragraph', 'Caution:\u00a0 never touch the blade.'],
+      ['paragraph', 'Results.\u00a0 The test passed.'],
+    ]);
+  });
+
+  test("in Word's own HTML, a number typed by hand is text too", () => {
+    // Word numbers an item with `mso-list`; without it, `1.` is what was typed.
+    expect(
+      blocksFromHtml(
+        document,
+        `${head}<p class=MsoListParagraph>1.&nbsp; Typed, not numbered.</p>${tail}`,
+      ).map((block) => [block.type, blockText(block)]),
+    ).toEqual([['paragraph', '1.\u00a0 Typed, not numbered.']]);
+  });
+
+  test.each([
+    ['Caution:\u00a0 do not touch.'],
+    ['Results.\u00a0 The test passed.'],
+    ['Note\u00a0 this.'],
+    ['Example:\u00a0 foo'],
+  ])('sanitised, %j keeps its first word', (text) => {
+    expect(
+      blocksFromHtml(
+        document,
+        `<p class=MsoListParagraphCxSpMiddle style="margin-left: 0.5in;">${text}</p>`,
+      ).map((block) => [block.type, blockText(block)]),
+    ).toEqual([['paragraph', text]]);
+  });
+});
+
+describe('Word numbers without a full stop, and picture bullets', () => {
+  // R3-FMT-7.
+  const item = (marker: string, text: string, level = 1): string =>
+    `<p class=MsoListParagraphCxSpFirst style='margin-left:${0.5 * level}in;text-indent:-.25in;mso-list:l0 level${level} lfo1'><![if !supportLists]><span style='mso-list:Ignore'>${marker}<span style='font:7.0pt "Times New Roman"'>&nbsp;&nbsp;&nbsp; </span></span><![endif]>${text}</p>`;
+
+  test("the auditor's 1 / 1.1 / 1.1.1 and a legal 1.01", () => {
+    expect(
+      blocksFromHtml(
+        document,
+        item('1', 'One') + item('1.1', 'One one', 2) + item('1.1.1', 'Deep', 3) + item('1.01', 'C'),
+      ).map((block) => [block.type, block.depth, blockText(block)]),
+    ).toEqual([
+      ['numbered_list', 0, 'One'],
+      ['numbered_list', 1, 'One one'],
+      ['numbered_list', 2, 'Deep'],
+      ['numbered_list', 0, 'C'],
+    ]);
+  });
+
+  test('a picture bullet beside a real picture: the bullet is the marker, the picture an image', () => {
+    expect(
+      blocksFromHtml(
+        document,
+        `<p class=MsoListParagraph style='text-indent:-.25in;mso-list:l0 level1 lfo1'><span style='mso-list:Ignore'><img src="https://a.test/b.gif" alt="*">&nbsp;&nbsp; </span>Item <img src="https://a.test/pic.png" alt="pic"> one</p>`,
+      ).map((block) => [block.type, block.depth, block.src ?? blockText(block)]),
+    ).toEqual([
+      ['bulleted_list', 0, 'Item one'],
+      ['image', 1, 'https://a.test/pic.png'],
+    ]);
+  });
+
+  test('a picture bullet WebKit has sanitised is still a bullet', () => {
+    // An https bullet, which `sanitizeImageUrl` keeps: a `file:///` one is
+    // dropped as an image anyway, so it could not tell a bullet skipped as
+    // the marker from one read as a picture (R4-FMT-5). With Word's 7pt
+    // spacer after it, as WebKit delivers one (style shortened).
+    expect(
+      blocksFromHtml(
+        document,
+        '<p class=MsoListParagraph style="margin-left: 0.5in; text-indent: -0.25in;"><span><img width="12" height="12" src="https://a.test/clip_image001.gif" alt="*"><span style="font-size: 7pt; font-family: Times New Roman;">&nbsp; <span class="Apple-converted-space">&nbsp;</span></span></span>Item one</p><p class=MsoListParagraph style="margin-left: 0.5in; text-indent: -0.25in;"><span><img style="width: 9pt; height: 9pt;" src="https://a.test/clip_image001.gif" alt="*"><span style="font-size: 7pt;">&nbsp;&nbsp; </span></span>Item two</p>',
+      ).map((block) => [block.type, block.depth, block.src ?? blockText(block)]),
+    ).toEqual([
+      ['bulleted_list', 0, 'Item one'],
+      ['bulleted_list', 0, 'Item two'],
+    ]);
+  });
+
+  test('a sanitised paragraph that starts with a full-size picture keeps it', () => {
+    // R4-FMT-3: any picture first was a bullet, so a screenshot and its
+    // caption became a bullet reading "Figure 1", the screenshot gone. A
+    // bullet is bullet-sized; anything larger, or of no stated size, is
+    // content.
+    const read = (html: string): Array<[string, string]> =>
+      blocksFromHtml(document, html).map((block) => [block.type, block.src ?? blockText(block)]);
+
+    expect(
+      read(
+        '<p class=MsoListParagraph><img width=400 height=200 src="https://a.test/400/200" alt="screenshot">&nbsp;&nbsp;Figure 1</p>',
+      ),
+    ).toContainEqual(['image', 'https://a.test/400/200']);
+    expect(
+      read(
+        '<p class="MsoListParagraph"><img src="https://x.test/shot.png" width=600>&nbsp;&nbsp;Figure 1: the dialog</p>',
+      ),
+    ).toContainEqual(['image', 'https://x.test/shot.png']);
+    expect(
+      read(
+        '<p class="MsoListParagraph"><img src="https://x.test/shot.png" style="width: 3in">&nbsp;&nbsp;Figure 2</p>',
+      ),
+    ).toContainEqual(['image', 'https://x.test/shot.png']);
+    expect(
+      read(
+        '<p class="MsoListParagraph"><img src="https://x.test/shot.png">&nbsp;&nbsp;Figure 3</p>',
+      ),
+    ).toContainEqual(['image', 'https://x.test/shot.png']);
+    for (const html of [
+      '<p class=MsoListParagraph><img width=400 height=200 src="https://a.test/400/200">&nbsp;&nbsp;Figure 1</p>',
+    ]) {
+      expect(read(html).map(([type]) => type)).not.toContain('bulleted_list');
+    }
+  });
+});
+
+describe("a sanitised Word marker is punctuated, or has Word's spacer after it", () => {
+  // R4-FMT-4: a bare number was a marker in WebKit's sanitised Word HTML too,
+  // so "2024   Annual results" became a numbered item reading "Annual
+  // results"; and the characters that stand in for a Wingdings or Symbol
+  // bullet (`o`, `v`, `q`, `n`, `*`, `-`, `§`, `Ø`, `ü`) ate the first
+  // character of a paragraph with two spaces after it. Either is a marker only
+  // with Word's spacer after it: the 7pt span WebKit keeps, as it delivered
+  // the auditor's Word paste (style shortened).
+  const read = (html: string): Array<[string, string]> =>
+    blocksFromHtml(document, html).map((block) => [block.type, blockText(block)]);
+  const item = (marker: string, text: string): string =>
+    `<p class="MsoListParagraphCxSpMiddle" style="white-space: normal; margin-left: 36pt; text-indent: -18pt;"><span>${marker}<span style="font-style: normal; font-weight: normal; font-size: 7pt; line-height: normal; font-family: Times New Roman;">      <span class="Apple-converted-space"> </span></span></span>${text}<o:p></o:p></p>`;
+
+  test("the auditor's year", () => {
+    expect(
+      read('<p class=MsoListParagraph>2024&nbsp;&nbsp;&nbsp; Annual results<o:p></o:p></p>'),
+    ).toEqual([['paragraph', '2024\u00a0\u00a0\u00a0 Annual results']]);
+    expect(read('<p class="MsoListParagraph">2024&nbsp;&nbsp; Annual results</p>')).toEqual([
+      ['paragraph', '2024\u00a0\u00a0 Annual results'],
+    ]);
+  });
+
+  test.each(['1', '1.1', '1.1.1', '1.01'])("%s with Word's spacer is a number", (marker) => {
+    expect(read(item(marker, 'Item text'))).toEqual([['numbered_list', 'Item text']]);
+  });
+
+  test.each(['1.', '1.1.', '(2)', '10.2.3.'])('%s is a number either way', (marker) => {
+    expect(
+      read(
+        `<p class="MsoListParagraph" style="margin-left:36.0pt;text-indent:-18pt">${marker}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Item text</p>`,
+      ),
+    ).toEqual([['numbered_list', 'Item text']]);
+    expect(read(item(marker, 'Item text'))).toEqual([['numbered_list', 'Item text']]);
+  });
+
+  // R5-FMT-4: a letter or a roman numeral with its punctuation needed no
+  // spacer, so an unnumbered List Paragraph lost its first word. Real Word
+  // lists always carry the spacer (the auditor's WebKit paste of a Word
+  // `a.` and `iv.` list did), so it is required for these too.
+  test.each(['a.', 'a)', '(iv)', 'iv.', 'viii.'])("%s with Word's spacer is a number", (marker) => {
+    expect(read(item(marker, 'Item text'))).toEqual([['numbered_list', 'Item text']]);
+  });
+
+  test.each([
+    ['Yes.&nbsp; We agree.', 'Yes.  We agree.'],
+    ['Dr.&nbsp; Smith said so.', 'Dr.  Smith said so.'],
+    ['Mild.&nbsp; Then add salt.', 'Mild.  Then add salt.'],
+    ['(c)&nbsp; 2024 Acme', '(c)  2024 Acme'],
+    ['a)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Item text', 'a)       Item text'],
+  ])('an unnumbered List Paragraph %s keeps its first word', (html, text) => {
+    // As WebKit delivered the auditor's paste: the class, the indent, and the
+    // typed `&nbsp; ` (style shortened).
+    expect(
+      read(
+        `<p class="MsoListParagraph" style="white-space: normal; margin-left: 36pt; text-indent: -18pt;">${html}<o:p></o:p></p>`,
+      ),
+    ).toEqual([['paragraph', text]]);
+  });
+
+  test('an icon a List Paragraph starts with, with no spacer after it, is a picture', () => {
+    // The same paste's `uPic`: a 16px icon and two typed spaces. A picture
+    // bullet carries Word's spacer as a lettered marker does.
+    const blocks = blocksFromHtml(
+      document,
+      '<p class="MsoListParagraph" style="white-space: normal; margin-left: 36pt; text-indent: -18pt;"><img width="16" height="16" src="https://picsum.photos/16" alt="icon">&nbsp; Icon led note<o:p></o:p></p>',
+    );
+
+    expect(blocks.map((block) => block.type)).not.toContain('bulleted_list');
+    expect(blocks.map((block) => block.src ?? blockText(block))).toContain(
+      'https://picsum.photos/16',
+    );
+  });
+
+  test.each(['o', 'v', 'q', 'n', '*', '-', '§', 'Ø', 'ü'])(
+    "%s with Word's spacer is a bullet",
+    (marker) => {
+      expect(read(item(marker, 'Item text'))).toEqual([['bulleted_list', 'Item text']]);
+    },
+  );
+
+  test("Word's spacer as Word writes it after a Wingdings bullet", () => {
+    // `&nbsp; ` -- the very characters two typed spaces make.
+    expect(
+      read(
+        '<p class="MsoListParagraph" style="margin-left: 108pt;"><span style="font-family: Wingdings;"><span>§<span style="font: 7.0pt &quot;Times New Roman&quot;">&nbsp; </span></span></span>Deeper</p>',
+      ),
+    ).toEqual([['bulleted_list', 'Deeper']]);
+  });
+
+  test.each(['·', '•'])('%s is a bullet either way', (marker) => {
+    expect(
+      read(
+        `<p class="MsoListParagraph" style="margin-left:36.0pt;text-indent:-18pt">${marker}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Item text</p>`,
+      ),
+    ).toEqual([['bulleted_list', 'Item text']]);
+  });
+
+  test.each([
+    ['o&nbsp;&nbsp;clock', 'o\u00a0\u00a0clock'],
+    ['o&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; clock', 'o\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0 clock'],
+    ['n&nbsp; times', 'n\u00a0 times'],
+    ['§&nbsp; 12 applies', '§\u00a0 12 applies'],
+    ['-&nbsp;&nbsp;5 degrees', '-\u00a0\u00a05 degrees'],
+    ['7&nbsp;&nbsp; <span style="font-size: 7pt">days</span>', '7\u00a0\u00a0 days'],
+  ])('%s keeps its first character', (html, text) => {
+    expect(read(`<p class="MsoListParagraph">${html}</p>`)).toEqual([['paragraph', text]]);
+  });
+
+  test('a bare number in raw Word HTML is a number', () => {
+    expect(
+      read(
+        `<p class=MsoListParagraphCxSpFirst style="margin-left:36.0pt;text-indent:-18.0pt;mso-list:l0 level1 lfo1"><span style="mso-list:Ignore">2024<span style="font:7.0pt">&nbsp;&nbsp;&nbsp; </span></span>Annual results</p>`,
+      ),
+    ).toEqual([['numbered_list', 'Annual results']]);
+  });
+});
+
+describe("a preserved block's last newline is taken only if its text ends in one", () => {
+  // R4-FMT-1: the check found the last source text a block holds, and when
+  // that was the formatting after a child block (`<p>abc</p>\n</td>`) -- text
+  // the walk had already dropped -- it still took the block's last character,
+  // which was a letter. These are the auditor's clipboards, Chromium's with
+  // its computed style shortened to the declaration that matters.
+  const pw = 'white-space: pre-wrap;';
+  const cells = (blocks: Block[]): string[][] | undefined =>
+    blocks
+      .find((block) => block.type === 'table')
+      ?.rows?.map((row) => row.map((cell) => richToPlainText(cell)));
+  const items = (blocks: Block[]): Array<[string, number, string]> =>
+    blocks.map((block) => [block.type, block.depth, blockText(block)]);
+
+  test('a table in a pre-wrap div, as Chromium writes it', () => {
+    expect(
+      cells(
+        blocksFromHtml(
+          document,
+          `<div style="${pw}"><table><tbody><tr><td><p>Name</p>\n</td><td><p>Value</p>\n</td></tr></tbody></table></div><p style="white-space: normal;">after</p>`,
+        ),
+      ),
+    ).toEqual([['Name', 'Value']]);
+  });
+
+  test('the same table as Firefox writes it, with its plain text', () => {
+    expect(
+      cells(
+        blocksFromHtml(
+          document,
+          '<div id="s"><div style="white-space:pre-wrap"><table>\n<tbody><tr>\n<td><p>Name</p>\n</td>\n<td><p>Value</p>\n</td>\n</tr>\n</tbody></table></div><p>after</p></div>',
+          { plain: '\n\nName\n\n\n\t\n\nValue\n\n\n\nafter' },
+        ),
+      ),
+    ).toEqual([['Name', 'Value']]);
+  });
+
+  test('a cell a stylesheet makes pre-wrap, its paragraph and a newline after it', () => {
+    expect(
+      cells(
+        blocksFromHtml(
+          document,
+          `<table><tr><td style="${pw}"><p>abc</p>\n</td><td style="${pw}">def\n</td></tr></table>`,
+        ),
+      ),
+    ).toEqual([['abc', 'def']]);
+  });
+
+  test('loose list items and a quote in a pre-wrap div', () => {
+    expect(
+      items(
+        blocksFromHtml(
+          document,
+          `<ul style="${pw}"><li><p>alpha</p>\n</li>\n<li><p>beta</p>\n</li>\n</ul><span style="${pw} display: inline !important;">\n</span><blockquote style="${pw}"><p>quoted</p>\n</blockquote><p style="${pw}">after</p>`,
+        ),
+      ),
+    ).toEqual([
+      ['bulleted_list', 0, 'alpha'],
+      ['bulleted_list', 0, 'beta'],
+      ['quote', 0, 'quoted'],
+      ['paragraph', 0, 'after'],
+    ]);
+  });
+
+  test('an item whose nested list is followed by a newline', () => {
+    expect(
+      items(
+        blocksFromHtml(
+          document,
+          '<ul><li style="white-space:pre-wrap">foo<ul><li>bar</li></ul>\n</li></ul>',
+        ),
+      ),
+    ).toEqual([
+      ['bulleted_list', 0, 'foo'],
+      ['bulleted_list', 1, 'bar'],
+    ]);
+  });
+
+  test("an item's own newline before its nested list still draws no line", () => {
+    // Measured in Chromium, Firefox and WebKit: `foo\n` before a block child
+    // is one line high, `foo\n\n` two. So the newline is still the end of the
+    // text when a block follows it -- with or without formatting after that.
+    expect(
+      items(
+        blocksFromHtml(
+          document,
+          `<div style="${pw}"><ul><li>foo\n<ul>\n<li>bar</li>\n</ul>\n</li>\n<li>baz</li>\n</ul></div>`,
+        ),
+      ),
+    ).toEqual([
+      ['bulleted_list', 0, 'foo'],
+      ['bulleted_list', 1, 'bar'],
+      ['bulleted_list', 0, 'baz'],
+    ]);
+    expect(
+      blocksFromHtml(
+        document,
+        `<ul><li style="${pw}">foo\n<ul><li>bar</li></ul></li><li style="${pw}">two\n\n<ul><li>bar</li></ul></li></ul>`,
+      )
+        .filter((block) => block.depth === 0)
+        .map(blockText),
+    ).toEqual(['foo', 'two\n']);
+  });
+});
+
+// Chromium and WebKit mark a selection that begins at the end of a line (a drag
+// started just past the line above) with a `<br class="Apple-interchange-newline">`
+// at the start of the copied fragment, and one that ends at a line's start with
+// one at its end. It stands for the line break the selection crossed, outside
+// what the reader selected: read as content, the paste opened with an empty line.
+// Taken from a real Chromium copy (drag from the end of one paragraph across the
+// next).
+describe('an interchange newline at either edge of a copy is not content', () => {
+  const read = (html: string) => blocksFromHtml(document, html).map((block) => blockText(block));
+
+  test('at the start, before inline text', () => {
+    expect(
+      read(
+        '<meta charset="utf-8"><br class="Apple-interchange-newline"><span style="color: rgb(17, 17, 17);">beta two</span>',
+      ),
+    ).toEqual(['beta two']);
+  });
+
+  test('at the start, before a block', () => {
+    expect(read('<br class="Apple-interchange-newline"><p>beta two</p>')).toEqual(['beta two']);
+  });
+
+  test('at the end, after a block', () => {
+    expect(read('<p>alpha one</p><br class="Apple-interchange-newline">')).toEqual(['alpha one']);
+  });
+
+  test('at the end, after inline text', () => {
+    expect(read('<span>alpha one</span><br class="Apple-interchange-newline">')).toEqual([
+      'alpha one',
+    ]);
+  });
+
+  test('a break of that class inside the text is still a break', () => {
+    expect(read('<p>one<br class="Apple-interchange-newline">two</p>')).toEqual(['one\ntwo']);
+  });
+
+  test('an ordinary leading break is not taken for it', () => {
+    expect(read('<p><br>after a break</p>')).toEqual(['\nafter a break']);
+  });
+
+  // Firefox writes the block the selection left, emptied, and nothing for it
+  // in its plain text (a real Firefox copy of the same drag).
+  const readWith = (html: string, plain?: string) =>
+    blocksFromHtml(document, html, plain === undefined ? {} : { plain }).map((block) =>
+      blockText(block),
+    );
+
+  test("Firefox's emptied block at the start goes when its plain text has no line for it", () => {
+    expect(readWith('<p id="s1"></p><p id="s2">beta two</p>', 'beta two')).toEqual(['beta two']);
+  });
+
+  test('and at the end', () => {
+    expect(readWith('<p>alpha one</p><p></p>', 'alpha one')).toEqual(['alpha one']);
+  });
+
+  // The plain text is not asked: on a pretty-printed page Firefox's starts
+  // with the source's own newlines (R5-FMT-3b). An empty block draws no line.
+  test('an empty block at an edge goes whatever the plain text says', () => {
+    expect(readWith('<p></p><p>beta two</p>', '\nbeta two')).toEqual(['beta two']);
+    expect(readWith('<p></p><p>beta two</p>')).toEqual(['beta two']);
+  });
+
+  test('a block with a break in it is a line, and stays', () => {
+    expect(readWith('<p><br></p><p>beta two</p>', '\nbeta two')).toEqual(['', 'beta two']);
+  });
+
+  test('one that declares its own white-space stays', () => {
+    expect(readWith('<p style="white-space: pre-wrap"></p><p>beta two</p>')).toEqual([
+      '',
+      'beta two',
+    ]);
+  });
+
+  test("this editor's HTML from before its writer marked every block keeps its empty lines", () => {
+    // Recognised by its `data-neditor-*` marks, or asked for: an empty
+    // paragraph there is one the writer wrote, with no `white-space` to say so.
+    const legacy = '<p></p><p data-neditor-depth="0">x</p><p></p>';
+
+    expect(readWith(legacy)).toEqual(['', 'x', '']);
+    expect(
+      blocksFromHtml(document, '<p></p><p>x</p>', { whitespace: 'preserve' }).map(blockText),
+    ).toEqual(['', 'x']);
+  });
+
+  test('a fragment of nothing but empty blocks is kept', () => {
+    expect(readWith('<p></p>')).toEqual(['']);
+    expect(readWith('<p></p><p></p>', '\n')).toEqual(['', '']);
+  });
+
+  test("this editor's own empty paragraph is a line the reader copied", () => {
+    const source: Block[] = [
+      { id: 'a', type: 'paragraph', depth: 0, content: [] },
+      { id: 'b', type: 'paragraph', depth: 0, content: [{ text: 'x' }] },
+      { id: 'c', type: 'paragraph', depth: 0, content: [] },
+    ];
+
+    expect(readWith(blocksToHtml(document, source), 'x')).toEqual(['', 'x', '']);
+  });
+});
+
+describe('the line break a selection crossed is not content, wherever the browser writes it', () => {
+  // R5-FMT-3. The payloads are the auditor's, copied by a real mouse drag in
+  // each engine (Chromium's and WebKit's computed `style` shortened to the
+  // `white-space` they declare, which is what the reader asks of it).
+  const read = (html: string, plain?: string) =>
+    blocksFromHtml(document, html, plain === undefined ? {} : { plain }).map(
+      (block) => `${block.type}:${blockText(block)}`,
+    );
+  const normal = 'color: rgb(17, 17, 17); font-size: medium; white-space: normal;';
+
+  test('Chromium: inside the first block, when the drag reaches a second (a)', () => {
+    expect(
+      read(
+        `<p id="s2" style="${normal}"><br class="Apple-interchange-newline">beta two</p><p id="s3" style="${normal}">gam</p>`,
+        '\nbeta two\n\ngam',
+      ),
+    ).toEqual(['paragraph:beta two', 'paragraph:gam']);
+  });
+
+  test('Chromium and WebKit: inside a list item (a)', () => {
+    expect(
+      read(
+        `<ul style="${normal}"><li id="s2"><br class="Apple-interchange-newline">beta two</li></ul>`,
+        '\nbeta two',
+      ),
+    ).toEqual(['bulleted_list:beta two']);
+    expect(
+      read(
+        `<!DOCTYPE html><ul style="${normal}"><li><p id="s2"><br class="Apple-interchange-newline">para li two</p></li><li><p id="s3">par</p></li></ul>`,
+        '\npara li two\n\npar',
+      ),
+    ).toEqual(['bulleted_list:para li two', 'bulleted_list:par']);
+  });
+
+  test('Chromium and WebKit: inside the link a block starts with (a)', () => {
+    expect(
+      read(
+        `<a href="https://x.test/" style="${normal}"><br class="Apple-interchange-newline">beta</a><span style="${normal}"> two</span>`,
+        '\nbeta two',
+      ),
+    ).toEqual(['paragraph:beta two']);
+    expect(
+      read(
+        `<!DOCTYPE html><head><meta charset="UTF-8"></head><a href="https://x.test/" style="${normal}"><br class="Apple-interchange-newline">beta</a><span style="${normal}"><span class="Apple-converted-space"> </span>two</span>`,
+        '\nbeta two',
+      ),
+    ).toEqual(['paragraph:beta two']);
+  });
+
+  test('Chromium: a drag from the end of a line across an empty one keeps the empty one', () => {
+    expect(
+      read(
+        `<p id="e1" style="${normal}"><br class="Apple-interchange-newline"><br></p><p id="s2" style="${normal}">beta</p>`,
+        '\n\n\nbeta',
+      ),
+    ).toEqual(['paragraph:', 'paragraph:beta']);
+  });
+
+  test('Chromium and WebKit: the item a drag ended at the start of, inside its list', () => {
+    expect(
+      read(
+        `<ul style="${normal}"><li><p id="s2">para li two</p></li><li></li></ul><br class="Apple-interchange-newline">`,
+        'para li two\n\n',
+      ),
+    ).toEqual(['bulleted_list:para li two']);
+    expect(
+      read(
+        `<!DOCTYPE html><ul style="${normal}"><li><li><p id="s2">para li two</p></li><li></p></li></ul><br class="Apple-interchange-newline">`,
+        'para li two\n\n',
+      ),
+    ).toEqual(['bulleted_list:para li two']);
+  });
+
+  test('Firefox on a pretty-printed page, whose plain text starts with newlines (b)', () => {
+    expect(
+      read('<p id="s1"></p>\n    <p id="s2">\n      beta two\n    </p>', '\n\nbeta two '),
+    ).toEqual(['paragraph:beta two']);
+    expect(read('<li id="s1"></li>\n  <li id="s2">\n    beta two\n  </li>', '\nbeta two ')).toEqual(
+      ['bulleted_list:beta two'],
+    );
+  });
+
+  test('Firefox: a drag ended at the start of the line below (c)', () => {
+    expect(read('<p id="s2">beta two</p><p id="s3"></p>', 'beta two\n\n')).toEqual([
+      'paragraph:beta two',
+    ]);
+    expect(read('<p id="s2">beta two</p><h3 id="s3"></h3>', 'beta two\n')).toEqual([
+      'paragraph:beta two',
+    ]);
+    expect(read('<li id="s2">beta two</li><li id="s3"></li>', 'beta two\n')).toEqual([
+      'bulleted_list:beta two',
+    ]);
+  });
+
+  test('Firefox: from the end of a line whose next line is empty (d)', () => {
+    expect(read('<p id="s1"></p><p id="e1"><br></p><p id="s2">beta</p>', '\nbeta')).toEqual([
+      'paragraph:',
+      'paragraph:beta',
+    ]);
+  });
+
+  test('Firefox: an emptied block inside the item it was in', () => {
+    expect(
+      read('<li><p id="s1"></p></li><li><p id="s2">para li two</p></li>', 'para li two'),
+    ).toEqual(['bulleted_list:para li two']);
+  });
+
+  test("this editor's own copy, sanitised cross-origin by WebKit (e)", () => {
+    // The empty list items either side of `mid` arrive as interchange breaks,
+    // the first inside the item it was sanitised into.
+    const pre = 'font-size: medium; white-space: pre-wrap;';
+
+    expect(
+      read(
+        `<li style="${pre}"><br class="Apple-interchange-newline">mid</li><br class="Apple-interchange-newline" style="color: rgb(0, 0, 0); white-space: normal;"><br class="Apple-interchange-newline">`,
+        '-\n\n- mid\n\n-',
+      ),
+    ).toEqual(['bulleted_list:mid']);
+  });
+});
+
+describe("a code block's last vertical tab or form feed adds no line", () => {
+  // R5-FMT-5: R4-FMT-6c taught every other block that a vertical tab or form
+  // feed ending its text ends its last line, as a newline there does; a code
+  // block still read `<pre>a\v</pre>` as `a\n`, while `<pre>code\n</pre>`
+  // read `code`. The auditor's cases.
+  const code = (html: string): string[] =>
+    blocksFromHtml(document, html).map((block) => `${block.type}:${blockText(block)}`);
+
+  test.each([
+    ['<pre><code>a\u000b</code></pre>', 'code:a'],
+    ['<pre><code>a\fb\f</code></pre>', 'code:a\nb'],
+    ['<pre>a\u000b</pre>', 'code:a'],
+    ['<pre>code\n</pre>', 'code:code'],
+    ['<pre>a\u000b\u000b</pre>', 'code:a\n'],
+    ['<pre>a&#13;</pre>', 'code:a'],
+    ['<pre>a\u000bb</pre>', 'code:a\nb'],
+  ])('%j reads %j', (html, expected) => {
+    expect(code(html)).toEqual([expected]);
+  });
+});
+
+describe('a block emptied by a selection is empty whatever inline markup it kept', () => {
+  // R6-FMT-1: Firefox writes the block a selection left with the inline
+  // elements it held still in it, or with the source's indentation, and only
+  // a bare `<p></p>` was recognised -- so a paste mid-block split the
+  // paragraph, and the reader's own text was retyped as a heading or a code
+  // block. The auditor's Firefox copies, by a real mouse drag.
+  const read = (html: string, plain?: string) =>
+    blocksFromHtml(document, html, plain === undefined ? {} : { plain }).map(
+      (block) => `${block.type}:${blockText(block)}`,
+    );
+
+  test.each([
+    // From the end of a paragraph that ends in a link.
+    [
+      '<p id="s1"><a href="https://x.test/"></a></p>\n<p id="s2">Install </p>',
+      '\n\nInstall ',
+      ['paragraph:Install '],
+    ],
+    // To the start of a heading.
+    [
+      '<p id="s2"> restart.</p>\n<h2 id="s3"><span></span></h2>',
+      ' restart.\n',
+      ['paragraph: restart.'],
+    ],
+    // To the start of a code block.
+    [
+      '<h2 id="s3"><span>Configuration</span></h2>\n<pre id="s4"></pre>',
+      'Configuration\n\n',
+      ['heading2:Configuration'],
+    ],
+    ['<p id="s1"><span></span></p><p id="s2"><span>beta</span></p>', 'beta', ['paragraph:beta']],
+    ['<p id="s1"><b></b></p><p id="s2"><b>beta</b></p>', 'beta', ['paragraph:beta']],
+    [
+      '<p id="s1"><b>one</b></p><p id="s2">beta <i>two</i></p><p id="s3"><i></i></p>',
+      'one\n\nbeta two\n\n',
+      ['paragraph:one', 'paragraph:beta two'],
+    ],
+    [
+      '<li id="s1"><span>one</span></li><li id="s2"><span>beta two</span></li><li id="s3"><span></span></li>',
+      'one\nbeta two\n',
+      ['bulleted_list:one', 'bulleted_list:beta two'],
+    ],
+    [
+      '<blockquote id="s1"><span></span></blockquote><blockquote id="s2"><span>beta</span></blockquote>',
+      '    beta',
+      ['quote:beta'],
+    ],
+    [
+      '<div id="s1"><span style="font-size:14px"></span></div><div id="s2"><span style="font-size:14px">beta</span></div>',
+      'beta',
+      ['paragraph:beta'],
+    ],
+    [
+      '<h2 id="s1"><span>one</span></h2><p id="s2">beta two</p><h2 id="s3"><span></span></h2>',
+      'one\n\nbeta two\n',
+      ['heading2:one', 'paragraph:beta two'],
+    ],
+    // Pretty-printed: the emptied block keeps the source's indentation.
+    [
+      '<p id="s1"><span></span>\n  </p>\n  <p id="s2">\n    <span>beta</span></p>',
+      '\n\nbeta',
+      ['paragraph:beta'],
+    ],
+    ['<p id="s1">a one\n  </p>\n  <p id="s2">\n    </p>', 'a one\n\n', ['paragraph:a one']],
+  ])('%j reads %j', (html, plain, expected) => {
+    expect(read(html, plain)).toEqual(expected);
+  });
+
+  // What R5-FMT-3 kept is kept: a line somebody drew, and what draws without
+  // text -- a picture, a control, preserved whitespace.
+  test.each([
+    ['<p><b><br></b></p><p>beta</p>', ['paragraph:', 'paragraph:beta']],
+    ['<p><span style="white-space:pre"> </span></p><p>beta</p>', ['paragraph: ', 'paragraph:beta']],
+    ['<pre> </pre><p>beta</p>', ['code: ', 'paragraph:beta']],
+    ['<p>&nbsp;</p><p>beta</p>', ['paragraph: ', 'paragraph:beta']],
+    [
+      '<p style="white-space: pre-wrap"><span></span></p><p>beta</p>',
+      ['paragraph:', 'paragraph:beta'],
+    ],
+    ['<p>beta</p><p><span><input type="checkbox"></span></p>', ['paragraph:beta', 'paragraph:']],
+    [
+      '<p><a href="https://x.test/"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="x"></a></p><p>beta</p>',
+      ['image:', 'paragraph:beta'],
+    ],
+  ])('%j keeps its edge: %j', (html, expected) => {
+    expect(read(html)).toEqual(expected);
+  });
+
+  test('a copy of nothing but emptied blocks is kept', () => {
+    expect(read('<p><span></span></p>')).toEqual(['paragraph:']);
+    expect(read('<p><b></b></p><h2><span></span></h2>', '\n')).toEqual(['paragraph:', 'heading2:']);
+    expect(read('<pre></pre>')).toEqual(['code:']);
+  });
+});
+
+describe('an emptied `<details>` at a copy edge is dropped with what it held', () => {
+  // R7-FMT-1: `<details>` and `<summary>` were not edge blocks, so the walk
+  // down the edge took the emptied `<p>` out of a `<details>` and left the
+  // `<details>` -- read as a toggle, it split the reader's paragraph or
+  // turned their text into a collapsed toggle. The auditor's copies, by a
+  // real mouse drag.
+  const read = (html: string, plain?: string) =>
+    blocksFromHtml(document, html, plain === undefined ? {} : { plain }).map(
+      (block) => `${block.type}:${blockText(block)}`,
+    );
+
+  test.each([
+    // Firefox, begun past the end of a paragraph in an open `<details>`.
+    ['<details open=""><p id="s1"></p></details><p id="s2">beta</p>', 'beta', ['paragraph:beta']],
+    // Firefox, begun past the end of a closed `<details>`'s summary.
+    [
+      '<details><summary id="s1"></summary><p></p></details><p id="s2">beta</p>',
+      'beta',
+      ['paragraph:beta'],
+    ],
+    // Firefox, begun past the end of an open `<details>`'s summary: the
+    // summary alone, out of its `<details>` -- read as nothing already, and
+    // pinned because Firefox writes it.
+    ['<summary id="s1"></summary><p id="s2">beta</p>', 'beta', ['paragraph:beta']],
+    // Firefox, begun past the end of loose text in an open `<details>`.
+    [
+      '<details open=""><span id="s1"></span></details><p id="s2">beta</p>',
+      'beta',
+      ['paragraph:beta'],
+    ],
+    // Firefox, ended at the start of a closed `<details>`'s summary.
+    [
+      '<p id="s0">one</p><details><summary id="s1"></summary></details>',
+      'one\n',
+      ['paragraph:one'],
+    ],
+    // WebKit, the same drag: the `<summary>` is closed, never opened.
+    [
+      '<!DOCTYPE html><p id="s0">one</p><details></summary><br class="Apple-interchange-newline">',
+      'one\n\n',
+      ['paragraph:one'],
+    ],
+    // WebKit, begun past the end of a closed `<details>`'s summary: the
+    // crossed break inside the emptied body of the `<details>`, which WebKit
+    // writes with its computed style -- `white-space: normal` -- and its
+    // content slot.
+    [
+      '<!DOCTYPE html><details style="color: rgb(17, 17, 17); font-family: system-ui, sans-serif; font-size: medium; font-style: normal; font-variant-caps: normal; font-weight: 400; letter-spacing: normal; orphans: 2; text-align: start; text-indent: 0px; text-transform: none; white-space: normal; widows: 2; word-spacing: 0px; -webkit-tap-highlight-color: rgba(0, 0, 0, 0.4); -webkit-text-stroke-width: 0px; background-color: rgb(255, 255, 255); text-decoration: none;"><span useragentpart="details-content" style="display: block; content-visibility: hidden;"><p><br class="Apple-interchange-newline"></p></span></details><p id="s2" style="color: rgb(17, 17, 17); font-family: system-ui, sans-serif; font-size: medium; font-style: normal; font-variant-caps: normal; font-weight: 400; letter-spacing: normal; orphans: 2; text-align: start; text-indent: 0px; text-transform: none; white-space: normal; widows: 2; word-spacing: 0px; -webkit-tap-highlight-color: rgba(0, 0, 0, 0.4); -webkit-text-stroke-width: 0px; background-color: rgb(255, 255, 255); text-decoration: none;">beta</p>',
+      '\nbeta',
+      ['paragraph:beta'],
+    ],
+  ])('%j reads %j', (html, plain, expected) => {
+    expect(read(html, plain)).toEqual(expected);
+  });
+
+  test('what the edge rule keeps is kept', () => {
+    // What held the crossed break and something else.
+    expect(
+      read(
+        '<blockquote style="white-space: normal"><p><br class="Apple-interchange-newline"></p><p>beta</p></blockquote><p>gamma</p>',
+      ),
+    ).toEqual(['quote:beta', 'paragraph:gamma']);
+    // A cell that held it: the walk never goes into a table.
+    expect(
+      blocksFromHtml(
+        document,
+        '<table><tr><td style="white-space: normal"><br class="Apple-interchange-newline"></td><td>b</td></tr></table>',
+      ).map((block) => block.rows?.map((row) => row.map(richToPlainText))),
+    ).toEqual([[['', 'b']]]);
+    // The `<details>` the drag reached into, with its summary.
+    expect(
+      read(
+        '<p id="s0">one</p><details open=""><summary>Summary line</summary><p id="s1"></p></details>',
+        'one\nSummary line\n\n',
+      ),
+    ).toEqual(['paragraph:one', 'toggle:Summary line']);
+    // A block that declares its white-space, and one with a line in it.
+    expect(
+      read('<details style="white-space: pre-wrap"><p></p></details><p>beta</p>', 'beta').at(-1),
+    ).toBe('paragraph:beta');
+    expect(
+      read('<details style="white-space: pre-wrap"><p></p></details><p>beta</p>'),
+    ).toHaveLength(2);
+    // Its line kept -- read as the body it is, since the `<details>` starts
+    // the copy without its summary (R8-FMT-1).
+    expect(read('<details open><p><br></p></details><p>beta</p>')).toEqual([
+      'paragraph:',
+      'paragraph:beta',
+    ]);
+    // A copy of nothing else, and ProseMirror's closed slice.
+    expect(read('<details><summary></summary></details>')).toEqual(['toggle:']);
+    expect(
+      read(
+        '<meta charset=\'utf-8\'><details data-pm-slice="0 0 []"><summary></summary></details><p>mid</p>',
+        '\nmid',
+      ),
+    ).toEqual(['toggle:', 'paragraph:mid']);
+  });
+});
+
+describe('a leading space a stylesheet draws stands where the plain text has it', () => {
+  // R6-FMT-2: R5-FMT-2 asked only a table cell about its edge spaces, so a
+  // drawn leading space in a block a class makes `pre-wrap` collapsed. Firefox
+  // writes no undrawn leading space (`<p> lead</p>` copies as `lead`) but at
+  // a copy's very start (below), so the start edge is asked of every block;
+  // the end only of a cell, since
+  // Firefox writes an undrawn trailing one. The auditor's Firefox copy.
+  const read = (html: string, plain: string) =>
+    blocksFromHtml(document, html, { plain }).map((block) => `${block.type}:${blockText(block)}`);
+
+  test('the verse', () => {
+    expect(
+      read(
+        '<p id="s1" class="verse">First line</p><p class="verse"> second, set in</p><p id="s3" class="verse">third</p>',
+        'First line\n\n second, set in\n\nthird',
+      ),
+    ).toEqual(['paragraph:First line', 'paragraph: second, set in', 'paragraph:third']);
+  });
+
+  test("a loose `<div>`'s text is a block like any other", () => {
+    // The same probe's chat and doc-comment lines, `<div class>`s read as an
+    // inline run rather than a block element's text (real Firefox copies).
+    expect(
+      read(
+        '<div id="s1" class="msg">alice: hi</div><div class="msg"> indented reply</div><div class="msg">trailing space here </div><div id="s3" class="msg">bob: ok</div>',
+        'alice: hi\n indented reply\ntrailing space here \nbob: ok',
+      ),
+    ).toEqual([
+      'paragraph:alice: hi',
+      'paragraph: indented reply',
+      'paragraph:trailing space here',
+      'paragraph:bob: ok',
+    ]);
+    expect(
+      read(
+        '<div id="s1" class="ln">/**</div><div class="ln"> * Adds two numbers.</div><div class="ln"> * @param a first</div><div class="ln"> */</div><div id="s3" class="ln">function add(a, b) {}</div>',
+        '/**\n * Adds two numbers.\n * @param a first\n */\nfunction add(a, b) {}',
+      ),
+    ).toEqual([
+      'paragraph:/**',
+      'paragraph: * Adds two numbers.',
+      'paragraph: * @param a first',
+      'paragraph: */',
+      'paragraph:function add(a, b) {}',
+    ]);
+    expect(
+      read('<p id="s1">alpha</p><div> lead</div><p id="s3">omega</p>', 'alpha\nlead\n\nomega'),
+    ).toEqual(['paragraph:alpha', 'paragraph:lead', 'paragraph:omega']);
+    // Its end is not asked, as a paragraph's is not.
+    expect(
+      read(
+        '<div id="s1" class="msg">alice: hi</div><div class="msg"> both ends </div><div id="s3" class="msg">bob: ok</div>',
+        'alice: hi\n both ends \nbob: ok',
+      ),
+    ).toEqual(['paragraph:alice: hi', 'paragraph: both ends', 'paragraph:bob: ok']);
+  });
+
+  test("an undrawn one Firefox leaves out, or writes as a list's indentation, stays out", () => {
+    // Real Firefox copies of each.
+    expect(
+      read('<p id="s1">alpha</p><p> lead</p><p id="s3">omega</p>', 'alpha\n\nlead\n\nomega'),
+    ).toEqual(['paragraph:alpha', 'paragraph:lead', 'paragraph:omega']);
+    expect(
+      read(
+        '<p id="s1">alpha</p><ul><li> <code>x</code></li><li> <b>y</b> z</li></ul><p id="s3">omega</p>',
+        'alpha\n\n    x\n    y z\n\nomega',
+      ),
+    ).toEqual(['paragraph:alpha', 'bulleted_list:x', 'bulleted_list:y z', 'paragraph:omega']);
+    expect(
+      read(
+        '<p id="s1">alpha</p><blockquote> q</blockquote><p id="s3">omega</p>',
+        'alpha\n\n    q\n\nomega',
+      ),
+    ).toEqual(['paragraph:alpha', 'quote:q', 'paragraph:omega']);
+  });
+
+  test('at the very start of a copy the space is kept: a known limit (R9-FMT-3)', () => {
+    // Real Firefox copies, by a mouse drag. Begun on the `H` of a block whose
+    // source starts with two spaces, nothing drawn, Firefox writes the source
+    // whole and its plain text with one space; begun after the period of
+    // `Sentence.  Next`, the space drawn and selected, it writes the very
+    // same bytes. The paste keeps the space for both: dropping it would
+    // delete a character the second reader selected, to spare the first one
+    // an extra space.
+    for (const [html, plain] of [
+      ['<p id="a">  Hello world</p><p id="b">Second</p>', ' Hello world\n\nSecond'],
+      ['<p id="a">  Next words</p><p id="b">Second</p>', ' Next words\n\nSecond'],
+    ] as const) {
+      const [first] = blocksFromHtml(document, html, { plain });
+
+      expect(blockText(first!)).toMatch(/^ \S/);
+    }
+
+    // A `pre-wrap` source writes the spaces it drew, and keeps them.
+    expect(
+      read('<p class="pw" id="a">  Hello world</p><p id="b">Second</p>', '  Hello world\n\nSecond'),
+    ).toEqual(['paragraph:  Hello world', 'paragraph:Second']);
+  });
+
+  // R7-FMT-4: Firefox's plain text indents the lines of a list item, a `<dd>`
+  // and a `<blockquote>` by four spaces for each `<ul>`, `<ol>`, `<dd>` and
+  // `<blockquote>` around them -- measured, nested ones included -- so a
+  // drawn leading space was no longer at the start of its line, the line
+  // break in a pre-wrap quote no longer matched, and an undrawn lead of
+  // exactly that width read as drawn. Exactly that indentation after each
+  // line start of such a block is Firefox's. The auditor's and the fixer's
+  // real Firefox copies, by a mouse drag from `start` to `end`.
+  test.each([
+    [
+      '<p id="a">start</p><blockquote class="pw"> reply</blockquote><p id="b">end</p>',
+      'start\n\n     reply\n\nend',
+      ['paragraph:start', 'quote: reply', 'paragraph:end'],
+    ],
+    [
+      '<p id="a">start</p><blockquote class="pw"><p> reply</p></blockquote><p id="b">end</p>',
+      'start\n\n     reply\n\nend',
+      ['paragraph:start', 'quote: reply', 'paragraph:end'],
+    ],
+    [
+      '<p id="a">start</p><ul class="pw"><li> item one</li><li>  two lead</li></ul><p id="b">end</p>',
+      'start\n\n     item one\n      two lead\n\nend',
+      ['paragraph:start', 'bulleted_list: item one', 'bulleted_list:  two lead', 'paragraph:end'],
+    ],
+    [
+      '<p id="a">start</p><dl class="pw"><dt>term</dt><dd> definition</dd></dl><p id="b">end</p>',
+      'start\n\nterm\n     definition\n\nend',
+      ['paragraph:start', 'paragraph:term', 'paragraph: definition', 'paragraph:end'],
+    ],
+    [
+      '<p id="a">start</p><blockquote><ul class="pw"><li> li in q</li></ul></blockquote><p id="b">end</p>',
+      'start\n\n         li in q\n\nend',
+      ['paragraph:start', 'bulleted_list: li in q', 'paragraph:end'],
+    ],
+    [
+      '<p id="a">start</p><dl><dd><dl><dd class="pw"> d2 lead</dd></dl></dd></dl><p id="b">end</p>',
+      'start\n\n         d2 lead\n\nend',
+      ['paragraph:start', 'paragraph: d2 lead', 'paragraph:end'],
+    ],
+    [
+      '<p id="a">start</p><ul><li><p class="pw"> para lead</p></li></ul><p id="b">end</p>',
+      'start\n\n     para lead\n\nend',
+      ['paragraph:start', 'bulleted_list: para lead', 'paragraph:end'],
+    ],
+    // A line break in a pre-wrap block: each line is indented.
+    [
+      '<p id="a">start</p><blockquote class="pw">line one\nline two</blockquote><p id="b">end</p>',
+      'start\n\n    line one\n    line two\n\nend',
+      ['paragraph:start', 'quote:line one\nline two', 'paragraph:end'],
+    ],
+    [
+      '<p id="a">start</p><ul class="pw"><li>line one\nline two</li></ul><p id="b">end</p>',
+      'start\n\n    line one\n    line two\n\nend',
+      ['paragraph:start', 'bulleted_list:line one\nline two', 'paragraph:end'],
+    ],
+    [
+      '<p id="a">start</p><ol class="pw"><li> first</li><li>second\nline</li></ol><p id="b">end</p>',
+      'start\n\n     first\n    second\n    line\n\nend',
+      ['paragraph:start', 'numbered_list: first', 'numbered_list:second\nline', 'paragraph:end'],
+    ],
+    [
+      '<p id="a">start</p><ul><li>top<ul class="pw"><li>line one\n  line two</li></ul></li></ul><p id="b">end</p>',
+      'start\n\n    top\n        line one\n          line two\n\nend',
+      [
+        'paragraph:start',
+        'bulleted_list:top',
+        'bulleted_list:line one\n  line two',
+        'paragraph:end',
+      ],
+    ],
+    [
+      '<p id="a">start</p><ul><li>item<blockquote class="pw"> q lead\nnext</blockquote></li></ul><p id="b">end</p>',
+      'start\n\n    item\n\n         q lead\n        next\n\nend',
+      ['paragraph:start', 'bulleted_list:item', 'quote: q lead\nnext', 'paragraph:end'],
+    ],
+    // An undrawn lead exactly as wide as the indentation is not drawn.
+    [
+      '<p id="a">start</p><ul><li>    li four</li></ul><dl><dd>    dd four</dd></dl><blockquote><p>  bq two</p></blockquote><p id="b">end</p>',
+      'start\n\n    li four\n\n    dd four\n\n    bq two\n\nend',
+      [
+        'paragraph:start',
+        'bulleted_list:li four',
+        'paragraph:dd four',
+        'quote:bq two',
+        'paragraph:end',
+      ],
+    ],
+  ])('in a list, a definition or a quote: %j', (html, plain, expected) => {
+    expect(read(html, plain)).toEqual(expected);
+  });
+
+  test("a table's first cell after the indentation, the next after its tab", () => {
+    expect(
+      blocksFromHtml(
+        document,
+        '<p id="a">start</p><ul><li><table><tbody><tr><td class="pw"> c1</td><td class="pw"> c2</td></tr></tbody></table></li></ul><p id="b">end</p>',
+        { plain: 'start\n\n     c1\t c2\n\nend' },
+      )
+        .find((block) => block.type === 'table')
+        ?.rows?.map((row) => row.map(richToPlainText)),
+    ).toEqual([[' c1', ' c2']]);
+    // An empty first cell: the next is after the indentation and a tab.
+    expect(
+      blocksFromHtml(
+        document,
+        '<p id="a">start</p><ul><li><table><tbody><tr><td></td><td class="pw"> c2</td></tr></tbody></table></li></ul><p id="b">end</p>',
+        { plain: 'start\n\n    \t c2\n\nend' },
+      )
+        .find((block) => block.type === 'table')
+        ?.rows?.map((row) => row.map(richToPlainText)),
+    ).toEqual([['', ' c2']]);
+  });
+
+  test('where the indentation is not there exactly, as before', () => {
+    // A plain text without the indentation (constructed) decides as it did.
+    expect(
+      read(
+        '<p id="a">start</p><ul class="pw"><li> item</li></ul><p id="b">end</p>',
+        'start\n item\nend',
+      ),
+    ).toEqual(['paragraph:start', 'bulleted_list: item', 'paragraph:end']);
+    expect(
+      read(
+        '<p id="a">start</p><blockquote class="pw">line one\nline two</blockquote><p id="b">end</p>',
+        'start\nline one\nline two\nend',
+      ),
+    ).toEqual(['paragraph:start', 'quote:line one\nline two', 'paragraph:end']);
+    // A `<menu>`'s item, or an `<li>` in no list, is not indented: the
+    // spaces at the start of its line are its own (real Firefox copies).
+    expect(
+      read(
+        '<p id="a">start</p><menu class="pw"><li> m one</li></menu><p id="b">end</p>',
+        'start\n m one\n\nend',
+      ),
+    ).toEqual(['paragraph:start', 'bulleted_list: m one', 'paragraph:end']);
+    expect(
+      read(
+        '<p id="a">start</p><menu class="pw"><li>    four</li></menu><p id="b">end</p>',
+        'start\n    four\n\nend',
+      ),
+    ).toEqual(['paragraph:start', 'bulleted_list:    four', 'paragraph:end']);
+    expect(
+      read(
+        '<p id="a">start</p><li class="pw">    four</li><p id="b">end</p>',
+        'start\n    four\n\nend',
+      ),
+    ).toEqual(['paragraph:start', 'bulleted_list:    four', 'paragraph:end']);
+  });
+
+  test('indentation is read once per element, however deep the nesting', () => {
+    // Each block's indentation is its parent's plus its own, remembered: a
+    // walk to the root per block is the nesting depth times the blocks, and
+    // inline wrappers nest as deep as the reader goes (a thousand levels).
+    const depth = 1000;
+    const count = 3000;
+    const html = `<dd>${'<span>'.repeat(depth)}${Array.from({ length: count }, (_, i) => `<p class="pw"> p${i}</p>`).join('')}${'</span>'.repeat(depth)}</dd>`;
+    const plain = Array.from({ length: count }, (_, i) => `     p${i}`).join('\n\n');
+
+    expect(blocksFromHtml(document, html, { plain }).map(blockText).slice(0, 2)).toEqual([
+      ' p0',
+      ' p1',
+    ]);
+    const time = (options: { plain?: string }): number => {
+      let best = Infinity;
+
+      for (let run = 0; run < 3; run += 1) {
+        const start = performance.now();
+        blocksFromHtml(document, html, options);
+        best = Math.min(best, performance.now() - start);
+      }
+
+      return Math.max(best, 0.1);
+    };
+
+    time({});
+    expect(time({ plain }) / time({})).toBeLessThan(4);
+  });
+
+  test('the end edge is still asked of a cell only', () => {
+    // R5-FMT-2's trailing space, with a drawn leading space beside it: the
+    // trailing one stays out.
+    expect(
+      read(
+        '<p id="first">before</p><p class="verse"> lead <span>x</span> </p><p id="last">after</p>',
+        'before\n\n lead x \n\nafter',
+      ),
+    ).toEqual(['paragraph:before', 'paragraph: lead x', 'paragraph:after']);
+  });
+});
+
+describe('a cell spelled differently costs the cells after it in its row nothing', () => {
+  // R6-FMT-3: once one cell of a row was spelled differently in Firefox's
+  // plain text (an image's alt text, a `<q>`), every later cell in that row
+  // missed -- the cursor stayed before the text it did not match, and a cell
+  // is only ever looked for at the cursor or a line start -- and was read
+  // collapsed. A cell that misses is tried once more right after the next
+  // tab on its row's line; a missed cell moves the row on past its own tab.
+  const picture = '<img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="warning">';
+  const cells = (html: string, plain: string): string[][] | undefined =>
+    blocksFromHtml(document, html, { plain })
+      .find((block) => block.type === 'table')
+      ?.rows?.map((row) => row.map(richToPlainText));
+
+  test("the auditor's row", () => {
+    expect(
+      cells(
+        `<table><tbody><tr><td>${picture} force</td><td class="cmd">tool  --force   now</td></tr></tbody></table>`,
+        'warning force\ttool  --force   now',
+      ),
+    ).toEqual([['force', 'tool  --force   now']]);
+  });
+
+  test('after a paragraph, past a quoted cell and an empty one', () => {
+    expect(
+      cells(
+        `<p>intro</p><table><tbody><tr><td>${picture} north</td><td><q>b</q></td><td></td><td class="cmd">c  d</td></tr><tr><td>x</td><td><q>y</q></td><td class="cmd">e  f</td><td>g</td></tr></tbody></table><p>after</p>`,
+        'intro\nwarning north\t“b”\t\tc  d\nx\t“y”\te  f\tg\n\nafter',
+      ),
+    ).toEqual([
+      ['north', 'b', '', 'c  d'],
+      ['x', 'y', 'e  f', 'g'],
+    ]);
+  });
+
+  test('a row of many missed cells stays linear', () => {
+    // Each cell misses at the cursor and is tried once more past one tab: the
+    // row costs its length, not its length times its cells. Long cells, so
+    // walking the line again for each one would dwarf reading the HTML.
+    const count = 3000;
+    const word = 'w'.repeat(200);
+    const html = `<table><tbody><tr>${Array.from({ length: count }, (_, i) => `<td><q>${word}${i}</q></td>`).join('')}</tr></tbody></table>`;
+    const plain = Array.from({ length: count }, (_, i) => `"${word}${i}"`).join('\t');
+    const time = (options: { plain?: string }): number => {
+      const start = performance.now();
+      blocksFromHtml(document, html, options);
+      return performance.now() - start;
+    };
+
+    time({});
+    const without = Math.min(time({}), time({}));
+    const withPlain = Math.min(time({ plain }), time({ plain }));
+
+    expect(withPlain / without).toBeLessThan(4);
+  });
+
+  test('many rows against one long line without a tab stay linear', () => {
+    // R7-FMT-3: every row whose first cell missed was placed at the same
+    // point mid-line, and the walk to its next tab crossed the rest of the
+    // line again -- rows times the line's length (4000 rows against an
+    // 800,000-character JSON line took 3.1 s in Chromium). Measured against
+    // reading the table and the plain text apart, which is what linear costs.
+    // The auditor's line, and the same with a second line after it, where
+    // every row is placed (its first cell missed mid-line, so it claims no
+    // line of its own) and each looked for its tab across the whole line.
+    const rows = 2000;
+    const html = `<p>Export</p><table><tbody>${Array.from({ length: rows }, (_, i) => `<tr><td>r${i}</td><td>s${i}</td></tr>`).join('')}</tbody></table>`;
+    const line = JSON.stringify({ data: 'y'.repeat(200_000) });
+    const time = (source: string, options: { plain?: string }): number => {
+      let best = Infinity;
+
+      for (let run = 0; run < 3; run += 1) {
+        const start = performance.now();
+        blocksFromHtml(document, source, options);
+        best = Math.min(best, performance.now() - start);
+      }
+
+      return Math.max(best, 0.1);
+    };
+
+    time(html, {});
+
+    for (const plain of [`Export ${line}`, `Export ${line}\n${line}`]) {
+      const apart = time(html, {}) + time('<p>Export</p>', { plain });
+      const together = time(html, { plain });
+
+      expect(together / apart).toBeLessThan(4);
+    }
+  });
+});
+
+describe('a row whose first cell is empty or missed is placed on its own line', () => {
+  // R7-FMT-2: R6-FMT-3 walked a row's tabs from where its first cell was
+  // found or looked for -- so a row whose first cell was empty or held only
+  // a picture had no place at all, and a row after one whose last cell
+  // missed was placed on that row's line, still mid-line. Either way every
+  // later cell of the row lost its spaces. The auditor's Firefox copies, by
+  // a real mouse drag; each row is placed at the start of the first line
+  // after the last block matched.
+  const gif = 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
+  const picture = (alt: string) => `<img alt="${alt}" width="12" height="12" src="${gif}">`;
+  const read = (html: string, plain: string) =>
+    blocksFromHtml(document, html, { plain })
+      .filter((block) => block.type !== 'image')
+      .map((block) =>
+        block.rows ? block.rows.map((row) => row.map(richToPlainText)) : blockText(block),
+      );
+
+  test('a picture alone in the first cell', () => {
+    expect(
+      read(
+        `<p id="a">start</p><table><tbody><tr><th>Flag</th><th>Command</th></tr><tr><td>${picture('FR')}</td><td class="cmd">git  push   origin</td></tr><tr><td>${picture('DE')}</td><td class="cmd">git  pull</td></tr></tbody></table><p id="b">end</p>`,
+        'start\nFlag\tCommand\nFR\tgit  push   origin\nDE\tgit  pull\n\nend',
+      ),
+    ).toEqual([
+      'start',
+      [
+        ['Flag', 'Command'],
+        ['', 'git  push   origin'],
+        ['', 'git  pull'],
+      ],
+      'end',
+    ]);
+  });
+
+  test('an empty first cell', () => {
+    expect(
+      read(
+        `<p id="a">start</p><table><tbody><tr><td></td><td>${picture('yes')} ok</td><td class="cmd">tool  --force   now</td></tr></tbody></table><p id="b">end</p>`,
+        'start\n\tyes ok\ttool  --force   now\n\nend',
+      ),
+    ).toEqual(['start', [['', 'ok', 'tool  --force   now']], 'end']);
+  });
+
+  test('a missed first cell after a row whose last cell missed', () => {
+    expect(
+      read(
+        `<p id="a">start</p><table><tbody><tr><td class="cmd">npm  run</td><td>${picture('ok')} Passed</td></tr><tr><td>${picture('w')} two</td><td class="cmd">npm  test</td></tr></tbody></table><p id="b">end</p>`,
+        'start\nnpm  run\tok Passed\nw two\tnpm  test\n\nend',
+      ),
+    ).toEqual([
+      'start',
+      [
+        ['npm  run', 'Passed'],
+        ['two', 'npm  test'],
+      ],
+      'end',
+    ]);
+  });
+
+  test('a cell with the same text on a later line is not taken for one placed nowhere', () => {
+    // Pre-existing and not changed: a row whose cells are all spelled as the
+    // next row's is matched there (the auditor's `sameText`).
+    expect(
+      read(
+        `<p id="a">start</p><table><tbody><tr><td>${picture('w')} x</td><td class="cmd">x  x</td></tr><tr><td>x</td><td class="cmd">x  x</td></tr></tbody></table><p id="b">end</p>`,
+        'start\nw x\tx  x\nx\tx  x\n\nend',
+      ),
+    ).toEqual([
+      'start',
+      [
+        ['x', 'x  x'],
+        ['x', 'x x'],
+      ],
+      'end',
+    ]);
+  });
+
+  test('many rows with an empty first cell stay linear', () => {
+    // Each row is placed by a search, not a walk, so a long line of nothing
+    // but spaces after each first tab costs nothing per row.
+    const rows = 2000;
+    const html = `<p>Export</p><table><tbody>${Array.from({ length: rows }, (_, i) => `<tr><td></td><td>s${i}</td></tr>`).join('')}</tbody></table>`;
+    const plain = `Export\n\t${' '.repeat(200_000)}x`;
+    const time = (source: string, options: { plain?: string }): number => {
+      let best = Infinity;
+
+      for (let run = 0; run < 3; run += 1) {
+        const start = performance.now();
+        blocksFromHtml(document, source, options);
+        best = Math.min(best, performance.now() - start);
+      }
+
+      return Math.max(best, 0.1);
+    };
+
+    time(html, {});
+    const apart = time(html, {}) + time('<p>Export</p>', { plain });
+    const together = time(html, { plain });
+
+    expect(together / apart).toBeLessThan(4);
+  });
+});
+
+describe("ProseMirror's closed slice keeps the empty blocks at its closed ends", () => {
+  // R6-FMT-4: a ProseMirror (Tiptap) select-all copy marks its first element
+  // `data-pm-slice="0 0 []"` -- open depth 0 at both ends: the empty blocks
+  // there are whole blocks the reader selected, not the edge of a drag. An
+  // open slice (`1 1`) is the drag, and its empty edges still go.
+  const read = (html: string, plain: string) =>
+    blocksFromHtml(document, html, { plain }).map((block) => `${block.type}:${blockText(block)}`);
+  const meta = "<meta charset='utf-8'>";
+
+  test.each([
+    [
+      `${meta}<p data-pm-slice="0 0 []"></p><p>mid</p><p></p>`,
+      '\n\nmid\n\n',
+      ['paragraph:', 'paragraph:mid', 'paragraph:'],
+    ],
+    [
+      `${meta}<ul data-pm-slice="0 0 []"><li>one</li><li></li></ul>`,
+      'one\n',
+      ['bulleted_list:one', 'bulleted_list:'],
+    ],
+    [
+      `${meta}<p data-pm-slice="0 1 []"></p><p>mid</p><p></p>`,
+      '\n\nmid\n\n',
+      ['paragraph:', 'paragraph:mid'],
+    ],
+    [
+      `${meta}<p data-pm-slice="1 0 []"></p><p>mid</p><p></p>`,
+      '\n\nmid\n\n',
+      ['paragraph:mid', 'paragraph:'],
+    ],
+    [`${meta}<p data-pm-slice="1 1 []">first</p><p></p>`, 'first\n\n', ['paragraph:first']],
+    [`${meta}<p data-pm-slice="1 1 []"></p><p>second</p>`, '\n\nsecond', ['paragraph:second']],
+    // Without the mark, as before.
+    [`${meta}<ul><li>one</li><li></li></ul>`, 'one\n', ['bulleted_list:one']],
+  ])('%j reads %j', (html, plain, expected) => {
+    expect(read(html, plain)).toEqual(expected);
+  });
+});
+
+describe('a `<details>` that opens a copy without its own summary is its body', () => {
+  // R8-FMT-1, R8-FMT-2: a drag begun in a `<details>`' body leaves its
+  // summary out, and the `<details>` at the copy's start read as a toggle
+  // with an empty title -- the reader's paragraph split and indented, or an
+  // empty toggle. WebKit writes the start tags of every closed `<details>` a
+  // drag crosses at the front, so a whole FAQ pasted inside two empty
+  // collapsed toggles. Each engine's real copy, by a mouse drag.
+  const read = (html: string, plain?: string) =>
+    blocksFromHtml(document, html, plain === undefined ? {} : { plain }).map(
+      (block) => `${block.type}@${block.depth}${block.collapsed ? '(c)' : ''}:${blockText(block)}`,
+    );
+  const chromium =
+    'color: rgb(17, 17, 17); font-family: system-ui, sans-serif; font-size: medium; font-style: normal; font-variant-ligatures: normal; font-variant-caps: normal; font-weight: 400; letter-spacing: normal; orphans: 2; text-align: start; text-indent: 0px; text-transform: none; widows: 2; word-spacing: 0px; -webkit-text-stroke-width: 0px; white-space: normal; background-color: rgb(255, 255, 255); text-decoration-thickness: initial; text-decoration-style: initial; text-decoration-color: initial;';
+  const webkit =
+    'color: rgb(17, 17, 17); font-family: system-ui, sans-serif; font-size: medium; font-style: normal; font-variant-caps: normal; font-weight: 400; letter-spacing: normal; orphans: 2; text-align: start; text-indent: 0px; text-transform: none; white-space: normal; widows: 2; word-spacing: 0px; -webkit-tap-highlight-color: rgba(0, 0, 0, 0.4); -webkit-text-stroke-width: 0px; background-color: rgb(255, 255, 255); text-decoration: none;';
+  const webkitH3 =
+    'color: rgb(17, 17, 17); font-family: system-ui, sans-serif; font-style: normal; font-variant-caps: normal; letter-spacing: normal; orphans: 2; text-align: start; text-indent: 0px; text-transform: none; white-space: normal; widows: 2; word-spacing: 0px; -webkit-tap-highlight-color: rgba(0, 0, 0, 0.4); -webkit-text-stroke-width: 0px; background-color: rgb(255, 255, 255); text-decoration: none;';
+  const answers = ['paragraph@0:Answer one', 'paragraph@0:Answer more', 'paragraph@0:Outro text'];
+
+  test.each([
+    [
+      'Firefox',
+      '<details open=""><p id="a1">Answer one</p><p id="a1b">Answer more</p></details><p id="o">Outro text</p>',
+    ],
+    [
+      'Chromium',
+      `<details open="" style="${chromium}"><slot id="details-content" pseudo="details-content" style="display: block;"><p id="a1">Answer one</p><p id="a1b">Answer more</p></slot></details><p id="o" style="${chromium}">Outro text</p>`,
+    ],
+    [
+      'WebKit',
+      `<!DOCTYPE html><details open="" style="${webkit}"><span useragentpart="details-content" style="display: block;"><p id="a1">Answer one</p><p id="a1b">Answer more</p></span></details><p id="o" style="${webkit}">Outro text</p>`,
+    ],
+  ])('%s: a drag from an answer to the next paragraph', (_engine, html) => {
+    expect(read(html, 'Answer one\n\nAnswer more\n\nOutro text')).toEqual(answers);
+    expect(read(html)).toEqual(answers);
+  });
+
+  // R9-FMT-1: only the copy's first element was asked, and then only a
+  // `<details>` that was the first child of one already marked. A page's
+  // wrapper around the FAQ, Chromium's `<slot>` and WebKit's `<span>` around
+  // a nested `<details>`, an editor's content `<div>` all stopped it, so the
+  // answer still pasted indented under an empty toggle. Each engine's real
+  // copy, by a mouse drag from the answer's first letter to the end of a
+  // paragraph after the wrapper.
+  const rest = ['paragraph@0:Rest in wrapper', 'paragraph@0:Outro text'];
+  const inner = ['paragraph@0:Inner body', 'paragraph@0:Outer rest', 'paragraph@0:Outro text'];
+
+  test.each([
+    [
+      'Chromium, a wrapper `<div>`',
+      `<div class="faq" style="${chromium}"><details open=""><slot id="details-content" pseudo="details-content" style="display: block;"><p id="a">Answer text</p></slot></details><p id="r">Rest in wrapper</p></div><p id="o" style="${chromium}">Outro text</p>`,
+      'Answer text\n\nRest in wrapper\n\nOutro text',
+      ['paragraph@0:Answer text', ...rest],
+    ],
+    [
+      'Firefox, a wrapper `<div>`',
+      `<div class="faq"><details open=""><p id="a">Answer text</p></details><p id="r">Rest in wrapper</p></div><p id="o">Outro text</p>`,
+      'Answer text\n\nRest in wrapper\n\nOutro text',
+      ['paragraph@0:Answer text', ...rest],
+    ],
+    [
+      'WebKit, a wrapper `<div>`',
+      `<!DOCTYPE html><div class="faq" style="${webkit}"><details open=""><span useragentpart="details-content" style="display: block;"><p id="a">Answer text</p></span></details><p id="r">Rest in wrapper</p></div><p id="o" style="${webkit}">Outro text</p>`,
+      'Answer text\n\nRest in wrapper\n\nOutro text',
+      ['paragraph@0:Answer text', ...rest],
+    ],
+    [
+      'Chromium, a `<section>`',
+      `<section style="${chromium}"><details open=""><slot id="details-content" pseudo="details-content" style="display: block;"><p id="a">Answer text</p></slot></details><p id="r">Rest in wrapper</p></section><p id="o" style="${chromium}">Outro text</p>`,
+      'Answer text\n\nRest in wrapper\n\nOutro text',
+      ['paragraph@0:Answer text', ...rest],
+    ],
+    [
+      'Chromium, a wrapper in a right-to-left page (the drag ended at its end)',
+      `<div class="faq" style="${chromium}"><details open=""><slot id="details-content" pseudo="details-content" style="display: block;"><p id="a">لجواب هنا</p></slot></details><p id="r">بقية النص</p></div><br class="Apple-interchange-newline">`,
+      'لجواب هنا\n\nبقية النص\n\n',
+      ['paragraph@0:لجواب هنا', 'paragraph@0:بقية النص'],
+    ],
+    [
+      'Chromium, nested in the outer `<details>` content slot',
+      `<details open="" style="${chromium}"><slot id="details-content" pseudo="details-content" style="display: block;"><details open=""><slot id="details-content" pseudo="details-content" style="display: block;"><p id="ib">Inner body</p></slot></details><p id="or">Outer rest</p></slot></details><p id="o" style="${chromium}">Outro text</p>`,
+      'Inner body\n\nOuter rest\n\nOutro text',
+      inner,
+    ],
+    [
+      'WebKit, nested in the outer `<details>` content slot',
+      `<!DOCTYPE html><details open="" style="${webkit}"><span useragentpart="details-content" style="display: block;"><details open=""><span useragentpart="details-content" style="display: block;"><p id="ib">Inner body</p></span></details><p id="or">Outer rest</p></span></details><p id="o" style="${webkit}">Outro text</p>`,
+      'Inner body\n\nOuter rest\n\nOutro text',
+      inner,
+    ],
+    // Read right already: Firefox writes no slot.
+    [
+      'Firefox, nested',
+      `<details open=""><details open=""><p id="ib">Inner body</p></details><p id="or">Outer rest</p></details><p id="o">Outro text</p>`,
+      'Inner body\n\nOuter rest\n\nOutro text',
+      inner,
+    ],
+    [
+      "Chromium, nested in Tiptap's content `<div>`",
+      `<details open="" style="${chromium}"><slot id="details-content" pseudo="details-content" style="display: block;"><div data-type="detailsContent"><details open=""><slot id="details-content" pseudo="details-content" style="display: block;"><div data-type="detailsContent"><p id="ib">Inner body</p></div></slot></details><p id="or">Outer rest</p></div></slot></details><p id="o" style="${chromium}">Outro text</p>`,
+      'Inner body\n\nOuter rest\n\nOutro text',
+      inner,
+    ],
+    [
+      "Firefox, nested in Tiptap's content `<div>`",
+      `<details open=""><div data-type="detailsContent"><details open=""><div data-type="detailsContent"><p id="ib">Inner body</p></div></details><p id="or">Outer rest</p></div></details><p id="o">Outro text</p>`,
+      'Inner body\n\nOuter rest\n\nOutro text',
+      inner,
+    ],
+    [
+      "WebKit, nested in Tiptap's content `<div>`",
+      `<!DOCTYPE html><details open="" style="${webkit}"><span useragentpart="details-content" style="display: block;"><div data-type="detailsContent"><details open=""><span useragentpart="details-content" style="display: block;"><div data-type="detailsContent"><p id="ib">Inner body</p></div></span></details><p id="or">Outer rest</p></div></span></details><p id="o" style="${webkit}">Outro text</p>`,
+      'Inner body\n\nOuter rest\n\nOutro text',
+      inner,
+    ],
+    // From the outer body: WebKit hoists the start tag of the `<details>`
+    // whose summary comes next into the slot, ahead of the outer body.
+    [
+      'WebKit, from the outer body',
+      `<!DOCTYPE html><details open="" style="${webkit}"><span useragentpart="details-content" style="display: block;"><details open=""><p id="ob">Outer body</p><details open=""><summary id="iq">Inner question</summary><p id="ib">Inner body</p></span></details><p id="or">Outer rest</p></span></details><p id="o" style="${webkit}">Outro text</p>`,
+      'Outer body\n\nInner question\nInner body\n\nOuter rest\n\nOutro text',
+      [
+        'paragraph@0:Outer body',
+        'toggle@0:Inner question',
+        'paragraph@1:Inner body',
+        'paragraph@0:Outer rest',
+        'paragraph@0:Outro text',
+      ],
+    ],
+    // Read right already: the inner `<details>` keeps its summary.
+    [
+      'Chromium, from the outer body',
+      `<details open="" style="${chromium}"><slot id="details-content" pseudo="details-content" style="display: block;"><p id="ob">Outer body</p><details open=""><summary id="iq">Inner question</summary><p id="ib">Inner body</p></details><p id="or">Outer rest</p></slot></details><p id="o" style="${chromium}">Outro text</p>`,
+      'Outer body\n\nInner question\nInner body\n\nOuter rest\n\nOutro text',
+      [
+        'paragraph@0:Outer body',
+        'toggle@0:Inner question',
+        'paragraph@1:Inner body',
+        'paragraph@0:Outer rest',
+        'paragraph@0:Outro text',
+      ],
+    ],
+    // WebKit hoists a closed `<details>`' start tag inside the wrapper too.
+    [
+      'WebKit, a wrapper around a closed `<details>`',
+      `<!DOCTYPE html><div class="faq" style="${webkit}"><details><p id="a">Lead in faq</p><details><summary>Closed q</summary></span></details><p id="r">Rest in wrapper</p></div><p id="o" style="${webkit}">Outro text</p>`,
+      'Lead in faq\n\nClosed q\nRest in wrapper\n\nOutro text',
+      ['paragraph@0:Lead in faq', 'toggle@0(c):Closed q', ...rest],
+    ],
+    // Read right already: a list item and a quote read their text as one.
+    [
+      'Firefox, a list item',
+      `<ul><li><details open=""><p id="a">Answer text</p></details><p id="r">Rest in wrapper</p></li></ul><p id="o">Outro text</p>`,
+      '    Answer text\n\n    Rest in wrapper\n\nOutro text',
+      ['bulleted_list@0:Answer text\nRest in wrapper', 'paragraph@0:Outro text'],
+    ],
+    [
+      'WebKit, a list item',
+      `<!DOCTYPE html><ul style="${webkit}"><li><details open=""><span useragentpart="details-content" style="display: block;"><p id="a">Answer text</p></span></details><p id="r">Rest in wrapper</p></li></ul><p id="o" style="${webkit}">Outro text</p>`,
+      'Answer text\n\nRest in wrapper\n\nOutro text',
+      ['bulleted_list@0:Answer text\nRest in wrapper', 'paragraph@0:Outro text'],
+    ],
+  ])('%s', (_name, html, plain, expected) => {
+    expect(read(html, plain)).toEqual(expected);
+    expect(read(html)).toEqual(expected);
+  });
+
+  test('ProseMirror: an open slice in a nested body is its body; a closed one a toggle', () => {
+    expect(
+      read(
+        '<meta charset="utf-8"><details data-pm-slice="4 1 []" open><div data-type="details-content"><details open><div data-type="details-content"><p>A</p></div></details><p>rest</p></div></details><p>B</p>',
+      ),
+    ).toEqual(['paragraph@0:A', 'paragraph@0:rest', 'paragraph@0:B']);
+    expect(
+      read('<meta charset="utf-8"><details data-pm-slice="0 0 []" open><p>A</p></details><p>B</p>'),
+    ).toEqual(['toggle@0:', 'paragraph@1:A', 'paragraph@0:B']);
+  });
+
+  test('off the start edge, or below its own summary, a `<details>` is a toggle', () => {
+    // A whole one in a wrapper, its summary selected.
+    expect(
+      read(
+        '<div class="faq"><details open><summary>Q</summary><p>A</p></details></div><p>after</p>',
+        'Q\nA\n\nafter',
+      ),
+    ).toEqual(['toggle@0:Q', 'paragraph@1:A', 'paragraph@0:after']);
+    // Pasted after other content in the wrapper.
+    expect(
+      read('<div class="faq"><p>before</p><details open><p>A</p></details></div>', 'before\n\nA'),
+    ).toEqual(['paragraph@0:before', 'toggle@0:', 'paragraph@1:A']);
+    // Below a summary: the start edge runs into the summary, not past it.
+    expect(
+      read(
+        '<div><details open><summary>Q</summary><details open><p>A</p></details></details></div>',
+      ),
+    ).toEqual(['toggle@0:Q', 'toggle@1:', 'paragraph@2:A']);
+  });
+
+  test('wrapped and nested without end, it costs the nesting once', () => {
+    const time = (levels: number): number => {
+      const html = `${'<div><slot><details>'.repeat(levels)}<p>deep</p>`;
+      let best = Infinity;
+
+      for (let run = 0; run < 3; run += 1) {
+        const start = performance.now();
+        blocksFromHtml(document, html);
+        best = Math.min(best, performance.now() - start);
+      }
+
+      return Math.max(best, 0.1);
+    };
+
+    time(100);
+    expect(time(1600) / time(400)).toBeLessThan(8);
+    expect(read(`${'<div><slot><details>'.repeat(3)}<p>deep</p>`)).toEqual(['paragraph@0:deep']);
+  });
+
+  test("WebKit's FAQ, dragged whole: the hoisted `<details>` go, every question stays", () => {
+    const html = `<!DOCTYPE html><details style="${webkit}"><details style="${webkit}"><h3 id="i" style="${webkitH3}">FAQ</h3><details style="${webkit}"><summary>How do I install it?</summary></span></details><details style="${webkit}"><summary>Does it work offline?</summary></span></details><p id="o" style="${webkit}">Still stuck? Open an issue.</p>`;
+
+    expect(
+      read(html, 'FAQ\n\nHow do I install it?\nDoes it work offline?\nStill stuck? Open an issue.'),
+    ).toEqual([
+      'heading3@0:FAQ',
+      'toggle@0(c):How do I install it?',
+      'toggle@0(c):Does it work offline?',
+      'paragraph@0:Still stuck? Open an issue.',
+    ]);
+  });
+
+  test("WebKit's FAQ from the break before a question: that one keeps its summary", () => {
+    // The summary inside WebKit's content slot is the `<details>`' own.
+    expect(
+      read(
+        '<!DOCTYPE html><details open=""><details open=""><span useragentpart="details-content"><summary id="q1"><br class="Apple-interchange-newline">Question one</summary><p id="a1">Answer one</p></span></details><details open=""><summary id="q2">Question two</summary><p id="a2">Answer two</p></span></details><p id="o">Outro text</p>',
+        '\nQuestion one\nAnswer one\n\nQuestion two\nAnswer two\n\nOutro text',
+      ),
+    ).toEqual([
+      'toggle@0:Question one',
+      'paragraph@1:Answer one',
+      'toggle@0:Question two',
+      'paragraph@1:Answer two',
+      'paragraph@0:Outro text',
+    ]);
+  });
+
+  test('a `<details>` with its summary, or anywhere but the start, is a toggle', () => {
+    expect(
+      read('<details open><summary>Q</summary><p>A</p></details><p>after</p>', 'Q\nA\n\nafter'),
+    ).toEqual(['toggle@0:Q', 'paragraph@1:A', 'paragraph@0:after']);
+    expect(read('<p>before</p><details open><p>A</p></details>', 'before\n\nA')).toEqual([
+      'paragraph@0:before',
+      'toggle@0:',
+      'paragraph@1:A',
+    ]);
+    // ProseMirror's closed start: the `<details>` is a whole block selected.
+    expect(
+      read(
+        '<meta charset=\'utf-8\'><details data-pm-slice="0 1 []" open><p>A</p></details><p>B</p>',
+      ),
+    ).toEqual(['toggle@0:', 'paragraph@1:A', 'paragraph@0:B']);
+    // Only the first: a summary-less one after it is read as before.
+    expect(read('<details open><p>A</p></details><details open><p>B</p></details>')).toEqual([
+      'paragraph@0:A',
+      'toggle@0:',
+      'paragraph@1:B',
+    ]);
+  });
+
+  test('nested without end, it costs the nesting once', () => {
+    // A hostile copy can open as many summary-less `<details>` as it likes.
+    const time = (levels: number): number => {
+      const html = `${'<details>'.repeat(levels)}<p>deep</p>`;
+      let best = Infinity;
+
+      for (let run = 0; run < 3; run += 1) {
+        const start = performance.now();
+        blocksFromHtml(document, html);
+        best = Math.min(best, performance.now() - start);
+      }
+
+      return Math.max(best, 0.1);
+    };
+
+    time(100);
+    expect(time(1600) / time(400)).toBeLessThan(8);
+    expect(read(`${'<details>'.repeat(3)}<p>deep</p>`)).toEqual(['paragraph@0:deep']);
+  });
+});
+
+describe("Firefox's indentation, line by line and for the text's own element", () => {
+  // Real Firefox copies, by a mouse drag from `start` to `end`, of blocks a
+  // stylesheet makes `pre-wrap` (`class="pw"`) or leaves `normal`.
+  const read = (html: string, plain: string) =>
+    blocksFromHtml(document, html, { plain }).map((block) =>
+      block.type === 'table'
+        ? `table:${JSON.stringify(block.rows?.map((row) => row.map(richToPlainText)))}`
+        : `${block.type}@${block.depth}:${blockText(block)}`,
+    );
+
+  // R8-FMT-3: Firefox writes no indentation on an empty line, and the
+  // indentation was asked after every line feed, so a blank line in a
+  // pre-wrap list item, quote or definition collapsed into a space.
+  test.each([
+    [
+      '<p id="a">start</p><ul><li class="pw x">a\n\nb</li></ul><p id="b">end</p>',
+      'start\n\n    a\n\n    b\n\nend',
+      ['bulleted_list@0:a\n\nb'],
+    ],
+    [
+      '<p id="a">start</p><blockquote class="pw x">a\n\nb</blockquote><p id="b">end</p>',
+      'start\n\n    a\n\n    b\n\nend',
+      ['quote@0:a\n\nb'],
+    ],
+    [
+      '<p id="a">start</p><dl><dd class="pw x">a\n\nb</dd></dl><p id="b">end</p>',
+      'start\n\n    a\n\n    b\n\nend',
+      ['paragraph@0:a\n\nb'],
+    ],
+    [
+      '<p id="a">start</p><ul><li>o<ul><li class="pw x">poem line\n\nsecond stanza</li></ul></li></ul><p id="b">end</p>',
+      'start\n\n    o\n        poem line\n\n        second stanza\n\nend',
+      ['bulleted_list@0:o', 'bulleted_list@1:poem line\n\nsecond stanza'],
+    ],
+    // A line of spaces is indented, and was read already.
+    [
+      '<p id="a">start</p><ul><li class="pw x">a\n  \nb</li></ul><p id="b">end</p>',
+      'start\n\n    a\n      \n    b\n\nend',
+      ['bulleted_list@0:a\n  \nb'],
+    ],
+  ])('a blank line: %j', (html, plain, expected) => {
+    expect(read(html, plain)).toEqual(['paragraph@0:start', ...expected, 'paragraph@0:end']);
+  });
+
+  // R8-FMT-4: the spaces after a `<br>` in a `normal` list item, exactly as
+  // many as Firefox indents the next line by, matched the plain text as they
+  // stand and were kept, though nothing drew them.
+  test.each([
+    [
+      '<p id="a">start</p><ul><li class="x">one<br>    two</li></ul><p id="b">end</p>',
+      'start\n\n    one\n    two\n\nend',
+      ['bulleted_list@0:one\ntwo'],
+    ],
+    [
+      '<p id="a">start</p><ul><li>o<ul><li class="x">one<br>        two</li></ul></li></ul><p id="b">end</p>',
+      'start\n\n    o\n        one\n        two\n\nend',
+      ['bulleted_list@0:o', 'bulleted_list@1:one\ntwo'],
+    ],
+    // Drawn, they stand: Firefox writes them after its indentation.
+    [
+      '<p id="a">start</p><ul><li class="pw x">one<br>    two</li></ul><p id="b">end</p>',
+      'start\n\n    one\n        two\n\nend',
+      ['bulleted_list@0:one\n    two'],
+    ],
+  ])('spaces after a break: %j', (html, plain, expected) => {
+    expect(read(html, plain)).toEqual(['paragraph@0:start', ...expected, 'paragraph@0:end']);
+  });
+
+  // R8-FMT-5: the indentation was counted for the block, not for the element
+  // its text stands in -- a quote in a quote, a list in a cell -- and a
+  // second paragraph in a list item or a quote stands after the blank line
+  // Firefox writes between paragraphs, so its drawn leading space was lost.
+  test.each([
+    [
+      '<p id="a">start</p><blockquote><blockquote class="pw x"> deep  q</blockquote></blockquote><p id="b">end</p>',
+      'start\n\n         deep  q\n\nend',
+      ['quote@0: deep  q'],
+    ],
+    // Its lines too (the round 7 fixer's real copy).
+    [
+      '<p id="a">start</p><blockquote><blockquote class="pw"> deep\nline</blockquote></blockquote><p id="b">end</p>',
+      'start\n\n         deep\n        line\n\nend',
+      ['quote@0: deep\nline'],
+    ],
+    [
+      '<p id="a">start</p><table><tbody><tr><td>c0</td><td><ul><li class="pw x"> in  cell</li></ul></td></tr></tbody></table><p id="b">end</p>',
+      'start\nc0\t\n\n     in  cell\n\nend',
+      ['table:[["c0"," in  cell"]]'],
+    ],
+    [
+      '<p id="a">start</p><ul><li><p class="x">first</p><p class="pw x"> second  p</p></li></ul><p id="b">end</p>',
+      'start\n\n    first\n\n     second  p\n\nend',
+      ['bulleted_list@0:first\n second  p'],
+    ],
+    [
+      '<p id="a">start</p><blockquote><p class="pw x">q1</p><p class="pw x"> q2</p></blockquote><p id="b">end</p>',
+      'start\n\n    q1\n\n     q2\n\nend',
+      ['quote@0:q1\n q2'],
+    ],
+    [
+      '<p id="a">start</p><ul><li><div class="x">d0</div><div class="pw x"> d1</div></li></ul><p id="b">end</p>',
+      'start\n\n    d0\n     d1\n\nend',
+      ['bulleted_list@0:d0\n d1'],
+    ],
+    [
+      '<p id="a">start</p><blockquote><ul><li><p class="x">p1</p><p class="pw x"> p2</p></li></ul></blockquote><p id="b">end</p>',
+      'start\n\n        p1\n\n         p2\n\nend',
+      ['bulleted_list@0:p1\n p2'],
+    ],
+    // Undrawn, the second paragraph's space stays out.
+    [
+      '<p id="a">start</p><ul><li><p class="x">first</p><p class="x"> second</p></li></ul><p id="b">end</p>',
+      'start\n\n    first\n\n    second\n\nend',
+      ['bulleted_list@0:first\nsecond'],
+    ],
+  ])("the text's own indentation: %j", (html, plain, expected) => {
+    expect(read(html, plain)).toEqual(['paragraph@0:start', ...expected, 'paragraph@0:end']);
+  });
+
+  // R9-FMT-2: R8-FMT-5's blank line between two paragraphs of one block was
+  // allowed only where Firefox indents, so with no list, quote or definition
+  // in the copy -- a drag begun inside a list, where Firefox writes bare
+  // `<li>`s, or any table cell -- the second paragraph's drawn leading
+  // spaces were dropped. Real Firefox copies, by a mouse drag from the start
+  // of the first element to the end of the last.
+  test.each([
+    [
+      '<li class="pw" id="s"><p>First paragraph</p><p>  indented second</p></li><li class="pw" id="e">Next item</li>',
+      'First paragraph\n\n  indented second\nNext item',
+      ['bulleted_list@0:First paragraph\n  indented second', 'bulleted_list@0:Next item'],
+    ],
+    [
+      '<li id="s"><p>First paragraph</p><p class="pw">  indented second</p></li><li id="e">Next item</li>',
+      'First paragraph\n\n  indented second\nNext item',
+      ['bulleted_list@0:First paragraph\n  indented second', 'bulleted_list@0:Next item'],
+    ],
+    [
+      '<li class="pw" id="s"><p>  two</p><p>  three</p></li><li id="e">Next item</li>',
+      '  two\n\n  three\nNext item',
+      ['bulleted_list@0:  two\n  three', 'bulleted_list@0:Next item'],
+    ],
+    [
+      '<p id="s">Lead</p><table><tbody><tr><td class="pw"><p>First paragraph</p><p>  indented second</p></td><td id="e">z</td></tr></tbody></table>',
+      'Lead\n\nFirst paragraph\n\n  indented second\n\tz',
+      ['paragraph@0:Lead', 'table:[["First paragraph\\n  indented second","z"]]'],
+    ],
+    [
+      '<p id="s">Lead</p><table><tbody><tr><th class="pw"><p>First paragraph</p><p>  indented second</p></th><td id="e">z</td></tr></tbody></table>',
+      'Lead\n\nFirst paragraph\n\n  indented second\n\tz',
+      ['paragraph@0:Lead', 'table:[["First paragraph\\n  indented second","z"]]'],
+    ],
+    [
+      '<p id="s">Lead</p><table><tbody><tr><td class="pw"><p>One</p><p>  two</p><p>   three</p></td><td id="e">z</td></tr></tbody></table>',
+      'Lead\n\nOne\n\n  two\n\n   three\n\tz',
+      ['paragraph@0:Lead', 'table:[["One\\n  two\\n   three","z"]]'],
+    ],
+    [
+      '<p id="s">Lead</p><table><tbody><tr><td><p>First paragraph</p><p class="pw">  indented second</p></td><td id="e">z</td></tr></tbody></table>',
+      'Lead\n\nFirst paragraph\n\n  indented second\n\tz',
+      ['paragraph@0:Lead', 'table:[["First paragraph\\n  indented second","z"]]'],
+    ],
+    [
+      '<p id="s">Lead</p><table><tbody><tr><td class="pw">\n<p>First paragraph</p>\n<p>  indented second</p>\n</td><td id="e">z</td></tr></tbody></table>',
+      'Lead\n\nFirst paragraph\n\n  indented second\n\n\tz',
+      ['paragraph@0:Lead', 'table:[["First paragraph\\n  indented second","z"]]'],
+    ],
+    [
+      '<p id="s">Lead</p><table dir="rtl"><tbody><tr><td class="pw"><p>الفقرة الأولى</p><p>  الفقرة الثانية</p></td><td id="e">z</td></tr></tbody></table>',
+      'Lead\n\nالفقرة الأولى\n\n  الفقرة الثانية\n\tz',
+      ['paragraph@0:Lead', 'table:[["الفقرة الأولى\\n  الفقرة الثانية","z"]]'],
+    ],
+    // Undrawn, the spaces stay out, as before.
+    [
+      '<li id="s"><p>First paragraph</p><p>  indented second</p></li><li id="e">Next item</li>',
+      'First paragraph\n\nindented second\nNext item',
+      ['bulleted_list@0:First paragraph\nindented second', 'bulleted_list@0:Next item'],
+    ],
+    [
+      '<p id="s">Lead</p><table><tbody><tr><td><p>First paragraph</p><p>  indented second</p></td><td id="e">z</td></tr></tbody></table>',
+      'Lead\n\nFirst paragraph\n\nindented second\n\tz',
+      ['paragraph@0:Lead', 'table:[["First paragraph\\nindented second","z"]]'],
+    ],
+    // Read right already: two `<div>`s are one line feed apart.
+    [
+      '<p id="s">Lead</p><table><tbody><tr><td class="pw"><div>First line</div><div>  indented second</div></td><td id="e">z</td></tr></tbody></table>',
+      'Lead\nFirst line\n  indented second\n\tz',
+      ['paragraph@0:Lead', 'table:[["First line\\n  indented second","z"]]'],
+    ],
+    [
+      '<li class="pw" id="s"><div>First line</div><div>  indented second</div></li><li id="e">Next item</li>',
+      'First line\n  indented second\nNext item',
+      ['bulleted_list@0:First line\n  indented second', 'bulleted_list@0:Next item'],
+    ],
+  ])('a blank line with no indentation: %j', (html, plain, expected) => {
+    expect(read(html, plain)).toEqual(expected);
+  });
+
+  // R9-RV-FMT-1: a block with no indentation of its own can hold a list, a
+  // quote or a definition Firefox does indent, and the line after the blank
+  // line is then indented by that element's four (or eight) spaces -- which
+  // R9-FMT-2's rule took for the block's own drawn spaces. R9-RV-FMT-3: and
+  // R8-FMT-4's rule never reached such an element, so the undrawn spaces
+  // after a `<br>` in a `normal` item in a cell were kept, and a `pre-wrap`
+  // one's drawn spaces dropped. Each line is matched past the indentation of
+  // the element its first character stands in. Real Firefox copies, by a
+  // mouse drag from `Intro` (or the item's start) to the end of the last.
+  const cell = (text: string) => [
+    'paragraph@0:Intro',
+    `table:[[${text},"zed"]]`,
+    'paragraph@0:Outro text',
+  ];
+
+  test.each([
+    [
+      '<p id="s">Intro</p><table><tbody><tr><td><p>First para</p><ul><li>    item text</li></ul></td><td>zed</td></tr></tbody></table><p id="e">Outro text</p>',
+      'Intro\n\nFirst para\n\n    item text\n\n\tzed\n\nOutro text',
+      cell('"First para\\nitem text"'),
+    ],
+    [
+      '<p id="s">Intro</p><table><tbody><tr><td><p>First para</p><ol><li>    item text</li></ol></td><td>zed</td></tr></tbody></table><p id="e">Outro text</p>',
+      'Intro\n\nFirst para\n\n    item text\n\n\tzed\n\nOutro text',
+      cell('"First para\\nitem text"'),
+    ],
+    [
+      '<p id="s">Intro</p><table><tbody><tr><td><p>First para</p><blockquote>    quoted text</blockquote></td><td>zed</td></tr></tbody></table><p id="e">Outro text</p>',
+      'Intro\n\nFirst para\n\n    quoted text\n\n\tzed\n\nOutro text',
+      cell('"First para\\nquoted text"'),
+    ],
+    [
+      '<p id="s">Intro</p><table><tbody><tr><td><p>First para</p><blockquote><blockquote>        deep text</blockquote></blockquote></td><td>zed</td></tr></tbody></table><p id="e">Outro text</p>',
+      'Intro\n\nFirst para\n\n        deep text\n\n\tzed\n\nOutro text',
+      cell('"First para\\ndeep text"'),
+    ],
+    [
+      '<li id="s"><p>First para</p><dl><dd>    def text</dd></dl></li><li id="e">Next item</li>',
+      'First para\n\n    def text\n\nNext item',
+      ['bulleted_list@0:First para\ndef text', 'bulleted_list@0:Next item'],
+    ],
+    // R9-RV-FMT-3, wrong before R9-FMT-2 as well: a definition, and the
+    // spaces after a `<br>` in a `normal` item, after a paragraph or first.
+    [
+      '<p id="s">Intro</p><table><tbody><tr><td><p>First para</p><dl><dt>term</dt><dd>    def text</dd></dl></td><td>zed</td></tr></tbody></table><p id="e">Outro text</p>',
+      'Intro\n\nFirst para\n\nterm\n    def text\n\n\tzed\n\nOutro text',
+      cell('"First para\\nterm\\ndef text"'),
+    ],
+    [
+      '<p id="s">Intro</p><table><tbody><tr><td><p>First para</p><ul><li>one<br>    two</li></ul></td><td>zed</td></tr></tbody></table><p id="e">Outro text</p>',
+      'Intro\n\nFirst para\n\n    one\n    two\n\n\tzed\n\nOutro text',
+      cell('"First para\\none\\ntwo"'),
+    ],
+    [
+      '<p id="s">Intro</p><table><tbody><tr><td><ul><li>one<br>    two</li></ul></td><td>zed</td></tr></tbody></table><p id="e">Outro text</p>',
+      'Intro\n\n    one\n    two\n\n\tzed\n\nOutro text',
+      cell('"one\\ntwo"'),
+    ],
+    // Drawn, past the element's indentation, they stand.
+    [
+      '<p id="s">Intro</p><table><tbody><tr><td><p>First para</p><ul><li class="pw">  item drawn</li></ul></td><td>zed</td></tr></tbody></table><p id="e">Outro text</p>',
+      'Intro\n\nFirst para\n\n      item drawn\n\n\tzed\n\nOutro text',
+      cell('"First para\\n  item drawn"'),
+    ],
+    [
+      '<p id="s">Intro</p><table><tbody><tr><td><p>First para</p><blockquote class="pw">  quoted drawn</blockquote></td><td>zed</td></tr></tbody></table><p id="e">Outro text</p>',
+      'Intro\n\nFirst para\n\n      quoted drawn\n\n\tzed\n\nOutro text',
+      cell('"First para\\n  quoted drawn"'),
+    ],
+    [
+      '<p id="s">Intro</p><table><tbody><tr><td><p>First para</p><ul><li class="pw">one<br>  two</li></ul></td><td>zed</td></tr></tbody></table><p id="e">Outro text</p>',
+      'Intro\n\nFirst para\n\n    one\n      two\n\n\tzed\n\nOutro text',
+      cell('"First para\\none\\n  two"'),
+    ],
+    [
+      '<p id="s">Intro</p><table><tbody><tr><td><ul><li class="pw">one<br>    two</li></ul></td><td>zed</td></tr></tbody></table><p id="e">Outro text</p>',
+      'Intro\n\n    one\n        two\n\n\tzed\n\nOutro text',
+      cell('"one\\n    two"'),
+    ],
+    [
+      '<p id="s">Intro</p><table><tbody><tr><td><ul><li class="pw">one<br>  two</li></ul></td><td>zed</td></tr></tbody></table><p id="e">Outro text</p>',
+      'Intro\n\n    one\n      two\n\n\tzed\n\nOutro text',
+      cell('"one\\n  two"'),
+    ],
+    // Read right already: the indentation-0 blank line, where nothing indents.
+    [
+      '<p id="s">Intro</p><table><tbody><tr><td><div class="pw"><p>First para</p><p>  second drawn</p></div></td><td>zed</td></tr></tbody></table><p id="e">Outro text</p>',
+      'Intro\n\nFirst para\n\n  second drawn\n\tzed\n\nOutro text',
+      cell('"First para\\n  second drawn"'),
+    ],
+    [
+      '<li id="s"><p>First para</p><p class="pw">  second drawn</p></li><li id="e">Next item</li>',
+      'First para\n\n  second drawn\nNext item',
+      ['bulleted_list@0:First para\n  second drawn', 'bulleted_list@0:Next item'],
+    ],
+  ])('a line in an element indented inside a block that is not: %j', (html, plain, expected) => {
+    expect(read(html, plain)).toEqual(expected);
+  });
+
+  // R9-RV2-FMT-1: a line matched past its element's indentation was judged
+  // with the whole gap before it, so the space ending the line above rode
+  // along -- Firefox writes a `<dd>`'s trailing space whether it was drawn or
+  // not -- and an undrawn one the plain text left out cost the next line its
+  // drawn lead. The gap is split at its first line feed: what ends the line
+  // above is the collapsed reading's where a block ends there, and the line
+  // below is matched from the line feed on. Real Firefox copies, by a drag
+  // from `Lead` to the end of `End`.
+  const at = (text: string) => ['paragraph@0:Lead', `table:[[${text},"zed"]]`, 'paragraph@0:End'];
+
+  test.each([
+    [
+      '<p id="s0">Lead</p><table><tbody><tr><td><p>a</p><dl><dd>one </dd></dl><ul><li class="pw">  two</li></ul></td><td>zed</td></tr></tbody></table><p id="e">End</p>',
+      'Lead\n\na\n\n    one \n\n      two\n\n\tzed\n\nEnd',
+      at('"a\\none\\n  two"'),
+    ],
+    [
+      '<p id="s0">Lead</p><table><tbody><tr><td><p>a</p><dl><dd>one </dd></dl><blockquote class="pw">  two</blockquote></td><td>zed</td></tr></tbody></table><p id="e">End</p>',
+      'Lead\n\na\n\n    one \n\n      two\n\n\tzed\n\nEnd',
+      at('"a\\none\\n  two"'),
+    ],
+    [
+      '<p id="s0">Lead</p><table><tbody><tr><td><dl><dt>t</dt><dd>one<br>two </dd></dl><ol><li><p class="pw">  three</p></li></ol></td><td>zed</td></tr></tbody></table><p id="e">End</p>',
+      'Lead\n\nt\n    one\n    two \n\n      three\n\n\tzed\n\nEnd',
+      at('"t\\none\\ntwo\\n  three"'),
+    ],
+    // Wrong before R9-FMT-2 as well: the space the plain text left out.
+    [
+      '<p id="s0">Lead</p><table><tbody><tr><td><p>one </p><p class="pw">  two</p></td><td>zed</td></tr></tbody></table><p id="e">End</p>',
+      'Lead\n\none\n\n  two\n\tzed\n\nEnd',
+      at('"one\\n  two"'),
+    ],
+    [
+      '<p id="s0">Lead</p><table><tbody><tr><td><ul><li>one </li><li class="pw">  two</li></ul></td><td>zed</td></tr></tbody></table><p id="e">End</p>',
+      'Lead\n\n    one\n      two\n\n\tzed\n\nEnd',
+      at('"one\\n  two"'),
+    ],
+    [
+      '<p id="s0">Lead</p><table><tbody><tr><td>one <br><span class="pw">  two</span></td><td>zed</td></tr></tbody></table><p id="e">End</p>',
+      'Lead\none\n  two\tzed\n\nEnd',
+      at('"one\\n  two"'),
+    ],
+    // Read right already: nothing drawn after it, or a drawn space ending a
+    // line inside one block (`pre-wrap` keeps it, and Firefox writes it).
+    [
+      '<p id="s0">Lead</p><table><tbody><tr><td><p>a</p><dl><dd>one </dd></dl><ul><li>    two</li></ul></td><td>zed</td></tr></tbody></table><p id="e">End</p>',
+      'Lead\n\na\n\n    one \n\n    two\n\n\tzed\n\nEnd',
+      at('"a\\none\\ntwo"'),
+    ],
+    [
+      '<p id="s">Lead</p><table><tbody><tr><td><p class="pw">one <br>  two</p></td><td>zed</td></tr></tbody></table><p id="e">End</p>',
+      'Lead\n\none \n  two\n\tzed\n\nEnd',
+      at('"one \\n  two"'),
+    ],
+    [
+      '<p id="s">Lead</p><table><tbody><tr><td><p class="pw">one  <br>two</p></td><td>zed</td></tr></tbody></table><p id="e">End</p>',
+      'Lead\n\none  \ntwo\n\tzed\n\nEnd',
+      at('"one  \\ntwo"'),
+    ],
+    // Its source line feed collapses to a space, so nothing is split.
+    [
+      '<p id="s0">Lead</p><table><tbody><tr><td><p class="pw">    <span>gamma</span> \n    delta</p></td><td>zed</td></tr></tbody></table><p id="e">End</p>',
+      'Lead\n\n    gamma \n    delta\n\tzed\n\nEnd',
+      at('"    gamma \\n    delta"'),
+    ],
+    // The cost (R9-RV2-FMT-1's decision): a `pre-wrap` definition's drawn
+    // trailing space ends a block, and goes as an undrawn one would.
+    [
+      '<p id="s">Lead</p><table><tbody><tr><td><p>a</p><dl><dd class="pw">one </dd></dl><ul><li class="pw">  two</li></ul></td><td>zed</td></tr></tbody></table><p id="e">End</p>',
+      'Lead\n\na\n\n    one \n\n      two\n\n\tzed\n\nEnd',
+      at('"a\\none\\n  two"'),
+    ],
+  ])('a line feed splits the gap: %j', (html, plain, expected) => {
+    expect(read(html, plain)).toEqual(expected);
+  });
+
+  test('a block end the rule before kept, it keeps (cell whose text starts in a list)', () => {
+    // The second reviewer's fuzz case (cell, seed 99, #18), a real Firefox
+    // copy: the `pre-wrap` item's drawn `  ` before its `<dl>` ends a block,
+    // and the gap read as a whole by the cell's lead indentation kept it.
+    const [, table] = blocksFromHtml(
+      document,
+      '<p id="s0">Lead</p><table><tbody><tr><td class="pw"><ol><li><p class="pw">    <em> </em>gamma286&lt;eps287</p><blockquote><p>\u00a0<span>gamma284</span>\f<br><br>delta285    </p></blockquote></li></ol><p class="pw">    <b>delta288</b><br>delta289\neps290  </p><p>    eps291\u0001 <br>gamma292    </p><blockquote><p>\u00a0<b>eps293</b>\u000b<br>beta294</p></blockquote></td><td class="pw"><ul><li class="pw"> \u00a0<i>be</i>ta300\u200beps301 beta302  <dl><dt>alpha297</dt><dd class="pw">    <span>beta298</span>  beta299<blockquote class="pw">    <b>gamma295</b>&amp;<br> delta296</blockquote></dd></dl></li><li>    gamma303<br>        gamma304\n  </li></ul><div>    <a href="#">eps305</a><br><br>beta306  </div></td></tr></tbody></table><p id="e">End</p>',
+      {
+        plain:
+          'Lead\n\n         gamma286<eps287\n\n         gamma284\f\n\n        delta285    \n\n    delta288\ndelta289\neps290  \n\n    eps291\u0001 \ngamma292    \n\n     eps293\u000b\n    beta294\n\n\t\n\n      beta300\u200beps301 beta302  \n\n    alpha297\n            beta298  beta299\n\n                gamma295&\n             delta296\n\n        gamma303\n            gamma304\n      \n\n    eps305\n\nbeta306  \n\nEnd',
+      },
+    );
+    const lines = table!
+      .rows!.flat()
+      .map(richToPlainText)
+      .join('\n')
+      .replace(/\u00a0/g, ' ')
+      .split('\n');
+
+    expect(lines).toContain('  beta300\u200beps301 beta302  ');
+  });
+
+  test('a block end the plain text holds exactly, gap and all, still stands', () => {
+    // The reviewer's fuzz case (seed 5, #20), a real Firefox copy of a drag
+    // begun inside a list: `gamma241    ` ends a `pre-wrap` `<div>`, drawn,
+    // and the whole gap to the next `<div>` is in the plain text as it is in
+    // the source -- read so before the split, and kept.
+    const [first] = blocksFromHtml(
+      document,
+      '<li id="l1"><p id="p1">ead text</p><div class="pw">beta239 \n    alpha240  <br>gamma241    </div><div class="pw">\u00a0<a href="http://localhost:4404/?doc=empty#">delta242</a><br>alpha243\n  </div></li><li id="l2"><dl><dt>alpha244</dt><dd class="pw">    delta245\u2003delta246</dd></dl><blockquote class="pw">    alpha247\u007f\ndelta248</blockquote></li><li id="l3">Final</li>',
+      {
+        plain:
+          'ead text\nbeta239 \n    alpha240  \ngamma241    \n delta242\nalpha243\n  \n\nalpha244\n        delta245\u2003delta246\n\n        alpha247\u007f\n    delta248\n\nFinal',
+      },
+    );
+
+    expect(blockText(first!).replace(/\u00a0/g, ' ')).toBe(
+      'ead text\nbeta239 \n    alpha240  \ngamma241    \n delta242\nalpha243',
+    );
+  });
+
+  test('a cell of many lines in many lists costs its length', () => {
+    const time = (lines: number): number => {
+      const html = `<table><tbody><tr><td>${'<p>para</p><ul><li class="pw">  item</li></ul>'.repeat(lines)}</td></tr></tbody></table>`;
+      const plain = 'para\n\n      item\n\n'.repeat(lines);
+      let best = Infinity;
+
+      for (let run = 0; run < 3; run += 1) {
+        const start = performance.now();
+        blocksFromHtml(document, html, { plain });
+        best = Math.min(best, performance.now() - start);
+      }
+
+      return Math.max(best, 0.1);
+    };
+
+    time(200);
+    expect(time(3200) / time(800)).toBeLessThan(8);
+    expect(
+      read(
+        `<table><tbody><tr><td>${'<p>para</p><ul><li class="pw">  item</li></ul>'.repeat(2)}</td></tr></tbody></table>`,
+        'para\n\n      item\n\npara\n\n      item\n\n',
+      ),
+    ).toEqual(['table:[["para\\n  item\\npara\\n  item"]]']);
+  });
+
+  test('where the characters read are not the ones counted, a line is matched as before', () => {
+    // Built, not copied: a control character is a solid character of the
+    // source the text read drops, so counted by text node the `b` would be
+    // placed in the paragraph, and its line matched with no indentation --
+    // the item's four undrawn spaces taken for drawn ones.
+    expect(
+      read(
+        '<table><tbody><tr><td><p>a&#1;</p><ul><li>    b</li></ul></td><td>zed</td></tr></tbody></table>',
+        'a\n\n    b\n\n\tzed',
+      ),
+    ).toEqual(['table:[["a\\nb","zed"]]']);
+  });
+
+  // R8-FMT-6: only collapsible whitespace or a space the block starts with
+  // asked the plain text, so a drawn space after a `<br>` in a block a
+  // stylesheet makes pre-wrap was lost. Undrawn, Firefox leaves it out.
+  test.each([
+    [
+      '<p id="a">start</p><p class="pw x">one<br> two</p><p id="b">end</p>',
+      'start\n\none\n two\n\nend',
+      'paragraph@0:one\n two',
+    ],
+    [
+      '<p id="a">start</p><ul><li class="pw x">one<br> two</li></ul><p id="b">end</p>',
+      'start\n\n    one\n     two\n\nend',
+      'bulleted_list@0:one\n two',
+    ],
+    [
+      '<p id="a">start</p><blockquote class="pw x">one<br> two</blockquote><p id="b">end</p>',
+      'start\n\n    one\n     two\n\nend',
+      'quote@0:one\n two',
+    ],
+    [
+      '<p id="a">start</p><p class="x">one<br> two</p><p id="b">end</p>',
+      'start\n\none\ntwo\n\nend',
+      'paragraph@0:one\ntwo',
+    ],
+    [
+      '<p id="a">start</p><ul><li class="x">one<br> two</li></ul><p id="b">end</p>',
+      'start\n\n    one\n    two\n\nend',
+      'bulleted_list@0:one\ntwo',
+    ],
+    [
+      '<p id="a">start</p><p class="x">one<br>  two</p><p id="b">end</p>',
+      'start\n\none\ntwo\n\nend',
+      'paragraph@0:one\ntwo',
+    ],
+    // A loose `<div>`'s text, read as an inline run.
+    [
+      '<p id="a">start</p><div class="pw x">one<br> two</div><p id="b">end</p>',
+      'start\none\n two\n\nend',
+      'paragraph@0:one\n two',
+    ],
+    [
+      '<p id="a">start</p><div class="x">one<br> two</div><p id="b">end</p>',
+      'start\none\ntwo\n\nend',
+      'paragraph@0:one\ntwo',
+    ],
+  ])('a space after a break: %j', (html, plain, expected) => {
+    expect(read(html, plain)).toEqual(['paragraph@0:start', expected, 'paragraph@0:end']);
+  });
+
+  test('each line costs its own length, however many there are', () => {
+    // Every gap is asked whether it shows the indentation, a blank line is
+    // passed over, and a block is walked once for the breaks it holds.
+    const time = (lines: number): number => {
+      const text = Array.from({ length: lines }, (_, index) => `line ${index}`);
+      const html = `<p>start</p><ul><li><ul><li>${text.join('\n\n')}</li></ul></li></ul><p>${text.join('<br> ')}</p>`;
+      const plain = `start\n\n        ${text.join('\n\n        ')}\n\n${text.join('\n ')}`;
+      let best = Infinity;
+
+      for (let run = 0; run < 3; run += 1) {
+        const start = performance.now();
+        blocksFromHtml(document, html, { plain });
+        best = Math.min(best, performance.now() - start);
+      }
+
+      return Math.max(best, 0.1);
+    };
+
+    time(200);
+    expect(time(8000) / time(2000)).toBeLessThan(8);
+    expect(
+      read(
+        '<p>start</p><ul><li><ul><li>a\n\nb</li></ul></li></ul>',
+        'start\n\n        a\n\n        b',
+      ),
+    ).toEqual(['paragraph@0:start', 'bulleted_list@1:a\n\nb']);
+  });
+
+  // R8-FMT-8 (a known limit): Firefox starts each line of a `type="cite"`
+  // quote with `>` in its plain text, so nothing in one is found there and
+  // its whitespace reads collapsed. Pinned so that a change to it is chosen.
+  test('a cite quote reads collapsed', () => {
+    expect(
+      read(
+        '<p id="a">start</p><blockquote type="cite"><p class="pw x"> quoted  text</p></blockquote><p id="b">end</p>',
+        'start\n>\n>  quoted  text\n\nend',
+      ),
+    ).toEqual(['paragraph@0:start', 'quote@0:quoted text', 'paragraph@0:end']);
+  });
+
+  // R10-FMT-1: a `pre-wrap` line's drawn trailing spaces, inside an element
+  // that stands in a block with text before it (`start` then a list, quote or
+  // definition in a cell), are kept because the line above the split and the
+  // line below are in one block (`lineBlock`) -- not because the gap matched
+  // as before (`asBefore`), which here it does not: the rule before the split
+  // dropped them. Real Firefox copies, by a mouse drag from the start of
+  // `Lead` to the end of `End`.
+  test.each([
+    [
+      '<p id="s0">Lead</p><table><tbody><tr><td>start<ul><li class="pw">one  <br>two</li></ul></td><td>z</td></tr></tbody></table><p id="e">End</p>',
+      'Lead\nstart\n\n    one  \n    two\n\n\tz\n\nEnd',
+      '"start\\none  \\ntwo"',
+    ],
+    [
+      '<p id="s0">Lead</p><table><tbody><tr><td>start<blockquote class="pw">one  <br>two</blockquote></td><td>z</td></tr></tbody></table><p id="e">End</p>',
+      'Lead\nstart\n\n    one  \n    two\n\n\tz\n\nEnd',
+      '"start\\none  \\ntwo"',
+    ],
+    [
+      '<p id="s0">Lead</p><table><tbody><tr><td>start<dl><dd class="pw">one   <br>two</dd></dl></td><td>z</td></tr></tbody></table><p id="e">End</p>',
+      'Lead\nstart\n\n    one   \n    two\n\n\tz\n\nEnd',
+      '"start\\none   \\ntwo"',
+    ],
+  ])('a drawn trailing space within one block stands: %j', (html, plain, text) => {
+    expect(read(html, plain)).toEqual([
+      'paragraph@0:Lead',
+      `table:[[${text},"z"]]`,
+      'paragraph@0:End',
+    ]);
+  });
+
+  // R10-FMT-1: a no-break space is not a solid character of the plain text
+  // -- Firefox writes it there as a space -- so it is not counted as one, or
+  // the count of solids no longer equals the text read's, the line-by-line
+  // match is given up, and the next paragraph's drawn lead is dropped. Real
+  // Firefox copies, by a mouse drag from the start of `Lead` to the end of
+  // `End`.
+  test.each([
+    [
+      '<p id="s0">Lead</p><table><tbody><tr><td class="pw"><p>First para</p><p>   Second para</p></td><td>z</td></tr></tbody></table><p id="e">End</p>',
+      '"First para\\n   Second para"',
+    ],
+    [
+      '<p id="s0">Lead</p><table><tbody><tr><td class="pw"><p>First para</p><p>   Second para</p></td><td>z</td></tr></tbody></table><p id="e">End</p>',
+      '"First para\\n   Second para"',
+    ],
+  ])('a no-break space is not counted as solid: %j', (html, text) => {
+    expect(read(html, 'Lead\n\nFirst para\n\n   Second para\n\tz\n\nEnd')).toEqual([
+      'paragraph@0:Lead',
+      `table:[[${text},"z"]]`,
+      'paragraph@0:End',
+    ]);
+  });
+
+  // R10-FMT-2 (a known limit): Firefox writes `white-space: pre-line` text as
+  // preformatted in its plain text -- the source spaces `pre-line` collapsed,
+  // and drew none of, are there -- and a page's classes rather than its
+  // computed style in its HTML, so a `pre-line` paragraph after a blank line
+  // in a table cell or a bare `<li>` arrives byte for byte as its `pre-wrap`
+  // twin does (pinned above, under "a blank line with no indentation"), and
+  // is read the same way: with the spaces nobody saw. Telling them apart
+  // would take the `pre-wrap` case's drawn spaces away. Pinned so that a
+  // change to it is chosen. Real Firefox copies, by a mouse drag from `Lead`
+  // (or `ad item`) to the end of the last block.
+  test.each([
+    [
+      '<p id="s0">Lead</p><table><tbody><tr><td class="pl"><p>First para</p><p>   Second para</p></td><td>Other</td></tr></tbody></table><p id="e">End</p>',
+      'Lead\n\nFirst para\n\n   Second para\n\tOther\n\nEnd',
+      ['paragraph@0:Lead', 'table:[["First para\\n   Second para","Other"]]', 'paragraph@0:End'],
+    ],
+    [
+      '<li><p id="s0">ad item</p><ul><li class="pl"><p>First para</p><p>   Second para</p></li></ul></li><li id="e">Last</li>',
+      'ad item\n\n    First para\n\n       Second para\n\nLast',
+      [
+        'bulleted_list@0:ad item',
+        'bulleted_list@1:First para\n   Second para',
+        'bulleted_list@0:Last',
+      ],
+    ],
+    [
+      '<p id="s0">Lead</p><table><tbody><tr><td class="pl">First line<br><p>   Second para</p></td></tr></tbody></table><p id="e">End</p>',
+      'Lead\nFirst line\n\n   Second para\n\nEnd',
+      ['paragraph@0:Lead', 'table:[["First line\\n   Second para"]]', 'paragraph@0:End'],
+    ],
+  ])('a pre-line paragraph after a blank line reads as pre-wrap: %j', (html, plain, expected) => {
+    expect(read(html, plain)).toEqual(expected);
   });
 });

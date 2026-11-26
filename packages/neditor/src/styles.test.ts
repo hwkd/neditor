@@ -569,6 +569,59 @@ describe("sizes and directions that hold on somebody else's page", () => {
   });
 });
 
+describe('rules whose effect happy-dom cannot observe, pinned as written', () => {
+  const rule = (selector: string): string => {
+    const start = NEDITOR_STYLES.indexOf(`${selector} {`);
+
+    expect(start, `${selector} exists`).toBeGreaterThan(-1);
+    return NEDITOR_STYLES.slice(start, NEDITOR_STYLES.indexOf('}', start));
+  };
+
+  /**
+   * UI-9. Generated content is part of the accessible name, so an empty
+   * caption named its figure "Add a caption". The alternative-text form keeps
+   * the placeholder drawn and unread; the plain form stays first because a
+   * declaration an engine rejects is dropped whole. The e2e suite checks the
+   * name itself (images I8); happy-dom computes neither.
+   */
+  test('the placeholder is drawn with empty alternative text, after a plain fallback', () => {
+    expect(rule(".neditor-block__content[contenteditable='true']:empty::before")).toMatch(
+      /content: attr\(data-placeholder\);\s*content: attr\(data-placeholder\) \/ '';/,
+    );
+  });
+
+  /** UI-6: 20em is wider than a 320px screen, and the menu overflowed it. */
+  test('the slash menu is capped at the viewport, like the other popovers', () => {
+    expect(rule('.neditor-slash-menu')).toContain('max-width: calc(100vw - 2rem);');
+  });
+
+  /**
+   * UI-4: with no offset, the absolutely positioned gutter sat at its static
+   * position below the last block until the first hover, adding overflow the
+   * hover then removed. The e2e suite checks the layout (gutter-drag G14).
+   */
+  test('the gutter has an offset before it is first placed', () => {
+    expect(rule('.neditor-gutter')).toMatch(/\n\s*top: 0;/);
+  });
+
+  /**
+   * Round 14, review 4: a range the reader drew in the page across the editor
+   * took in the live region's last announcement ("3 blocks selected"), and
+   * Chromium's Mod+C copied it. The e2e suite checks the range and the copy
+   * (accessibility A3b); happy-dom applies no user-select to a selection.
+   * Not under a drag across blocks: with the blocks' text unselectable then,
+   * the live region is the one place in the editor WebKit's own caret can
+   * go, and without it the caret went to the page after the editor (read-only
+   * RO6n, RO6r).
+   */
+  test('the live region cannot be selected, in WebKit either, except under a drag', () => {
+    expect(rule('.neditor-live-region')).not.toContain('user-select');
+    expect(rule(".neditor:not([data-selecting='true']) .neditor-live-region")).toMatch(
+      /-webkit-user-select: none;\s*user-select: none;/,
+    );
+  });
+});
+
 describe('sizes that matter on a phone and for a broken image', () => {
   /**
    * iOS Safari zooms the page in whenever a focused input computes under 16px,

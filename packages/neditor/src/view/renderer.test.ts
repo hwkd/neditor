@@ -379,6 +379,260 @@ describe('removing a block leaves the others where they are', () => {
   });
 });
 
+describe('a reorder moves the other blocks around the one holding focus', () => {
+  /*
+   * R13-KEY-2. A node is moved by taking it out and putting it back, and taking
+   * out the element focus is in blurs it: a peer's `setDocument` that moved the
+   * reader's block, or moved a block from above it to below (which positioning
+   * from the top does by moving the reader's block up past it), left focus on
+   * `<body>` and the next keys typed nothing. happy-dom keeps focus on a node
+   * that is taken out and put back, so what is pinned here is the cause: the
+   * focused block's element is never removed from the root. The keys landing
+   * is pinned in every engine by `api.spec.ts` AP12.
+   */
+  const ids = ['a', 'b', 'c', 'd', 'e'];
+  const blocksIn = (order: readonly string[]): Block[] =>
+    order.map((id) => block({ id, content: [{ text: id.toUpperCase() }] }));
+
+  /** Every element taken out of the root while `act` runs. */
+  const detached = (act: () => void): Node[] => {
+    const seen: Node[] = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        seen.push(...record.removedNodes);
+      }
+    });
+    observer.observe(root, { childList: true });
+    act();
+    seen.push(...observer.takeRecords().flatMap((record) => [...record.removedNodes]));
+    observer.disconnect();
+
+    return seen;
+  };
+
+  /** Every order of `items`. */
+  const permutations = <T>(items: readonly T[]): T[][] =>
+    items.length <= 1
+      ? [[...items]]
+      : items.flatMap((item, index) =>
+          permutations([...items.slice(0, index), ...items.slice(index + 1)]).map((rest) => [
+            item,
+            ...rest,
+          ]),
+        );
+
+  test('the literal case: c moved, and a moved from above it to below it', () => {
+    for (const order of [
+      ['b', 'c', 'a', 'd', 'e'],
+      ['b', 'c', 'd', 'e', 'a'],
+      ['c', 'a', 'b', 'd', 'e'],
+    ]) {
+      renderer.render(blocksIn(ids));
+      const host = renderer.getView('c')!.content!;
+      host.focus();
+
+      const removed = detached(() => renderer.render(blocksIn(order)));
+
+      expect(rendered()).toEqual(order);
+      expect(removed, `${order.join('')}: the focused block was taken out`).not.toContain(
+        renderer.getView('c')!.root,
+      );
+      expect(document.activeElement).toBe(host);
+    }
+  });
+
+  test('from every order to every order, with focus in each block', () => {
+    const orders = permutations(ids);
+    // Every target order from two starting orders, focus in every block:
+    // 2 × 120 × 5 renders, each checked for the order and the pinned element.
+    for (const start of [ids, ['e', 'c', 'a', 'd', 'b']]) {
+      for (const order of orders) {
+        for (const focused of ids) {
+          renderer.render(blocksIn(start));
+          const pinned = renderer.getView(focused)!.root;
+          renderer.getView(focused)!.content!.focus();
+
+          const removed = detached(() => renderer.render(blocksIn(order)));
+
+          expect(rendered()).toEqual(order);
+          expect(
+            removed.includes(pinned),
+            `${start.join('')} → ${order.join('')} (${focused})`,
+          ).toBe(false);
+        }
+      }
+    }
+  });
+
+  test('with blocks added and removed in the same render', () => {
+    renderer.render(blocksIn(ids));
+    const pinned = renderer.getView('c')!.root;
+    renderer.getView('c')!.content!.focus();
+
+    const removed = detached(() => renderer.render(blocksIn(['x', 'e', 'c', 'y', 'a'])));
+
+    expect(rendered()).toEqual(['x', 'e', 'c', 'y', 'a']);
+    expect(removed).not.toContain(pinned);
+  });
+
+  test('focus on a control inside a block pins its block too', () => {
+    const todo = (id: string): Block => block({ id, type: 'todo', checked: false });
+    renderer.render([todo('t1'), todo('t2'), todo('t3')]);
+    const pinned = renderer.getView('t3')!.root;
+    const checkbox = pinned.querySelector<HTMLElement>('.neditor-block__checkbox')!;
+    checkbox.focus();
+    expect(document.activeElement).toBe(checkbox);
+
+    const removed = detached(() => renderer.render([todo('t3'), todo('t1'), todo('t2')]));
+
+    expect(rendered()).toEqual(['t3', 't1', 't2']);
+    expect(removed).not.toContain(pinned);
+    expect(document.activeElement).toBe(checkbox);
+  });
+
+  test('a table cell holding focus pins its table', () => {
+    const table = block({
+      id: 'tb',
+      type: 'table',
+      rows: [
+        [[{ text: 'h' }], [{ text: 'i' }]],
+        [[{ text: 'x' }], [{ text: 'y' }]],
+      ],
+    });
+    renderer.render([...blocksIn(['a', 'b']), table]);
+    const pinned = renderer.getView('tb')!.root;
+    renderer.getView('tb')!.cells![1]![1]!.focus();
+
+    const removed = detached(() => renderer.render([table, ...blocksIn(['a', 'b'])]));
+
+    expect(rendered()).toEqual(['tb', 'a', 'b']);
+    expect(removed).not.toContain(pinned);
+  });
+
+  test('read through the shadow root of a shadow mount', () => {
+    // `document.activeElement` is only the shadow host there.
+    document.body.replaceChildren();
+    const outer = document.createElement('div');
+    document.body.append(outer);
+    const shadow = outer.attachShadow({ mode: 'open' });
+    root = document.createElement('div');
+    shadow.append(root);
+    renderer = new Renderer(root, hooks, DEFAULT_LABELS);
+    renderer.render(blocksIn(ids));
+    const pinned = renderer.getView('c')!.root;
+    renderer.getView('c')!.content!.focus();
+    expect(shadow.activeElement).toBe(renderer.getView('c')!.content);
+
+    const removed = detached(() => renderer.render(blocksIn(['c', 'a', 'b', 'd', 'e'])));
+
+    expect(rendered()).toEqual(['c', 'a', 'b', 'd', 'e']);
+    expect(removed).not.toContain(pinned);
+  });
+
+  test('a move that does not reach the focused block makes the same moves as with no focus', () => {
+    // Positioning from the top never moves the focused block in these, so the
+    // pinned order must not move anything the plain one did not.
+    for (const order of [
+      ['e', 'a', 'b', 'c', 'd'],
+      ['a', 'b', 'd', 'c', 'e'],
+      ['a', 'b', 'c', 'e', 'd'],
+    ]) {
+      const moves = (focus: boolean): string[] => {
+        renderer.render(blocksIn(ids));
+
+        if (focus) {
+          renderer.getView('c')!.content!.focus();
+        } else {
+          (document.activeElement as HTMLElement | null)?.blur();
+        }
+
+        const seen: string[] = [];
+        const original = root.insertBefore.bind(root);
+        root.insertBefore = ((node: Node, ref: Node | null) => {
+          seen.push((node as HTMLElement).dataset?.blockId ?? '?');
+          return original(node, ref);
+        }) as typeof root.insertBefore;
+        renderer.render(blocksIn(order));
+        root.insertBefore = original;
+
+        return seen;
+      };
+
+      expect({ order, moves: moves(true) }).toEqual({ order, moves: moves(false) });
+    }
+  });
+
+  test('with focus on a page button, the block the reader’s range is in stays', () => {
+    // A host's own toolbar button holds focus while it acts on the range
+    // (`api.spec.ts` AP11); taken out and put back, the block lost it.
+    renderer.render(blocksIn(ids));
+    const button = document.createElement('button');
+    document.body.append(button);
+    const text = renderer.getView('c')!.content!.firstChild!;
+    document.getSelection()!.setBaseAndExtent(text, 0, text, 1);
+    button.focus();
+    expect(document.activeElement).toBe(button);
+    const pinned = renderer.getView('c')!.root;
+
+    const removed = detached(() => renderer.render(blocksIn(['c', 'a', 'b', 'd', 'e'])));
+
+    expect(rendered()).toEqual(['c', 'a', 'b', 'd', 'e']);
+    expect(removed).not.toContain(pinned);
+    expect(document.getSelection()!.anchorNode).toBe(text);
+  });
+
+  test('the root itself holding focus (block selection) pins nothing', () => {
+    // Every pin reaches the same order, so the order alone cannot tell; the
+    // moves can. From a-e to b-e,a the plain top-down loop moves b, c, d and e
+    // in front of a; pinning any of b, c, d or e would move fewer.
+    const order = ['b', 'c', 'd', 'e', 'a'];
+    const moves = (rootFocused: boolean): string[] => {
+      root.tabIndex = -1;
+      renderer.render(blocksIn(ids));
+
+      if (rootFocused) {
+        root.focus();
+      } else {
+        (document.activeElement as HTMLElement | null)?.blur();
+      }
+
+      const seen: string[] = [];
+      const original = root.insertBefore.bind(root);
+      root.insertBefore = ((node: Node, ref: Node | null) => {
+        seen.push((node as HTMLElement).dataset?.blockId ?? '?');
+        return original(node, ref);
+      }) as typeof root.insertBefore;
+      renderer.render(blocksIn(order));
+      root.insertBefore = original;
+
+      expect(rendered()).toEqual(order);
+
+      return seen;
+    };
+
+    const withRoot = moves(true);
+    expect(document.activeElement).toBe(root);
+    expect(withRoot).toEqual(moves(false));
+    expect(moves(false)).toEqual(['b', 'c', 'd', 'e']);
+  });
+
+  test('the other children of the root stay after the blocks', () => {
+    // The editor keeps its live region, gutter and drop indicator in the root
+    // after the blocks; moving the blocks around a pinned one must not leave
+    // one of them in between.
+    renderer.render(blocksIn(ids));
+    const extra = document.createElement('span');
+    root.append(extra);
+    renderer.getView('a')!.content!.focus();
+
+    renderer.render(blocksIn(['b', 'c', 'd', 'e', 'a']));
+
+    expect(
+      [...root.children].map((child) => (child as HTMLElement).dataset.blockId ?? 'extra'),
+    ).toEqual(['b', 'c', 'd', 'e', 'a', 'extra']);
+  });
+});
+
 describe('a read-only empty image offers nothing to author', () => {
   /*
    * An image block with no source draws an "Add an image" button. Disabling it

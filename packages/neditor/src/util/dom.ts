@@ -11,6 +11,7 @@
 /** DOM node type constants, without depending on a realm's `Node` global. */
 const ELEMENT_NODE = 1;
 const TEXT_NODE = 3;
+const DOCUMENT_FRAGMENT_NODE = 11;
 
 export function isNode(value: unknown): value is Node {
   return (
@@ -27,6 +28,15 @@ export function isElement(value: unknown): value is Element {
 
 export function isTextNode(value: unknown): value is Text {
   return isNode(value) && value.nodeType === TEXT_NODE;
+}
+
+/**
+ * True for a shadow root, open or closed: a document fragment with a host.
+ * Asked of what `getRootNode()` answers, which is the only way to a closed
+ * root -- its host's `shadowRoot` is null.
+ */
+export function isShadowRoot(value: unknown): value is ShadowRoot {
+  return isNode(value) && value.nodeType === DOCUMENT_FRAGMENT_NODE && 'host' in value;
 }
 
 /** The element a node sits in: itself when it is one, otherwise its parent. */

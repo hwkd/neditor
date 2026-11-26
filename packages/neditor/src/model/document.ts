@@ -2,6 +2,7 @@ import { sanitizeImageUrl } from '../util/url.ts';
 import { createBlockId } from './ids.ts';
 import type { Mark, RichText, TextRun } from './rich-text.ts';
 import { BARE_URL_START, INLINE_SPAN_LIMIT } from '../input/inline-rules.ts';
+import { normalizeControlCharacters } from '../input/line-breaks.ts';
 import type { TableRows } from './table.ts';
 import {
   cloneTableRows,
@@ -309,6 +310,10 @@ export function withHiddenDescendants(
  * collapsed toggle with its own first child — which then pops out as a
  * top-level block — or drops a neighbour into the gap between a toggle and the
  * children it hides, where the next depth clamp adopts it.
+ *
+ * A selection with gaps in it moves as one contiguous group, the way
+ * {@link moveBlocks} lands one: the step is taken from its first or last block,
+ * and the blocks that sat in its gaps are left behind.
  */
 export function moveVisibleBlocks(
   blocks: readonly Block[],
@@ -417,19 +422,52 @@ export function cloneBlock(block: Block): Block {
 /** Coerces anything that might be block content into canonical runs. */
 function normalizeContent(input: unknown, legacyText: unknown): RichText {
   if (Array.isArray(input)) {
-    return normalizeRuns(input as TextRun[]);
+    return normalizeRuns(withLineBreaks(input as TextRun[]));
   }
 
   // Documents written before rich text stored a plain `text` string.
   if (typeof legacyText === 'string') {
-    return richFromPlainText(legacyText);
+    return richFromPlainText(plainCharacters(legacyText));
   }
 
   if (typeof input === 'string') {
-    return richFromPlainText(input);
+    return richFromPlainText(plainCharacters(input));
   }
 
   return [];
+}
+
+/**
+ * Text with `\r\n` and lone `\r` as `\n`, the model's only line break, and
+ * no control character but the tab (see {@link normalizeControlCharacters}).
+ *
+ * A stored `\r` rendered as a break, was written to Markdown as a hard break
+ * and stepped over by the caret as a character of its own, so a document from
+ * a Windows tool that had kept its line endings did not read back as it was
+ * written. This is the door the stored document and `application/x-neditor`
+ * come through; the plain-text, HTML and Markdown readers apply the same rule
+ * to what they read, so a paste holds nothing a reload would take away.
+ */
+function plainCharacters(text: string): string {
+  return normalizeControlCharacters(text);
+}
+
+/**
+ * Runs whose text has been through {@link plainCharacters}. Anything that is
+ * not a run passes through for `normalizeRuns` to judge.
+ */
+function withLineBreaks(runs: readonly TextRun[]): TextRun[] {
+  return runs.map((run) => {
+    const text = (run as Partial<TextRun> | null)?.text;
+
+    if (typeof text !== 'string') {
+      return run;
+    }
+
+    const clean = plainCharacters(text);
+
+    return clean === text ? run : { ...run, text: clean };
+  });
 }
 
 /**
@@ -489,10 +527,10 @@ export function normalizeDocument(doc: Partial<NEditorDocument> | undefined): NE
       }
 
       if (normalized.type === 'callout') {
-        normalized.icon =
-          typeof block.icon === 'string' && block.icon.length > 0
-            ? block.icon
-            : DEFAULT_CALLOUT_ICON;
+        // Cleaned like any text: a NUL in it went into every Markdown label.
+        const icon = typeof block.icon === 'string' ? plainCharacters(block.icon) : '';
+
+        normalized.icon = icon.length > 0 ? icon : DEFAULT_CALLOUT_ICON;
       }
 
       if (normalized.type === 'toggle') {
@@ -502,11 +540,13 @@ export function normalizeDocument(doc: Partial<NEditorDocument> | undefined): NE
       if (normalized.type === 'image') {
         // An unsafe src is dropped rather than rendered.
         normalized.src = typeof block.src === 'string' ? (sanitizeImageUrl(block.src) ?? '') : '';
-        normalized.alt = typeof block.alt === 'string' ? block.alt : '';
+        normalized.alt = typeof block.alt === 'string' ? plainCharacters(block.alt) : '';
       }
 
       if (normalized.type === 'table') {
-        normalized.rows = normalizeTableRows(block.rows);
+        normalized.rows = normalizeTableRows(block.rows).map((row) =>
+          row.map((cell) => normalizeRuns(withLineBreaks(cell))),
+        );
       }
 
       return normalized;
@@ -834,6 +874,10 @@ export function removeBlocks(blocks: readonly Block[], ids: ReadonlySet<string>)
  * block, `blocks.length` is below the last — because that is what a drop
  * indicator between two blocks actually identifies. Blocks removed from above
  * the gap shift it, which is what `removedBefore` corrects for.
+ *
+ * The moved blocks land as one contiguous group, in document order, even when
+ * they were not contiguous before: a selection with gaps in it gathers at the
+ * drop, and the blocks that sat in its gaps stay where they were.
  */
 export function moveBlocks(
   blocks: readonly Block[],
@@ -876,7 +920,16 @@ export function duplicateBlocks(
   return { blocks: normalizeDepths(next), ids: copies.map((block) => block.id) };
 }
 
-/** Indents or outdents several blocks together, preserving their relative shape. */
+/**
+ * Indents or outdents several blocks, each one on its own.
+ *
+ * Every selected block moves by `delta`, clamped at depth 0, and then
+ * `normalizeDepths` pulls any block more than one level below its predecessor
+ * back up. So the selection's relative shape is *not* preserved: outdenting a
+ * parent already at the root together with its child flattens the two, and an
+ * indent can be absorbed by the clamp for one block and not the next. The
+ * editor's `indentTargets` asks this same clamp which blocks would move.
+ */
 export function indentBlocks(
   blocks: readonly Block[],
   ids: ReadonlySet<string>,

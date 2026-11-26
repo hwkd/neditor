@@ -14,7 +14,10 @@ import {
   richToPlainText,
 } from '../model/rich-text.ts';
 import type { DestinationAhead } from './inline-rules.ts';
-import { INLINE_SPAN_LIMIT, matchInlineRule } from './inline-rules.ts';
+import { INLINE_SPAN_LIMIT, matchInlineRule, projectCode } from './inline-rules.ts';
+import { normalizeControlCharacters, normalizeLineBreaks } from './line-breaks.ts';
+
+export { normalizeLineBreaks };
 
 /**
  * Markdown → blocks, for pasted plain text.
@@ -258,8 +261,15 @@ function parseTableLines(lines: readonly string[]): TableRows {
 
   return rows;
 }
-/** An opening fence: three or more backticks, plus an optional info string. */
-const FENCE_OPEN = /^(`{3,})/;
+/**
+ * An opening fence: three or more backticks, plus an optional info string.
+ *
+ * A backtick fence's info string may not hold a backtick (CommonMark), so
+ * ```` ```npm install``` ```` on a line of its own -- the way chat apps write
+ * inline code -- is a paragraph with a code span. Read as a fence it dropped
+ * the line's text as an info string and made code of every line after it.
+ */
+const FENCE_OPEN = /^(`{3,})(?![^\n]*`)/;
 
 const CHECKED = /\[[xX]\]/;
 
@@ -318,6 +328,11 @@ const OPENERS = new Set(['*', '_', '~', '`', '<', '[']);
  * emits it, the head of a bullet, and nowhere else.
  */
 const ESCAPABLE = /[\\`*_[\]~|<>#+\-.()!&=]/;
+
+/** What CommonMark lets a backslash escape: any ASCII punctuation character. */
+const ASCII_PUNCTUATION = /^[!-/:-@[-`{-~]$/;
+/** A backslash escape `ESCAPABLE` did not already take, in a destination. */
+const DESTINATION_ESCAPE = /\\[!-/:-@[-`{-~]/;
 
 /**
  * A numeric character reference, which the writer uses for whitespace at the
@@ -406,11 +421,18 @@ function decodableReferences(text: string): Array<readonly [number, number]> {
   return spans;
 }
 
-function decodeReference(match: RegExpExecArray): string | null {
-  const code = match[1] !== undefined ? Number(match[1]) : Number.parseInt(match[2] ?? '', 16);
+/** The code point a {@link NUMERIC_REFERENCE} match names. */
+function referenceCode(match: RegExpExecArray): number {
+  return match[1] !== undefined ? Number(match[1]) : Number.parseInt(match[2] ?? '', 16);
+}
 
+function decodeReference(match: RegExpExecArray): string | null {
+  const code = referenceCode(match);
+
+  // A reference to a control character is that character, which the model
+  // holds no more than it holds one typed: a line break, or nothing.
   return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff)
-    ? String.fromCodePoint(code)
+    ? normalizeControlCharacters(String.fromCodePoint(code))
     : null;
 }
 
@@ -527,7 +549,8 @@ function destinationsAhead(text: string): (caret: number) => DestinationAhead {
   // The lowest the parenthesis depth falls, relative to the depth before `at`,
   // anywhere from `at` up to the next whitespace; `unbounded` at whitespace.
   const lowest = new Int32Array(length + 1);
-  // Whether a `>)` follows `at` before any `<`, `>` or whitespace.
+  // Whether a `>)` follows `at` before any `<`, `>` or line break. Not before
+  // whitespace: the angled form admits a space, and its rule reads one.
   const angled = new Uint8Array(length + 1);
 
   lowest[length] = unbounded;
@@ -538,7 +561,7 @@ function destinationsAhead(text: string): (caret: number) => DestinationAhead {
 
     if (!literal && /\s/.test(char)) {
       lowest[at] = unbounded;
-      angled[at] = 0;
+      angled[at] = char === '\n' ? 0 : angled[at + 1]!;
       continue;
     }
 
@@ -584,10 +607,12 @@ function destinationsAhead(text: string): (caret: number) => DestinationAhead {
  * still closes. Writing them off is what dropped the mark and left the raw
  * delimiters in the text.
  */
-export function parseInlineMarkdown(text: string): RichText {
-  if (text.length === 0) {
+export function parseInlineMarkdown(source: string): RichText {
+  if (source.length === 0) {
     return [];
   }
+
+  const text = normalizeControlCharacters(source);
 
   // Visited in order as `index` only grows, so the lookup is a moving pointer.
   const decodable = text.includes('&#') ? decodableReferences(text) : [];
@@ -668,6 +693,28 @@ export function parseInlineMarkdown(text: string): RichText {
 
       if (open >= to) {
         opens[write] = open - (to - from);
+        write += 1;
+      }
+    }
+
+    opens.length = write;
+  };
+
+  /** Forgets the delimiters in a range of `matchable` that can no longer open. */
+  const dropOpens = (start: number, end: number): void => {
+    const from = start + origin;
+    const to = end + origin;
+    let first = opens.length;
+
+    while (first > openFrom && opens[first - 1]! >= from) {
+      first -= 1;
+    }
+
+    let write = first;
+
+    for (let read = first; read < opens.length; read += 1) {
+      if (opens[read]! >= to) {
+        opens[write] = opens[read]!;
         write += 1;
       }
     }
@@ -821,11 +868,27 @@ export function parseInlineMarkdown(text: string): RichText {
           ? NUMERIC_REFERENCE.exec(text.slice(index, index + 12))
           : null;
       const decoded = reference ? decodeReference(reference) : null;
+      let spelled = reference?.[0].length ?? 0;
+
+      // A CR LF spelled as two references is one line break, as the same two
+      // characters are anywhere else: decoded one by one, each was a line
+      // break of its own (R4-FMT-6b).
+      if (reference && referenceCode(reference) === 13) {
+        const after = index + spelled;
+        const lineFeed =
+          after < decodable[span]![1]
+            ? NUMERIC_REFERENCE.exec(text.slice(after, after + 12))
+            : null;
+
+        if (lineFeed && referenceCode(lineFeed) === 10) {
+          spelled += lineFeed[0].length;
+        }
+      }
 
       // A decoded reference is text, never a delimiter -- the same opacity an
       // escape gets, one placeholder per UTF-16 unit so offsets stay aligned.
       if (reference && decoded !== null) {
-        index += reference[0].length - 1;
+        index += spelled - 1;
         literal = decoded;
         projected = ESCAPED.repeat(decoded.length);
       }
@@ -888,10 +951,28 @@ export function parseInlineMarkdown(text: string): RichText {
     // content: there an escaped `<` is the `<` itself, so `[a](\<u@x.test)`
     // read as the angled form and lost a character at each end -- a link to
     // `https://u@x.tes/`, another host.
+    //
+    // A backslash before any other ASCII punctuation is that character too, in
+    // a destination: CommonMark escapes all of it there, where in prose only
+    // what the writer protects is honoured (see `ESCAPABLE`). Such a backslash
+    // is still a backslash in the projection, so `?q=a\$b` kept it.
     const projectedClosing = matchable.slice(innerEnd, match.end);
 
-    if (link !== undefined && projectedClosing.includes(ESCAPED)) {
-      const closing = richToPlainText(content).slice(innerEnd - base, match.end - base);
+    if (
+      link !== undefined &&
+      (projectedClosing.includes(ESCAPED) || DESTINATION_ESCAPE.test(projectedClosing))
+    ) {
+      const raw = richToPlainText(content).slice(innerEnd - base, match.end - base);
+      let closing = '';
+
+      for (let at = 0; at < raw.length; at += 1) {
+        if (
+          !(projectedClosing[at] === '\\' && ASCII_PUNCTUATION.test(projectedClosing[at + 1] ?? ''))
+        ) {
+          closing += raw[at];
+        }
+      }
+
       const href = sanitizeUrl(
         projectedClosing.startsWith('](<') ? closing.slice(3, -2) : closing.slice(2, -1),
       );
@@ -920,6 +1001,20 @@ export function parseInlineMarkdown(text: string): RichText {
       content = richSetLink(content, start, end, link);
     } else if (match.mark) {
       content = richSetMark(content, start, end, match.mark, true);
+    }
+
+    // A code span is opaque from here on, as typing sees an existing code run
+    // (`matchTypedInlineRule`): its text stays, but nothing in it opens or
+    // closes another span. Left raw, a backtick inside ``a`b`` paired with the
+    // next one and took the prose between into code.
+    if (match.mark === 'code') {
+      const innerLength = innerEnd - innerStart;
+
+      matchable =
+        matchable.slice(0, match.start) +
+        projectCode(matchable.slice(match.start, match.start + innerLength)) +
+        matchable.slice(match.start + innerLength);
+      dropOpens(match.start, match.start + innerLength);
     }
 
     park();
@@ -1039,7 +1134,7 @@ function unindentBody(lines: readonly string[], indent: string): string {
 
 /** Parses Markdown text into blocks. Returns an empty list for blank input. */
 export function blocksFromMarkdown(text: string): Block[] {
-  const lines = joinSoftBreaks(text.replace(/\r\n?/g, '\n').split('\n'));
+  const lines = joinSoftBreaks(normalizeControlCharacters(text).split('\n'));
   const blocks: Block[] = [];
   let fence: string[] | null = null;
   let fenceDepth = 0;

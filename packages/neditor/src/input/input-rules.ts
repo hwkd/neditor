@@ -14,6 +14,8 @@ export interface InputRule {
   readonly type: BlockType;
   /** For a to-do: whether the prefix wrote it as already done (`[x] `). */
   readonly checked?: boolean;
+  /** When set, the text after the prefix, up to its first line break, must match. */
+  readonly restOfLine?: RegExp;
 }
 
 export const INPUT_RULES: readonly InputRule[] = [
@@ -27,7 +29,10 @@ export const INPUT_RULES: readonly InputRule[] = [
   // `[x]` is "done" here exactly as it is in the Markdown this editor reads
   // back; one rule for both spellings accepted the x and then dropped it.
   { pattern: /^\[[xX]\] $/, type: 'todo', checked: true },
-  { pattern: /^```$/, type: 'code' },
+  // A fence's info string may not hold a backtick, in CommonMark and in the
+  // Markdown reader: ```` ``` ```` typed in front of `` npm install``` `` is
+  // the opening of a code span, not of a code block.
+  { pattern: /^```$/, type: 'code', restOfLine: /^[^`\n]*(?:\n|$)/ },
   // `***` waits for a space: fired on the third star it took the opening of
   // `***bold italic***` and made a divider of it. `---` has no such reading.
   { pattern: /^(?:---|\*\*\* )$/, type: 'divider' },
@@ -51,6 +56,10 @@ export function matchInputRule(textBeforeCaret: string, fullText: string): Input
   for (const rule of INPUT_RULES) {
     if (rule.pattern.test(textBeforeCaret)) {
       const rest = fullText.slice(textBeforeCaret.length);
+
+      if (rule.restOfLine && !rule.restOfLine.test(rest)) {
+        continue;
+      }
 
       return rule.checked ? { type: rule.type, rest, checked: true } : { type: rule.type, rest };
     }

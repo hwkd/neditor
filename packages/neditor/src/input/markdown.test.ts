@@ -8,7 +8,8 @@ import {
   richSetMark,
   richToPlainText,
 } from '../model/rich-text.ts';
-import { blocksFromMarkdown, parseInlineMarkdown } from './markdown.ts';
+import { matchInputRule } from './input-rules.ts';
+import { blocksFromMarkdown, normalizeLineBreaks, parseInlineMarkdown } from './markdown.ts';
 
 const types = (md: string) => blocksFromMarkdown(md).map((b) => b.type);
 const texts = (md: string) => blocksFromMarkdown(md).map(blockText);
@@ -662,8 +663,11 @@ describe('a span that reaches back is bounded work, not unbounded', () => {
     // so this shape was quadratic: 176KB took 47s inside the paste handler.
     // Measured as growth, best of three, as the other growth tests are: the
     // four-second stopwatch it replaced failed on a loaded machine with
-    // nothing wrong. Eight times the nesting costs about 7-10 times as much
-    // now; the parser before `0dcfc8f` measures 33 on the same pair.
+    // nothing wrong. Eight times the nesting costs about 9 times as much now;
+    // the parser before `0dcfc8f` measured 33 at a quarter of these sizes, and
+    // a quadratic one only grows more at these. They are this large so the
+    // short side takes ~13ms: at 100 levels it took ~2ms, and scheduling
+    // jitter under the parallel suite pushed the ratio past the bound.
     const elapsed = (source: string): number => {
       let best = Infinity;
 
@@ -676,8 +680,8 @@ describe('a span that reaches back is bounded work, not unbounded', () => {
 
       return Math.max(best, 0.1);
     };
-    const short = elapsed(nested(100));
-    const long = elapsed(nested(800));
+    const short = elapsed(nested(400));
+    const long = elapsed(nested(3200));
 
     expect(long / short, `long ${Math.round(long)}ms vs short ${Math.round(short)}ms`).toBeLessThan(
       20,
@@ -1077,11 +1081,12 @@ describe('a plain destination never begins with "<"', () => {
     // destination holds an escape, and the content holds the `<` itself: asked
     // there which form this was, the reader took the angled one and sliced off
     // a character at each end -- `https://u@x.tes/`, a link to another host.
+    // (The `<u` is a user name, which `sanitizeUrl` drops.)
     expect(parseInlineMarkdown('[a](\\<u@x.test)')).toEqual([
-      { text: 'a', link: 'https://%3Cu@x.test/' },
+      { text: 'a', link: 'https://x.test/' },
     ]);
     expect(parseInlineMarkdown('[a](\\<u@x.test/p)')).toEqual([
-      { text: 'a', link: 'https://%3Cu@x.test/p' },
+      { text: 'a', link: 'https://x.test/p' },
     ]);
   });
 
@@ -1224,5 +1229,98 @@ describe('a backtick that begins inside a link destination', () => {
     expect(long / short, `long ${Math.round(long)}ms vs short ${Math.round(short)}ms`).toBeLessThan(
       20,
     );
+  });
+});
+
+describe('an escaped character in a link destination is that character', () => {
+  /**
+   * CommonMark lets a backslash escape any ASCII punctuation in a
+   * destination. The reader honoured only the characters its own writer
+   * protects in prose, so `\$` and `\@` kept their backslashes in the href.
+   */
+  const href = (source: string): string | undefined =>
+    blocksFromMarkdown(source)[0]?.content.find((run) => run.link)?.link;
+
+  test.each([
+    [
+      '[Mercury](https://en.wikipedia.org/wiki/Mercury_\\(planet\\))',
+      'https://en.wikipedia.org/wiki/Mercury_(planet)',
+    ],
+    ['[x](https://a.test/snake\\_case)', 'https://a.test/snake_case'],
+    ['[x](<https://a.test/a\\>b>)', 'https://a.test/a%3Eb'],
+    ['[x](https://a.test/?q=a\\\\b)', 'https://a.test/?q=a\\b'],
+    ['[x](https://a.test/?q=a\\$b)', 'https://a.test/?q=a$b'],
+    ['[x](https://a.test/?q=a\\$b&c=\\@d)', 'https://a.test/?q=a$b&c=@d'],
+    // An escaped backslash is a backslash, and does not escape what follows.
+    ['[x](https://a.test/?q=a\\\\$b)', 'https://a.test/?q=a\\$b'],
+  ])('%s', (source, expected) => {
+    expect(href(source)).toBe(expected);
+  });
+
+  test('a backslash that escapes nothing stays', () => {
+    expect(href('[x](https://a.test/?q=a\\b)')).toBe('https://a.test/?q=a\\b');
+  });
+
+  test('in prose the escape set is unchanged', () => {
+    expect(richToPlainText(parseInlineMarkdown('cost \\$5'))).toBe('cost \\$5');
+  });
+});
+
+describe('every line break is a newline', () => {
+  /**
+   * Plain text from Windows carries `\r\n`, and a lone `\r` is a break too.
+   * One left in the model was a character the caret stepped over and the
+   * writer emitted as a hard break.
+   */
+  test.each([
+    ['a\r\nb', 'a\nb'],
+    ['a\rb', 'a\nb'],
+    ['a\r\n\r\nb\r', 'a\n\nb\n'],
+    ['plain', 'plain'],
+  ])('%j', (input, expected) => {
+    expect(normalizeLineBreaks(input)).toBe(expected);
+  });
+
+  test('the reader folds them, block and inline', () => {
+    expect(texts('one\r\ntwo\rthree')).toEqual(['one', 'two', 'three']);
+    expect(parseInlineMarkdown('a\r\nb')).toEqual([{ text: 'a\nb' }]);
+  });
+});
+
+describe('a backtick fence has no backtick in its info string', () => {
+  /**
+   * ```` ```npm install``` ```` on a line of its own is how Slack and Discord
+   * write inline code. Read as an opening fence, the line's text was dropped
+   * as an info string and every line after it became one code block. A
+   * backtick fence's info string may not contain a backtick (CommonMark), so
+   * the line is a paragraph with a code span.
+   */
+  test('the chat idiom is a code span, and the lines after it are prose', () => {
+    expect(blocksFromMarkdown('```npm install```\nthen run it\n- and this')).toEqual([
+      expect.objectContaining({
+        type: 'paragraph',
+        content: [{ text: 'npm install', marks: ['code'] }],
+      }),
+      expect.objectContaining({ type: 'paragraph', content: [{ text: 'then run it' }] }),
+      expect.objectContaining({ type: 'bulleted_list', content: [{ text: 'and this' }] }),
+    ]);
+  });
+
+  test.each(['```a`', '````a`', '``` js `x`'])('%j opens no fence', (line) => {
+    expect(types(`${line}\nb`)).toEqual(['paragraph', 'paragraph']);
+  });
+
+  test('an info string without a backtick still opens one', () => {
+    expect(blocksFromMarkdown('```js\nconst a = 1;\n```\nafter')).toEqual([
+      expect.objectContaining({ type: 'code', content: [{ text: 'const a = 1;' }] }),
+      expect.objectContaining({ type: 'paragraph', content: [{ text: 'after' }] }),
+    ]);
+  });
+
+  test('the typed rule asks the same of the text after the caret', () => {
+    expect(matchInputRule('```', '```')?.type).toBe('code');
+    expect(matchInputRule('```', '```js\nx`y')?.type).toBe('code');
+    expect(matchInputRule('```', '```npm install```')).toBeNull();
+    expect(matchInputRule('```', '```a`b\nc')).toBeNull();
   });
 });

@@ -24,8 +24,11 @@ import Layout from '../layouts/Layout.astro';
     <div class="workbench">
       <div class="editor-column">
         <div class="editor-actions">
-          <button type="button" data-action="undo" disabled>Undo</button>
-          <button type="button" data-action="redo" disabled>Redo</button>
+          <!-- autocomplete="off": Firefox otherwise restores a button's
+               disabled state across a reload, from before the history it
+               described was gone. -->
+          <button type="button" data-action="undo" autocomplete="off" disabled>Undo</button>
+          <button type="button" data-action="redo" autocomplete="off" disabled>Redo</button>
           <span class="editor-actions__hint">⌘Z / ⌘⇧Z</span>
         </div>
         <div id="editor" class="editor-surface"></div>
@@ -286,14 +289,19 @@ import Layout from '../layouts/Layout.astro';
 
         // undo() moves focus into the editor to restore the caret. Pressed
         // from the keyboard (a click with no pointer: detail 0), the user
-        // expects to press again, so focus comes back to the button.
+        // expects to press again, so focus comes back to the button -- unless
+        // that press emptied the history and disabled it, where focus() does
+        // nothing and the next Space typed into the document, wiping Redo.
+        // The other button is the one that can act then.
         if (event.detail === 0) {
-          button.focus();
+          const other = button === undoButton ? redoButton : undoButton;
+
+          (button.disabled && other && !other.disabled ? other : button).focus();
         }
       });
     }
 
-    editor.on('history', ({ canUndo, canRedo }) => {
+    const syncHistory = ({ canUndo, canRedo }: { canUndo: boolean; canRedo: boolean }): void => {
       if (undoButton) {
         undoButton.disabled = !canUndo;
       }
@@ -301,7 +309,12 @@ import Layout from '../layouts/Layout.astro';
       if (redoButton) {
         redoButton.disabled = !canRedo;
       }
-    });
+    };
+
+    // From the editor at startup as well, not only from the markup: the state
+    // a browser restores on reload is not the editor's.
+    syncHistory({ canUndo: editor.canUndo, canRedo: editor.canRedo });
+    editor.on('history', syncHistory);
 
     // The tabs pattern: one tab stop for the group, arrows and Home/End move
     // between tabs, and the selected tab's panel is shown.

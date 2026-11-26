@@ -16,11 +16,11 @@ The build targets ES2022 and ships untranspiled, so this is a hard floor rather
 than a recommendation. Two things set it:
 
 - `Array.prototype.at()` — Chrome 92, Firefox 90, Safari 15.4.
-- **RegExp lookbehind** in the Markdown table splitter and the italic input
-  rules — Safari 16.4. This one is a parse-time `SyntaxError`, so on an older
-  Safari the whole bundle fails to load, not just those code paths. If you need
-  to go back further, transpile the package or rewrite those three patterns
-  with capture groups.
+- **RegExp lookbehind** in the Markdown table splitter, the italic input
+  rules and the autolink input rule — Safari 16.4. This one is a parse-time
+  `SyntaxError`, so on an older Safari the whole bundle fails to load, not just
+  those code paths. If you need to go back further, transpile the package or
+  rewrite those four patterns with capture groups.
 
 These floors are derived from the language features the build uses; they are
 not tested. The end-to-end suite (`apps/e2e`) runs in current Chromium,
@@ -38,6 +38,27 @@ shadow host, so the editor reads the caret inside a shadow tree through
 an editor mounted in a shadow root cannot see its own caret: input rules never
 fire and `Enter` splits at the start of the block. Mounts in the light DOM or in
 an iframe are unaffected, and Chrome and Firefox need nothing extra.
+
+**Page setups.** Pointer, keyboard and selection behaviour is built and tested
+with real input for pages where:
+
+- the editor's own pointer, key, focus and selection events reach it: a page
+  that cancels them or stops their propagation before the editor hears them
+  can leave a gesture or a guard open;
+- one editor holds the reader's selection at a time: several editors on a page
+  work, but a selection or gesture carried from one into another is not
+  specified;
+- the editor and its frame are drawn at their layout size: under a `transform`
+  or `zoom` around them, pointer placement is best effort, and WebKit's `zoom`
+  is not measured at all;
+- `setDocument` and `setEditable` arrive between the reader's gestures, or
+  during a text drag, which goes on (see
+  [Block selection and drag handles](#block-selection-and-drag-handles)). A
+  lock, reorder or page overlay that arrives while a press is still held ends
+  or holds the gesture, and how beyond that is not specified.
+
+Outside these, behaviour that cannot lose or change the reader's content is a
+known limit rather than a bug.
 
 **TypeScript 4.7+** if you consume the types. The package ships `.d.mts` and
 `.d.cts` and points at them through `exports`; a compiler older than that
@@ -154,7 +175,7 @@ inlines the chunk for that path.
 | `onError`         | `(error) => void`             | `console.error`      | Called when one of your listeners throws.                     |
 | `label`           | `string`                      | `'Rich text editor'` | Accessible name. Ignored if the element already has one.      |
 | `labels`          | `Partial<NEditorLabels>`      | English              | Accessible names, placeholders, menu entries, announcements.  |
-| `portalContainer` | `HTMLElement \| ShadowRoot`   | the mount's root     | Where toolbars and popovers are appended.                     |
+| `portalContainer` | `HTMLElement \| ShadowRoot`   | the mount's root     | Where the floating UI goes; in the top layer, pass it.        |
 | `styleNonce`      | `string`                      | —                    | `nonce` for the injected `<style>`, for a strict `style-src`. |
 
 ## API
@@ -183,7 +204,7 @@ editor.clearBlockSelection(): void      // same thing: the caret comes back
 
 editor.setBlockType(id, type): void
 editor.toggleTodo(id): void
-editor.focus(id?, offset?): boolean      // false when nothing there can hold a caret
+editor.focus(id?, offset?): boolean      // false when nothing there took the caret
 editor.focusRange(id, start, end, cell?): boolean
 editor.setEditable(editable): void
 editor.destroy(): void
@@ -200,6 +221,291 @@ editor.on('blockselection', ({ ids }) => {}) // ids in document order
 `change`. That is the call for loading a document your own `change` handler
 produced -- a collaboration update, a reload -- which would otherwise echo back
 into the same handler without end.
+
+`setDocument` closes the editor's popovers and toolbars, since they describe the
+document being replaced, and it never takes focus from where the reader is: focus
+outside the editor stays there, and the one move it makes is out of the editor,
+when what the reader was in is gone (below). When one of them held focus
+(the link editor, the image and icon popovers, the table toolbar after `F10`),
+focus leaves the editor -- to `<body>`, or wherever the browser puts it -- and
+that is deliberate: the reader was typing into that panel, and the rest of what
+they type was meant for it. Handed back to the block, the rest of a URL replaced
+the text the link was for, and `change` carried the edit out. Typing that lands
+nowhere loses nothing; the reader clicks or tabs back in. A `setEditable` call
+that switches nothing -- `false` on a read-only editor, `true` on an editable
+one, as a host re-asserting its state on every render makes -- changes nothing
+at all: no selection, drag, panel, focus or event. `setEditable(false)`
+takes focus out of the editor the same way -- off a focused panel, off a
+block that can no longer be typed in, off a control it disables (the image
+and callout buttons), and off the editor's root, ending a block selection --
+with `Backspace` held off as below. So it does for a selection Safari keeps in
+a block after a click on a page button, which Safari gives no focus while it
+goes on typing into the block. `setEditable(true)` gives a caret it took back
+to its block -- an image's caption included -- by id and at its offsets (carried as
+below if a `setDocument` changed the text meanwhile), as long as the reader has
+not clicked or put focus anywhere since -- in an iframe mount, anywhere in the
+page around the frame either -- and without scrolling to it: a host that locks
+the editor round a save does not cost the reader their place. It draws again
+only the toolbar that was showing at the lock, and the format toolbar only while
+its range is on screen, as `setDocument` does below. Inside a page of
+another origin, whose focus the editor cannot read, it also needs the window
+to have focus, so there -- and only there -- an unlock that lands while the tab
+is in the background gives nothing back. A block selection is not given
+back. In a modal `<dialog>`
+the next `Escape` then reaches the dialog. The
+selection one of those panels left in a block goes with it, because Safari
+types into such a selection with focus on `<body>`, and focus is taken off the
+hidden panel (Safari otherwise leaves it on an invisible button, where the next
+`Backspace` goes back in history). Focus anywhere else is left alone, and so is
+the reader's selection: a button of your own toolbar that takes focus still
+acts on the range the reader made when what arrives during the press is an
+update to another block. An update to the block the range is in, or one that
+renames the blocks, takes the range with it, and the button acts on nothing:
+the text the range was made in has been redrawn (Safari's own reading of a
+selection in a redrawn block no longer agrees with itself, and the next key
+went into the middle of the block).
+
+An update that reorders the blocks -- the reader's own moved up or down,
+others moved across it -- moves the other blocks around the one the reader
+is in, so the caret, a range, a composition, and focus on a control in it
+(the to-do checkbox, the callout icon) all stay where they were; with focus
+on a button of your own, the block the reader's range is in stays put the
+same way.
+
+A caret or range in the block the reader is typing in, when a peer rewrites
+that very block (or table cell) under the same id, is carried by the text
+around it: each end keeps its offset while the text before it is unchanged,
+else its distance from the end while the text after it is (text inserted
+exactly at the edge of a range stays outside it), else -- text deleted around
+it, nothing put in its place -- it goes where the deleted text was. In
+repeated text a deletion or an insertion can be read in more than one place
+("ha ha ha!" less a "ha " lost the first, the second or the third), and a
+range is carried to what every reading agrees on. A reading must keep every
+code point whole: "ok 👍😀!" less its 👍 is not read as losing the 👍's second
+half and the 😀's first, which share a code unit. A reading that cuts a
+character a reader sees as one still counts, because a peer's own edit can
+cut one -- a Backspace takes one code point of a conjunct, of a Hangul
+syllable or of a letter and its accent -- so a selected character can be
+left partly behind ("कु" selected, "कि" before it deleted, and typing over
+the range replaces only the vowel sign). The range never takes in text the
+peer typed at its edge -- except a mark a peer adds to the range's last
+character in every reading, which stays with that character ("cafe" selected
+in "cafe!" and a combining acute added to its "e": the range is "café") --
+and it is never longer than it should be. The cost is that where the edit is
+ambiguous some of the selected text can be left out of the range -- or all of
+it, leaving a caret: for a deletion where the selection began, for an
+insertion before every place the inserted text could have gone, so never
+inside the peer's text, and never inside a character: where that place falls
+in one, at the character's start. Where two readings only just meet, the caret goes
+before every place too if some reading puts the meeting point inside the
+inserted text ("ha" selected and made "haha"), and otherwise stays where
+they meet (one "0" of "1000000" selected and a "0" typed: the caret stays
+between the same two "0"s). In text holding a lone surrogate every reading
+counts, since a peer's edit can complete one into a pair. Counted by
+offsets, an end can fall inside a character a reader sees as one (an emoji,
+a flag, a letter and its accent), and then it never moves over the reader's own text: a caret whose character
+a peer extends (an accent or a vowel sign added to it) goes past the peer's
+addition only; a whole character of the reader's that the counting cut is
+kept whole; and where the peer's edit joins the
+reader's text on both sides of the caret into one character (a deletion
+between them, a virama or ZWJ inserted there), the caret stays exactly
+between that text, and a range neither grows nor shrinks. A caret the
+reader's own typing left inside a character (a virama typed before a
+consonant, in Firefox) is left there too -- unless a peer's insertion leaves
+nothing of a range that starts there, and the caret it becomes goes to that
+character's start ("क्" typed before "म", the "म" selected, the peer making
+it "क्म्म": typing lands before the "क"). Where the caret is left inside a
+character, the editor cannot tell where the browser will type: Chromium and
+WebKit type at the end of that character, whatever offset they report. Where text
+was put in across an end, nothing says where the reader was, and focus leaves
+the editor as it does below. "Typing in" is read from focus, not from the
+window: a reader in another tab when the update lands keeps their caret. A
+block the peer turned into another text block (a paragraph into a heading)
+keeps its id, so its new element takes the caret the same way, and a mouse
+drag selecting in the block when the update lands goes on selecting from where
+it began -- in a shadow root too, where Safari reports a selection the mouse
+made as forward whichever way it was dragged, and the editor asks the press
+instead -- and a drag across blocks goes on selecting blocks, and scrolling
+where it is held at the window's edge, over any update that leaves the blocks
+shown in the same order, its own among them (one that reorders, adds or
+removes a shown block ends it at the blocks it held); a drag that has not
+left its own block yet when an update edits another block still becomes
+one when it does, in a read-only view too -- the browser's own drag over an
+update that leaves the blocks shown in the same order (over one that does
+not it stays the browser's drag: a text selection in its block, and in a
+read-only view, where the browser's selection runs across blocks, the blocks
+it covers at the release), and one the editor draws (begun beside the text, or
+back in its own block after crossing) over an update to other blocks whatever
+it does to their order: it goes on by the new one. A drag in a block an update
+rewrote goes on by word or by
+paragraph for a double- or triple-click drag, from
+the word or paragraph the browser selected for the press, to the word or
+paragraph at the caret nearest the pointer, as Chromium and Safari draw it in
+text of one direction, with words as `Intl.Segmenter` finds them. The known
+differences from the browser's own drag there: Firefox's runs on over a run of
+spaces at the caret to the next word; Firefox and Safari split some words
+differently at punctuation (`3.14`, `It's`); Safari's backward drag in
+right-to-left text treats spaces differently; and in mixed-direction text, at
+the visual edge of a run, the word reached can be the one on the other side --
+where the browsers' own drags lose the double-clicked word far more often. A
+Shift+double- or triple-click that leaves the reader's range and its direction
+exactly as they were -- Chromium's and Safari's Shift+double-click, which extend
+the range -- goes by character, as they draw it when that range was made by a
+click or a drag; made by a double- or triple-click, they go on by its word or
+paragraph and the editor by character. Firefox re-anchors every Shift double-
+or triple-click on the word or paragraph pressed, and the editor follows it,
+except where that word or paragraph is exactly the reader's range in the same
+direction, where the editor goes by character. These are known differences,
+and with the pointer exactly at the middle of a letter the editor's character
+can be one off Chromium's. The editor's own toolbar drawn over the text is no
+obstacle to such a drag: it reads the text under it. Carried past the edge of
+what the block can be seen in -- the window, or a pane or a dialog that
+scrolls the editor, at whatever size it is drawn (`transform: scale()`,
+`zoom`) -- through a block taller than that, it goes on selecting
+at the edge while the page or the pane scrolls, to the block's first line and
+its last. Under something the page
+draws over the text (a sticky bar) it keeps the range it had -- the browsers'
+own drags differ there: Chromium's and Safari's read the text under the bar,
+and so does Firefox's in a shadow root, while in a plain page it leaves the
+range -- and there are two halves to that at the window's edge: held there
+over text it can read, it goes on scrolling, over an update too; held there
+under such a thing (a fixed header), the page does not scroll, since it would
+scroll away from a range that cannot follow, and it scrolls again once the
+pointer is over text. A sticky header or footer inside a pane that scrolls the
+editor is the same thing: such a drag carried under it waits there, its range
+held and nothing scrolling, until the pointer is back over text. The reader's own edit in the block with the button
+still down (a `Backspace` over the range) ends such a drag. A
+Shift drag carried into another block and back is
+anchored where the browser anchored the selection for the press, as its own
+drag is -- Firefox keeps the reader's anchor, while Chromium and Safari on macOS
+take the end of the range farther from the click -- read as the end farther
+from the press, so a shadow root, where Safari reports every selection as
+forward, does not change it. A Shift press in a block other than the one
+holding the reader's caret or range, while that block is being typed in, does
+nothing -- not even follow a link: Shift extends a selection within its own
+block, on a link there too, and another table cell is another block for this. A
+Shift press with no such caret or range -- focus moved to a button on the page,
+or into the link editor, a block selection, nothing selected -- is a plain
+press, on the text or beside it: the caret where it lands (the start of a list
+item for its marker, the nearest cell for a table's border, a new paragraph
+below the last block), and a drag from it. A press scrolls only to show a
+caret it placed out of sight (the caption under a picture taller than the
+window, a cell scrolled out of its table), never the whole block. A Shift+click
+on a link in the reader's block, or a Shift press beside the text, extends the
+range from its end farther from the click, in every browser, so the text
+already selected stays selected -- Chromium and Safari on macOS do the same on
+plain text, while Firefox's own Shift+click keeps the range's anchor, so in
+Firefox the two can differ; ⌘/Ctrl+Shift+click follows the link, as
+⌘/Ctrl+click does. A click on a link opens the link editor just after the
+click -- unless the page moved focus elsewhere in its own listener for a
+pointer's click, or something newer happened first (a press, a key, a new
+document, a switch to read-only) -- and a selection can still be dragged away by
+a link inside it. Like a press, it never brings the whole block into view: it
+scrolls only as far as shows the end of the link, where that is out of sight
+(a script's `click()` on a link scrolled away) or cut by the window's edge (a
+few pixels), and closing the link editor -- `Escape` or Apply -- puts the
+selection back the same way. A read-only view keeps the browser's own Shift,
+whose selection across blocks becomes a block selection to copy -- from a
+range in a block's text, or from the caret a click on a divider, or beside a
+picture, leaves (a press on the picture itself places no caret in any browser,
+so a Shift+click from or onto it selects nothing: a known limit); after a block selection there is none, and a Shift+click is a plain
+click. Shift+arrow selects every block its range
+reaches, the next one as soon as the range reaches the start of its text. A
+pointer's selection is read when the button comes up: a triple-click selects
+its paragraph, not the next block, whose start some browsers end the paragraph
+at -- in a table's cell, that cell's text; on a collapsed toggle, its text, not
+the blocks it hides -- and an empty paragraph, a divider or a picture with no
+caption after it is selected only when the press was on it, as a Shift+click on
+it is, or when the selection began on it. A Shift+click beside the next block from the end of a block's text, which
+selects no character of either, selects both. A selection from a table's cell
+over the cells after it with text, to the next block, selects the table. A
+range the reader begins outside the editor is never
+made a block selection. A selection the reader begins in the page's own text,
+outside the editor, ends a block selection, wherever it is drawn to -- into
+the blocks too, where it stays the page's to copy -- in a shadow root as in the
+page (not around an iframe mount, whose frame does not hear the page's
+selection: there the block selection stays beside the page's range, and Mod+C
+copies the page's range), and so does one begun in another editor on the same page: the page has one
+selection, and it is no longer the blocks. The other editor's own drag across its
+blocks ends it too once it has selected text in the block it began in; a drag
+that leaves that block before selecting anything may leave the page no
+selection to read, and then does not (Chromium and Firefox; WebKit makes one
+when that editor is editable). Nor does a click on a page button. A composition
+in progress (an IME) is never let go of: it is carried from where it began,
+against the text before it -- the composing text is in no peer's document --
+and the browser commits it there. A table whose shape a peer changes (a row or
+column added or removed) is the exception: its cells have no ids, the editor
+does not look for the reader's cell by its coordinates or its text, and focus
+leaves the editor. A caret or
+range that survives in the block holding focus keeps its toolbar -- the one
+that was showing, while its range is still on screen: a toolbar `Escape`
+dismissed stays dismissed, so a collaborator's updates between presses -- to
+another block or to the very one the reader is in -- never hold `Escape` back
+from the block and the way out, and no toolbar is drawn at the window's edge
+for a range scrolled or pushed out of sight. The reader's own next change of
+the selection draws it as usual, also when a collaborator's update lands
+before the browser has reported that change, and so do undo and redo; a field
+on the page whose value the page sets (a title the same update changed) is not
+the reader's selection, and draws nothing (in Chromium, a field inside the
+editor's own shadow root still does) -- and
+formatting armed at
+the caret (`⌘B` with nothing selected) stays armed while that block keeps its
+id and its text.
+
+The editor never guesses where the reader was: block ids decide, and nothing
+else. A block selection keeps the blocks the new document still has under
+their ids, and `Shift`+arrow keeps growing from the end it was made from. When
+none of them is left and the editor held focus, the selection ends and focus
+leaves the editor, as it does after a panel that held focus -- whether every id
+is new (a reload from Markdown, a document made with ids of its own) or a peer
+deleted just the selected blocks: the blocks beside them are still there by
+id, but they are blocks the reader did not choose, and the key pressed for the
+selection (`Backspace`, `Delete`, a letter) edited them. The reader clicks or
+tabs back in, and a key pressed meanwhile lands nowhere. That includes
+`Backspace`, held or pressed again after other keys: a browser can read
+`Backspace` on the page as Back, so the editor cancels every one aimed at the
+page -- its `<body>`, or a `<dialog>` that `Tab` focused -- until the reader
+clicks, taps or puts focus on something else, as it does whenever a
+`setDocument`, now or after a debounce, takes away the block or the panel that
+held focus (in the page around an iframe mount too, where a `portalContainer`
+puts the panels), takes away the block a selection Safari kept for a page
+button was in, or `setEditable(false)` takes focus out of the editor or such a
+selection's block out of editing (an unlock that finds that selection still in
+one of the editor's blocks -- where it was, or moved by Safari's `Shift`+arrow
+during the lock -- gives `Backspace` back to it). With
+focus anywhere else the selection just ends, and nothing is announced.
+
+Because ids decide, a different document must not reuse the ids of the one
+it replaces. Two notes cloned from one template with the template's block ids
+are, to the editor, the same blocks: switching from one to the other keeps a
+block selection on the block with the same id -- the other note's "Notes"
+heading -- and `Backspace` deletes it. Give each document its own ids (a
+fresh `createBlock` per block, or `blocksFromMarkdown`), or call
+`clearBlockSelection()` (or move focus out of the editor) before switching.
+
+Guessing was tried and each guess cost something: found again by
+its position, a selection below blank paragraphs Markdown dropped put the
+caret blocks further down (seventy blank lines, sixty-nine blocks), and the
+next key was typed into a block nobody chose; found again by its content, a
+switch to another note made from the same template selected that note's own
+"Notes" heading, and `Backspace` deleted it. The same holds for the edits made
+on a block selection: when a `change` listener answers a delete, cut,
+duplicate, indent or move by loading a document with new ids, the caret or the
+selection that would follow is placed by id or not at all, and the
+announcement still says what the edit did ("Block deleted", "2 blocks
+duplicated"). A printable key typed over a block selection under such a
+listener is typed into the document, and focus then leaves the editor too:
+the paragraph it made has a new id, and looking for it by its content once
+typed the next key into an identical paragraph forty-nine blocks away. So a host that renames blocks on
+each update loses the block selection and focus on every one of them, and a
+text caret the same way (a caret is kept only in a block whose id survives,
+and in a table only while its shape does: a row or a column a peer adds or
+removes redraws the table, and the cell the caret was in is no longer known
+by its coordinates; within a surviving block -- whatever text type it now
+has -- or a cell of a table that kept its shape, it is carried by the text
+around it, above).
+Keep block ids stable across your own round trips -- `blocksFromMarkdown`
+makes new ones, so reuse the ids you already had where the content matches.
 
 `undo()` and `redo()` put the caret (or the block selection) back where the edit
 was made, so they move focus into the editor. A toolbar button that should keep
@@ -255,8 +561,18 @@ the handler always cancels the native navigation, so an unsafe `href` can never
 reach the browser by falling through.
 
 The link editor, the callout icon picker and the image popover all take focus,
-and all three close on a pointer that lands anywhere outside them — leaving
-focus wherever that pointer put it, rather than dragging the caret back. Closing
+and all three close on a pointer that lands anywhere outside them, or when focus
+arrives anywhere outside them (`Tab` or `Shift`+`Tab` out, a click into another
+field) — leaving focus wherever it was put, rather than dragging the caret
+back. In an editor mounted in an iframe, the page around the frame counts as
+outside too, as long as the frame may reach it (same origin). The format and
+table toolbars go the same way when focus or a press leaves for the page (or
+the page around the frame) -- from the text, or from the table toolbar `F10`
+moved focus into -- and come back with focus. A range put in the text from
+outside, such as the match Firefox's Quick Find selects while focus stays in
+its find bar, draws neither. Switching to
+another window is not leaving: the popover is still there when you come back.
+Closing
 one from the inside does restore the range it was opened for, which is why
 `Escape` only dismisses the popover the current block (or table cell) opened:
 pressed anywhere else it does its usual job of stepping up from text to the
@@ -269,16 +585,40 @@ These convert the moment you type the closing delimiter:
 `**bold**` `__bold__` `*italic*` `_italic_` `` `code` `` `~~strike~~` `<u>underline</u>`
 `[text](url)` `[text](<url with spaces>)`
 
+A delimiter typed _into_ an inline code run is code, and closes nothing: a `*`
+or a backtick typed at the end of `` `a*b` `` stays in it. (A span typed in plain
+text around a code run still applies, as it does when the line is pasted.)
+
 A link's destination is literal: `*`, `_` and `~` inside a URL are never read as
-formatting, so `__init__` in a link stays `__init__`. Only a `](` after a
-non-empty `[label]` opens one, so `ref [x] then f](g*h*` still italicises.
+formatting, so `__init__` in a link stays `__init__` -- in a `<…>` destination
+too, which may hold spaces: `[docs](<https://a.test/my docs/__init__.py>)` links
+to `…/my%20docs/__init__.py`. Only a `](` after a non-empty `[label]` opens one,
+so `ref [x] then f](g*h*` still italicises.
+
+A code span's contents are literal the same way: nothing closes inside a code
+span that is still open, so `` `__init__` ``, `` `f(*a*)` `` and
+`` `[x](https://a.test/)` `` stay code with every character in place, and a
+backtick inside a run already formatted as code never pairs with one typed
+after it. That holds for a span opened after the emphasis around it too:
+``*y `a*b` z*`` is italic around the code `a*b`, not an italic that closed on
+the star inside it. The price is a stray backtick that never closes: until one
+does, nothing after it converts for the rest of the block -- past a
+`Shift`+`Enter` line break too, not just to the end of its line -- and neither
+does an emphasis or link opened before it and closed after it, typed or pasted
+(``*use ` with care*`` stays literal).
+
+Code spans pair backtick runs by length, but a span typed with a single
+backtick closes on the first backtick of a longer run inside it, which has not
+arrived yet when it does: `` `a `` b` `` comes back as the code `a b`, where
+CommonMark keeps the two backticks, and a paste reads it the same way. Open
+such a span with a run longer than any inside it.
 
 The HTML spellings the Markdown writer uses for formatting that starts or ends
 with a space convert too: `<u>underline</u>`, `<strong>`, `<em>`, `<s>` and
 `<code>`. Inside a link destination only the link itself and a code span that opened before it close
 (a backtick that begins inside one is part of the URL, as in CommonMark), so `_x_`
-in a URL is not italicised (up to the first space, if the destination is a pasted `<…>` one
-that holds any -- this editor never writes one), and neither is a `_x_` that opens inside a bare URL, up to the next
+in a URL is not italicised -- a plain destination ends at the first space, a `<…>`
+one only at its `>`, a `<` or a line break -- and neither is a `_x_` that opens inside a bare URL, up to the next
 whitespace; `_see https://a.test_`, which opens before it, still is. A bare URL here is
 `http://` or `https://` anywhere in a word, or `www.` at its start or after `*`, `_`, `~`,
 `(`, `[` or `]` (or, in pasted Markdown, after any backslash-escaped character), in either
@@ -306,6 +646,14 @@ how `***bold italic***` begins. None of these fire in a code block, and the
 slash menu does not open there or in an image caption, where `/` is ordinary
 text and a command would retype the block.
 
+` ``` ` opens a code block only when nothing after it on its line holds a
+backtick, as a fence's info string may not in CommonMark: ` ``` ` typed in
+front of ` npm install``` ` leaves a code span to be closed, and a pasted line
+` ```npm install``` ` -- how chat apps write inline code -- is a paragraph
+holding the code `npm install`, not a fence that swallows the lines after it.
+Typed from the start of an empty line, ` ``` ` still converts at once, since
+the rest of the line has not been typed yet.
+
 Both sets fire on **typing only**. A rule reads the text before the caret and
 takes it as something you have just finished typing, which a deletion leaves
 there without anyone having typed it: backspacing the word after a `# ` would
@@ -317,9 +665,34 @@ backspacing narrows the query and deleting the `/` closes the menu.
 
 Hovering a block reveals a gutter to its left: **+** inserts a paragraph below
 the block and everything nested under it (a collapsed toggle keeps its children),
-and the **⠿** handle selects on click and reorders on drag. Dragging shows a drop
-indicator, and `Escape` mid-drag abandons it. Dragging a handle that belongs to an
-existing selection moves the whole selection.
+and the **⠿** handle selects on click and reorders on drag. No press that
+selects a block scrolls to it -- a click on the handle, a press on a divider or
+a picture, a long press, a read-only view's `Shift`+click: the block is under
+the pointer, and one the window's edge cuts stays where it is. The keyboard
+does bring a block it selects into view, `Enter` on the handle included;
+`Shift`+`↑`/`↓` brings the end of the selection it moves, growing or
+shrinking, not the block the selection grows from -- from its first step out
+of the text, which takes in the next block and shows it. A `setDocument` keeps the
+gutter beside the block it was showing for, wherever that block now is (gone,
+the gutter hides), and draws none where none was showing.
+Dragging shows a drop
+indicator, and `Escape` mid-drag abandons it and does nothing else: the dragged
+blocks stay selected and focus stays in the editor. Dragging a handle that
+belongs to an existing selection moves the whole selection, and a selection with
+gaps in it moves as one contiguous group — the blocks land together at the drop,
+in document order, and whatever sat between them stays where it was. Holding
+the pointer near the top or bottom edge of the visible part of a scroll
+container scrolls it, faster the closer the pointer is, so a block can be moved
+further than one screen. The nearest scrolling ancestor goes first (a `<body>`
+that scrolls itself counts); once it can go no further, or while its own edge
+is off-screen -- a pane taller than the window -- the next one out scrolls
+instead, ending at the page; for an editor in a same-origin iframe, at the page
+around the frame, read at the scale the frame is drawn at (a frame under a
+`transform: scale()` or `zoom` whose window cannot be read exactly ends the
+walk there). A press that lands in an edge band does not scroll until the
+pointer moves past it towards that edge. An undo, a redo or any other
+change to the document mid-drag ends the drag, since the gap it was aiming at
+belonged to the document before the change.
 
 On touch there is no hover to reveal any of this, so a tap on a block shows the
 gutter for it and a **long press** (500 ms, allowing 10 px of drift) selects the
@@ -337,24 +710,53 @@ real device it shares the gesture with the browser's own long-press text
 selection, so check it on your target platforms before relying on it.
 
 Dragging from one block's text into another with a mouse or pen selects whole
-blocks as you go. A finger doing the same is the browser's scroll, so touch
+blocks as you go; dragging back into the block it started in turns it back into
+a text selection, from where the press landed to the pointer -- or, where that
+block has no text to come back to (a divider, a picture; a block whose text a
+`setDocument` replaced whole mid-drag), selects that block alone. A press beside
+the text -- on a list marker, a table's border, a block's margin or the editor's
+padding -- puts the caret in the nearest text and starts the same gesture from
+there once the pointer has moved a few pixels (before that it is a click). The
+same edge autoscroll applies, and `Escape` ends the gesture while
+keeping what it has selected; so does a change to the document mid-gesture,
+an undo included. A `setEditable(false)` that takes editing away mid-gesture
+ends it and the block selection with it -- or finds it ended already, by
+`Escape` or an update, with the button still down -- and it stays ended until
+the next press: what the browser goes on selecting with the button still down is not
+taken up at the release, and no selection across blocks is left there, in a
+shadow root or out of one (a
+range inside one block is the browser's own, and stays). A `setEditable` call
+that switches nothing is no lock: a read-only view's drag across blocks goes
+on through it, and through a `setDocument`, and selects the blocks it covers
+(one that reorders the blocks after the drag has begun selecting them ends it
+at the blocks it held, as in an editable view, and the release leaves no
+selection of the browser's beside them). A
+known limit in Safari: while a drag across blocks is held, Safari keeps a
+caret of its own (a range, after an update rebuilt the block the drag began
+in) in the block under the pointer; nothing is drawn for it and keys act on
+the block selection, and the release takes it out. Beside the text, a right or middle press leaves the caret
+and any range where they were, `Shift` and a press extends a range to the
+nearest point of its own block, and a press on a scrollbar only scrolls. A
+finger doing the same is the browser's scroll, so touch
 never starts one; a long press is the touch way into block selection.
 Every block is its own `contenteditable`, and browsers confine a selection to a
 single editing host, so the gesture is tracked directly rather than read back
 from a DOM range that never spans blocks.
 
 Blocks can also be selected as units from the keyboard. `Escape` in text steps up
-to the block containing the caret; `Shift`+`↑`/`↓` at a block edge extends into
-whole blocks; `⌘A` takes the block's text, and a second `⌘A` takes every block.
+to the block containing the caret; `Shift`+`↑`/`↓` once the selection's moving end
+is at a block edge extends into whole blocks — so from the middle of a line the
+first press selects to the edge and the second takes the blocks; `⌘A` takes the
+block's text, and a second `⌘A` takes every block.
 
 With blocks selected:
 
 | Key                            | Action                                    |
 | ------------------------------ | ----------------------------------------- |
-| `↑` / `↓`                      | Move the selection.                       |
+| `↑` / `↓`                      | Move the selection.³                      |
 | `Shift` + `↑`/`↓`              | Extend it.                                |
-| `⌘`/`Ctrl` + `Shift` + `↑`/`↓` | Move the blocks themselves.               |
-| `Tab` / `Shift` + `Tab`        | Indent / outdent together.²               |
+| `⌘`/`Ctrl` + `Shift` + `↑`/`↓` | Move the blocks, as one contiguous group. |
+| `Tab` / `Shift` + `Tab`        | Indent / outdent each one.²               |
 | `Backspace` / `Delete`         | Delete them.                              |
 | `⌘`/`Ctrl` + `D`               | Duplicate them.                           |
 | `⌘`/`Ctrl` + `C` / `X`         | Copy or cut, as Markdown and HTML.        |
@@ -363,22 +765,34 @@ With blocks selected:
 | `Escape`                       | Leave the editor.                         |
 
 ¹ The last one that has text: a divider has no caret to take, so `Enter` walks
-back through the selection and, if none of it can hold one, keeps the selection.
+back through the selection and, if none of it can hold one, keeps the selection
+— unless that is a divider ending the document, when `Enter` opens a paragraph
+after it.
 
-² When nothing can move, `Tab` is not swallowed: the caret goes back into the
+² Each block is shifted one level on its own and then re-clamped, so the
+selection's shape is not preserved: a block already at the root stays there
+while its selected children come out to meet it, and none goes more than one
+level below the block above it. When nothing can move, `Tab` is not swallowed: the caret goes back into the
 last selected block (the first, for `Shift`+`Tab`) and focus moves on from
 there, exactly as it would from the text of that block.
 
+³ `↓` on a divider that ends the document opens a paragraph after it: it is the
+keyboard's only way below one.
+
 Undoing an edit made on a block selection brings the selection back with the
-blocks; deleting one lands the caret on the nearest block that can hold it, or
-selects that neighbour when none can.
+blocks; deleting one lands the caret on the nearest block that can hold it (the
+end of a table before it is its last cell), or selects that neighbour when none
+can -- found by id: when a `change` listener has renamed them all, focus leaves
+the editor instead (see `setDocument` above).
 
 The two modes are mutually exclusive, in both directions: entering block selection
 takes the caret out of the document, so the format toolbar hides and keystrokes
 address blocks rather than characters — and placing a caret leaves block
 selection, so `focus()`, `focusRange()` and `setBlockType()` end it rather than
 leaving an invisible selection to swallow the next key. Both return `false` when
-there is nowhere to put the caret. An empty selection is not a mode: deselecting
+there is nowhere to put the caret, and whenever the block did not take focus --
+in a read-only editor, or one made inert by a modal `<dialog>` elsewhere on the
+page -- and then change nothing, block selection included. An empty selection is not a mode: deselecting
 the last block returns to the text rather than holding the root focused with
 nothing selected.
 
@@ -401,20 +815,55 @@ Blocks keep their semantic element — a heading is an `<h1>`, a quote a
 overrides those with `role="textbox"`.
 
 **Keyboard.** Every control is reachable: the toggle chevron, the callout icon
-and the image are real tab stops (the last two only while the editor is
-editable — read-only, they are `disabled` rather than stops that do nothing), and `F10` inside a table moves focus into the
+and the image are real tab stops in every engine, WebKit included (the last two
+only while the editor is editable — read-only, they are `disabled` rather than
+stops that do nothing), and `F10` inside a table moves focus into the
 row/column toolbar, where arrows move between commands and `Escape` returns to
-the cell.
+the cell, with the caret or range it had there (backward ranges included). The
+toolbar follows its table while the page scrolls -- holding focus, even once the
+table is out of sight, since a scroll does not move focus. Only `F10` itself: with
+`Shift` (the keyboard's context menu), `Ctrl`, `Alt` or `⌘` the key is left to
+the browser and the page.
+
+A known limit of read-only mode: its text cannot take a caret, so a click into
+it focuses the nearest focusable thing, which is the editor as a whole (it
+carries `tabindex="-1"` so that a block selection can hold focus, for copying),
+and `Tab` then moves on from the editor's first control rather than from the
+point that was clicked.
 
 **Getting out.** `Tab` indents, but only when indenting is possible — a `Tab`
 that would change nothing moves focus onward instead, so the editor is never a
-keyboard trap. `Shift`+`Tab` at the outermost level always leaves. `Escape`
-twice — once to select the block, once more — also releases focus. With text
-selected and the format toolbar showing, the first `Escape` dismisses the
-toolbar, so it takes three.
+keyboard trap. In a table, `Tab` past the last cell adds a row only when the last
+row has something in it; from an empty last row it moves focus onward too.
+`Shift`+`Tab` at the outermost level always leaves. `Escape` twice — once to
+select the block, once more — also releases focus, and the `Tab` (or
+`Shift`+`Tab`) that follows goes to the next (or previous) focusable element on
+the page outside the editor, rather than back into it — past the frame or the
+shadow host the editor is mounted in, into the open shadow roots of web
+components beside it (a host that delegates focus counts as a stop itself), and
+only to something that really takes focus. With nothing to go to, the browser's
+own `Tab` goes on from outside the editor, to its toolbar or round the page. A
+known limit: a closed shadow root cannot be read from outside it, so the editor
+walks such a host's own children as though nothing were attached -- it passes
+over the controls inside the closed tree, and for a host with `tabindex="-1"` it
+can stop on a slotted control that the browser's `Tab` would skip.
+Inside a modal `<dialog>` that is the dialog's own controls: everything outside
+it is inert, so with no other control in the dialog the browser's `Tab` comes
+back into the editor — Chromium straight to its first block, Firefox and Safari
+by way of the dialog itself. Give such a dialog a button of its own (a Close or
+Save) and that is where the way out lands. It is spent by that `Tab`: scrolling first with the arrow keys,
+`Space` or `Page Down` keeps it, while a click or anything else that moves focus
+hands `Tab` back to the browser.
+With text selected and the format toolbar showing, the first `Escape` dismisses
+the toolbar, so it takes three.
 
 **Announcements.** A polite live region reports block selection, deletion,
-block-type changes, toggle state, table row and column edits, and undo/redo. The
+cutting, moving, indenting, outdenting and duplicating selected blocks,
+block-type changes, toggle state, table row and column edits, and undo/redo. A
+selected block is announced by its type and the start of its text —
+"Paragraph selected, Block B". The region is visually hidden and cannot be
+selected, so a range the reader draws in the page across the editor, and a copy
+of it, holds none of its sentences. The
 command menu is a combobox on the block being typed in, and its
 `aria-activedescendant` follows the highlight on every path that moves it —
 arrow keys, filtering, and the mouse crossing an item — so the option announced
@@ -456,8 +905,39 @@ createEditor({
 ```
 
 `DEFAULT_LABELS` and the `NEditorLabels` type are exported; anything you leave
-out keeps its default. `placeholders` and `slashCommands` merge per entry, so
-translating one of them does not blank the rest.
+out keeps its default. `placeholders`, `slashCommands` and `blockTypeNames` merge
+per entry, so translating one of them does not blank the rest. `blockTypeNames`
+is what a selected block is called in announcements; a type without an entry is
+called by its slash-menu label, and the one default entry (`paragraph:
+'Paragraph'`, since the menu's "Text" is an instruction rather than a name) gives
+way to your own translation of the paragraph command when you supply one.
+
+The live-region announcements, and what stands in for one you leave out:
+
+| Label                                                        | Default                                          | Left out by a host that translates the others  |
+| ------------------------------------------------------------ | ------------------------------------------------ | ---------------------------------------------- |
+| `blockSelected` / `blocksSelected` / `noBlocksSelected`      | `1 block selected` / `{count} blocks selected`   | —                                              |
+| `blockSelectedNamed`                                         | `{type} selected, {text}`                        | your `blockSelected`                           |
+| `emptyBlockSelectedNamed` — nothing in it                    | `{type} selected, empty`                         | your `blockSelected`                           |
+| `textlessBlockSelectedNamed` — a divider, a picture, no text | `{type} selected`                                | your `blockSelected`                           |
+| `blockDeleted` / `blocksDeleted`                             | `Block deleted` / `{count} blocks deleted`       | —                                              |
+| `blockCut` / `blocksCut`                                     | `Block cut` / `{count} blocks cut`               | `blockDeleted` / `blocksDeleted`, yours or not |
+| `blocksMovedUp` / `blocksMovedDown`                          | `Moved up` / `Moved down`                        | nothing is announced                           |
+| `blocksIndented` / `blocksOutdented`                         | `Indented` / `Outdented`                         | nothing is announced                           |
+| `blockDuplicated` / `blocksDuplicated`                       | `Block duplicated` / `{count} blocks duplicated` | the copies' selection alone                    |
+
+An image is named by its alt text (`Image selected, A blue gradient`), and its
+caption when it has none. "Translates the others" means supplies any
+live-region announcement older than these — `blockSelected`, `blocksDeleted`,
+`undone`, `toggleCollapsed`, a table's `rowInsertedAbove`, `leftEditor` and the
+rest of the live region's sentences, but not the ones introduced with these
+(the last four rows, `textlessBlockSelectedNamed` and `blockTypeNames`) — so a
+host that translated the live region before the newer sentences existed never
+has an English one read into it. Labels that are not announced do not count:
+a host that names the editor, rewords a placeholder or sets `bold` or `imageUrl`
+has not translated the live region, and keeps every English default. A cut is
+the exception that is never silent: with no `blockDeleted` / `blocksDeleted` of
+yours, their English defaults are announced.
 
 One set of _visible_ button glyphs is not reachable that way: the format
 toolbar's `B`, `I`, `U`, `S` and `</>`, which are typographic mnemonics rather
@@ -495,7 +975,13 @@ would push out the edits you actually wanted back.
 
 Each step restores the selection that was live when it was made, so undoing a
 format puts the same text back under the cursor, and undoing a split puts the
-caret back where you pressed Enter.
+caret back where you pressed Enter — in the direction it was made, so a
+selection grown with `Shift`+`←` keeps growing leftwards. Redo restores where the
+redone edit left the caret: redoing a format selects the text again, redoing
+typing puts the caret after what was typed. An edit made with the pointer and no
+caret in the text (the gutter's `+`, a toggle's chevron) undoes back to the block
+it was made beside, and anything with no selection to restore puts the caret
+where the document changed — never back at the top of the page.
 
 To drive your own buttons:
 
@@ -515,32 +1001,89 @@ one pointer per block and there is no inverse operation to get wrong.
 
 ## Keyboard
 
-| Key                             | Action                                                   |
-| ------------------------------- | -------------------------------------------------------- |
-| `Enter`                         | Split the block. Lists and to-dos continue themselves.   |
-| `Enter` at the start of a block | Open an empty line above; the block keeps its text.      |
-| `Enter` in a code block         | A newline. Leave with `↓` at the end, or a click below.  |
-| `Enter` on an empty list item   | Leave the list.                                          |
-| `Shift` + `Enter`               | Soft line break inside the block.                        |
-| `Backspace` at the start        | Outdent, then revert to paragraph, then merge upward.    |
-| `Backspace` in an image caption | Select the image. Reverting it would delete the picture. |
-| `Delete` at the end             | Merge the next block in.                                 |
-| `Tab` / `Shift` + `Tab`         | Indent / outdent.                                        |
-| `↑` / `↓` at a boundary         | Move to the previous / next block.                       |
-| `↓` at the end of the document  | After a code block or table, open a paragraph below it.  |
-| `⌘`/`Ctrl` + `Shift` + `↑`/`↓`  | Move the block itself.                                   |
-| `⌘`/`Ctrl` + `Enter`            | Toggle a to-do.                                          |
-| `⌘`/`Ctrl` + `Z`                | Undo.                                                    |
-| `⌘⇧Z` / `Ctrl` + `Y`            | Redo.                                                    |
-| `Escape`                        | Step up from text to the block.                          |
-| `/`                             | Open the command menu.                                   |
+| Key                              | Action                                                         |
+| -------------------------------- | -------------------------------------------------------------- |
+| `Enter`                          | Split the block. Lists and to-dos continue themselves.         |
+| `Enter` at the start of a block  | Open an empty line above; the block keeps its text.            |
+| `Enter` in a code block          | A newline. Leave with `↓` on its last line, or a click.        |
+| `Enter` on an empty list item    | Leave the list.                                                |
+| `Shift` + `Enter`                | Soft line break inside the block.                              |
+| `Backspace` at the start         | Outdent, then revert to paragraph, then merge upward.          |
+| `Backspace` in an image caption  | Select the image. Reverting it would delete the picture.       |
+| `Backspace` after an image       | Select it (an empty line is removed); a new press deletes it.³ |
+| `Delete` at the end              | Merge the next block in.                                       |
+| `Delete` before an image         | Select it (an empty line is removed), as `Backspace` does.³    |
+| `Tab` / `Shift` + `Tab`          | Indent / outdent.                                              |
+| `↑` / `↓` on a first / last line | Move to the previous / next block, keeping the column.¹        |
+| `←` / `→` at a block's edge      | Move to the end / start of the previous / next block.²         |
+| `⌘`/`⌥`/`Ctrl` + `↑`/`↓`         | The platform's own: start or end of the block, never across.   |
+| `↓` at the end of the document   | After a code block, table or divider, open a paragraph.        |
+| `⌘`/`Ctrl` + `Shift` + `↑`/`↓`   | Move the block itself.                                         |
+| `⌘`/`Ctrl` + `Enter`             | Toggle a to-do.                                                |
+| `⌘`/`Ctrl` + `Z`                 | Undo.                                                          |
+| `⌘⇧Z` / `Ctrl` + `Y`             | Redo.                                                          |
+| `Escape`                         | Step up from text to the block.                                |
+| `/`                              | Open the command menu.                                         |
+
+¹ Lines as laid out: a wrapped paragraph, a `Shift`+`Enter` break and a code
+block's lines are each walked by the browser first, and the press on the first
+(or last) line leaves the block. The caret lands under where it was, as nearly as
+the target's text allows, and a run of presses keeps the column it started from
+from block to block, so a short block on the way does not pull it over; a click
+starts a new run, and so do an edit and the host's own `focus()`. Inside a block
+the browser moves the caret line by line by its own column, not the run's: in any
+block that has more than one line -- a wrapped paragraph, a `Shift`+`Enter` break,
+a table cell, a code block -- that column is wherever the caret entered the block,
+so after entering on a short line (or one that ends before the run's column) the
+caret can sit at that line's end and walk on from there, away from the run's
+column. The next block is still entered under the run's column. Where a
+line wraps, its end and the next line's start are one position; the caret there
+is on whichever line the browser drew it on, and the editor asks the browser
+which: the end of a wrapped block's first line counts as its first line and the
+start of its last line as its last, so `↑` or `↓` from there leaves in one press,
+and the column is where the caret was drawn (the end of the line after `End` or a
+click past it, the start of the next after `Home`). A table is entered in its first
+row going down and its last going up, in the column under the caret; inside one,
+`↑`/`↓` step between rows the same way. Dividers, and children hidden in a
+collapsed toggle, are stepped over.
+
+² Each block is its own editing field, so without this the browser's arrow stops
+dead at its edge. The browser moves the caret first, and a press it could not
+move steps out — from the end of the text forward, from its start backward,
+wherever bidi has drawn those ends — so in English text in a right-to-left
+editor, or Hebrew in a left-to-right one, each end has one key in and one out.
+Only those ends: a press the browser could not move in the middle of the text
+stays put, which is what keeps `←`/`→` inside a wrapped paragraph as they cross
+its line breaks. One limit follows from it. In a line that mixes directions
+Firefox moves by what is drawn, and its arrows can stop against the edge of the
+line in the middle of the text without ever reaching either end; there, `↑`/`↓`
+(and in most such lines the other arrow) still leave the block. A held arrow
+crosses one edge per repeat. Table cells are steps in reading order, and
+dividers are stepped over.
+
+³ Or a table: neither holds text another block can merge with. Selecting it is
+the safeguard, so it holds against auto-repeat — a held key stops at the block it
+selected, and deleting it takes a fresh press.
 
 A line break at the very end of a block renders a trailing `<br>` alongside the
 newline. Under `white-space: pre-wrap` that last newline ends the line and has
 nothing after it to fill another, so without the filler the block did not grow
 and the next character landed in front of the break instead of after it. It is
 presentation only: the model holds one `\n`, and reading the DOM back — a paste,
-a `syncFromDom`, the clipboard — treats a trailing `<br>` as nothing.
+a `syncFromDom`, the clipboard — treats a trailing `<br>` as nothing. Typing is
+done by the browser, which can take the filler out with a word or line deletion
+(Firefox does); the editor puts it back after any deletion that leaves the block
+ending in a newline.
+
+Typing over selected text inside one block is done by the editor rather than the
+browser, because every engine has its own rule for which formatting the new text
+inherits: it takes the marks and the link of the first character it replaces, so
+selecting a link's text and typing a new one keeps the link. Each character typed
+next at that same caret joins it too, as in Google Docs; anything else ends that
+— moving the caret (even back to the same place), a click, Escape, leaving the
+editor, toggling a mark (so ⌘B there types bold text after the link), any other
+edit, undo or redo. A word composed through an IME over the selection, or at that
+caret, gets the same formatting.
 
 ## Block types
 
@@ -561,7 +1104,9 @@ selector.
 A **toggle** carries `collapsed`. Collapsing hides every block nested under it,
 and those blocks then **travel with it**: selecting, moving, copying or deleting
 a collapsed toggle carries its hidden children, because leaving behind blocks the
-user cannot see is how documents get silently mangled.
+user cannot see is how documents get silently mangled. In a read-only view, a
+toggle the reader closed with its chevron carries them too; a copy writes the
+document, so it is written open, as the document has it, with its children.
 
 ```js
 editor.toggleCollapsed(id);
@@ -600,8 +1145,12 @@ table with nothing in it.
 
 With the caret in a cell, a toolbar offers insert and delete for the current row
 and column. `Tab` and `Shift`+`Tab` walk the cells in reading order, and `Tab`
-past the last cell appends a row. `Enter` breaks the line inside a cell; `↑`/`↓`
-step between rows and leave the table at its edges.
+past the last cell appends a row — while the last row has something in it; past
+an empty last row, `Tab` moves focus on. `Enter` breaks the line inside a cell;
+`↑`/`↓` step between rows in the column under the caret and leave the table at
+its edges, and `←`/`→` at a cell's edge go on to the next or previous cell. With
+`Shift` or `⌘`/`Ctrl`+`Shift` held, the arrows act on the table as a block:
+extending into block selection, or moving it.
 
 The grid operations are exported and pure, if you would rather drive them
 yourself: `createTableRows`, `tableInsertRow`, `tableDeleteRow`,
@@ -656,7 +1205,14 @@ programmatically: `richFromPlainText`, `richSlice`, `richSplit`, `richConcat`,
 Content arriving from outside the editor is **parsed, never inserted as
 markup**. `<script>`, `<style>` and `<iframe>` are dropped entirely, and only
 `http`, `https`, `mailto` and `tel` links survive — `javascript:` and `data:`
-hrefs are stripped while their text is kept.
+hrefs are stripped while their text is kept. A destination with no scheme that
+looks like a host (`example.com/docs`) becomes `https://…`, and one that is only
+an email address (`me@example.com`), or an address and a query or fragment
+(`me@example.com?subject=Hello there`), becomes `mailto:…` with the query
+percent-encoded -- typed in the link editor, in Markdown or in pasted HTML
+alike. A user name or password in front of an
+`http` or `https` host is dropped, because all it still does is disguise the
+host: `https://google.com@evil.test` links to `https://evil.test/`.
 
 That covers dragging as well as pasting. A native drop is cancelled and its
 payload re-entered through the same parser, because the browser's own default
@@ -677,6 +1233,171 @@ nested lists), `<li>` with a checkbox, `<blockquote>`, `<pre>` and `<hr>` map
 onto block types; `<b>`, `<i>`, `<u>`, `<s>`, `<code>` and inline
 `font-weight` / `font-style` / `text-decoration` map onto marks, so content from
 Word, Google Docs and other editors keeps both its structure and its formatting.
+Word's list paragraphs (`mso-list:… levelN`) become list items at their level --
+numbered when the marker Word wrote is a number, with or without its full stop
+(`1`, `1.1`, a legal `1.01`, a multilevel `1.1.`), or a letter or a roman
+numeral (`viii.`) with its punctuation, bulleted otherwise, picture bullets
+included -- without the marker; a picture in an item's text is the item's
+child image. A `List Paragraph` without `mso-list` is Word's style with no
+numbering, and stays a paragraph. WebKit strips the `mso-` styles from a paste
+out of Word; where none are left, a `MsoListParagraph` is read as an item when
+its text starts with a marker and Word's wide gap after it, and the level is
+then read from the indent, in whichever unit Word wrote it (`pt`, `in`, `cm`,
+`mm` or `px`). A marker there is a bullet glyph (`·`, `•`) or a number with
+its punctuation (`1.`, `(2)`, `1.1.`); a bare number (`1`, `1.1`), a letter or
+roman numeral with its punctuation (`a)`, `(iv)`, `viii.`), a character that
+stands in for a Wingdings or Courier New bullet (`o`, `§`, `Ø`, `ü`, `v`, `q`,
+`n`, `*`, `-`) or a picture no larger than 24px is one only with Word's spacer
+after it, the 7pt span WebKit keeps and real Word lists always carry -- so
+`2024   Annual results`, `o  clock`, `Yes.  We agree.`, `Dr.  Smith`,
+`(c)  2024 Acme` and an icon a note starts with stay text, and a screenshot
+first in the paragraph stays a picture. Any other first word -- `Caution:`,
+`Results.` -- is text. A link's own underline is how links
+look, not a mark: a `text-decoration: underline` on or inside an `<a href>` (as
+Google Docs writes every link, and as a browser copies one) is not read as
+underline, though a `<u>` there still is.
+
+Whitespace is read as a browser draws it: in a block that does not say
+otherwise -- a paragraph, a heading, a `<div>`, a table cell -- each run of
+spaces, tabs and source line breaks is one space, and none stands at the start
+or end of a line, so a page's line-wrapped, indented `<p>` source -- which
+Firefox copies as it is -- pastes as one line. Text styled `white-space: pre`,
+`pre-wrap` or `break-spaces` keeps its whitespace exactly, and `pre-line` its
+line breaks, element by element: one such `<span>` keeps its own spaces, while
+the source indentation around it still collapses. A block itself styled
+`pre-line` is read as it stands, its spaces kept along with its line breaks,
+since keeping a space a browser would have collapsed loses nothing -- and so
+is one a stylesheet makes `pre-line`, a paragraph after a blank line in a table
+cell or a bare list item included, since Firefox writes its plain text as
+preformatted, byte for byte as its `pre-wrap` twin's, and the two cannot be
+told apart (a known limit: the source spaces `pre-line` never drew are pasted). So does text in `<pre>` and
+`<textarea>` unless the element itself says `white-space: normal`; `<code>`,
+`<kbd>` and `<samp>` are drawn `normal` by default, like the paragraph around
+them. Firefox copies a page's classes rather than its styles, so for a block
+whose HTML does not say how its whitespace is drawn -- no inline `white-space`
+on it or around it, as Chromium and WebKit always write -- the clipboard's
+`text/plain`, which Firefox writes as the text was drawn, decides: each block is matched where it stands
+in the plain text, and each run of whitespace in it is kept as written where the
+plain text holds exactly that run there, so a paragraph or a chat message a
+stylesheet made `pre-wrap`, ASCII art in a `pre`-styled one and GitHub's
+space-preserving `code` keep their lines and spaces, while the source wrapping
+beside them still collapses. A lone space a block starts with is asked about
+too, since Firefox writes none it did not draw (`<p> lead</p>` copies as
+`lead`): the indented line of a `pre-wrap` verse keeps it, and in a table cell
+it counts as the start of a line, since Firefox writes a tab between cells.
+The exception is the very start of a copy: a drag begun on the first letter
+of a block whose source starts with spaces (`<p>  Hello</p>`, `<li>  Hello</li>`)
+copies them collapsed to one, though none was drawn, and that one space is
+pasted -- a known limit, because a drag begun after `Sentence.` in
+`Sentence.  Next` copies the space it drew and selected in exactly the same
+HTML and the same plain text.
+A space that starts a line inside a block -- after a `<br>`, or at a paragraph
+within it -- is asked about the same way (`one<br> two` in a `pre-wrap`
+paragraph keeps it), and Firefox leaves it out where it was not drawn.
+Firefox's plain text indents every line by four spaces for each `<ul>`, `<ol>`,
+`<dd>` and `<blockquote>` the text is in -- counted for the element the text
+stands in, so a quote in a quote or a list in a table cell is indented further
+than its block -- so where a line starts with exactly that indentation it is
+Firefox's, not the block's: a quote's or a list item's drawn leading space is
+the one after it, a line break in a `pre-wrap` quote or item is matched with it
+after the break (an empty line has none, and two paragraphs in one item or
+quote stand a blank line apart -- as they do with no indentation at all, in a
+table cell or in the bare `<li>`s of a drag begun inside a list, where the
+second one's drawn leading spaces are kept too), and a `<li>    item`, or a `normal`
+`<li>one<br>    two`, whose spaces were never drawn pastes without them --
+even when there are exactly as many as Firefox's indentation. In a block with
+no indentation of its own -- a table cell, a bare `<li>` -- each line is
+matched past the indentation of the element it starts in, so a list, quote or
+definition inside a cell reads the same way. Spaces that end a line where a block ends
+there collapse, as any block's own end does, whatever the plain text holds,
+since Firefox writes a `<dd>`'s trailing space drawn or not -- a `pre-wrap`
+definition's drawn one included -- unless the gap to the next line matched
+whole, as it did before each line was matched on its own; within one block they stand where
+the plain text holds exactly them. Firefox starts each
+line of a `<blockquote type="cite">` (a mail client's quoted reply) with `>`
+instead, which none of its text is matched past, so the whitespace in one is
+read collapsed even where a stylesheet drew it: a known limit. A
+lone space a block ends with is asked about only in a table cell, and counts
+only at the end of its row, since before the tab Firefox writes a cell's
+trailing space whether it was drawn or not; any other block's collapses,
+because Firefox writes the one a pretty-printed `<li>first <code>x</code> </li>`
+ends with whether it was drawn or not. A block the plain text spells
+differently -- an image's alt text, a `<q>`'s quote marks -- or leaves out is
+read collapsed, and costs the blocks after it nothing: a table cell after it in
+its row is looked for once more right after the next tab on the row's line, and
+a row whose first cell is empty, holds only a picture or is spelled differently
+is placed at the start of the first line after the last block matched, since
+Firefox writes each row on a line of its own. A block's last newline -- or a vertical tab or form feed,
+read as one -- ends its last line and adds none, a code block's included. A space WebKit converted to a no-break space at an element boundary is
+read back as an ordinary space; a run of them, or one beside another space, is
+never collapsed away, while a lone one -- WebKit writes the undrawn space at the
+end of a line or a block that way too -- collapses like any space. A lone one
+that starts the copy is the space a drag began at (after `Sentence.` in
+`Sentence.  Next`), and stays, as the same space in Chromium's copy does.
+
+A selection begun just past the end of a line (or ended at the start of one)
+crosses a line break the reader did not select, and browsers write it into the
+copy: Chromium and WebKit as a `<br class="Apple-interchange-newline">` that is
+the fragment's first or last leaf -- at its top level, or inside the first
+block, list item or link -- and Firefox as the block it left, emptied. Such a
+break is dropped wherever it is that first or last leaf, together with every
+element that held nothing else (WebKit writes the one a drag begun in a closed
+`<details>` crossed inside the `<details>`), though never a table's cell, and a
+break of that class anywhere else is an ordinary line break. A block whose content draws
+nothing -- no text but the source's indentation, no `<br>`, no picture, player
+or control, only empty inline elements or empty blocks inside it, as Firefox
+writes the paragraph, heading, list item, `<pre>` or `<details>` a drag left
+(`<p><a href="…"></a></p>`, `<h2><span></span></h2>`,
+`<details><summary></summary></details>`) -- draws no line in the
+page it came from, so one at either edge of the copy (or first or last inside
+the list, quote or `<details>` at that edge, though not inside a table's cell) is dropped
+without asking the plain text, which on a pretty-printed page starts with the
+source's own newlines. Neither opens or closes the paste with an empty line,
+nor splits the paragraph it is pasted into. Kept: a block element holding a
+`<br>` (`<p><br></p>` is a line a reader can select) -- though a `<br>` that
+is all a loose `<div>` holds, as Gmail and Outlook write an empty line
+(`<div><br></div>`), or one standing alone between blocks, is a blank line
+between the blocks around it, and at either end of the paste, with nothing to
+stand between, it is trimmed --, a block that declares its own
+`white-space` -- this editor's writer marks every block that way, so an empty
+paragraph it wrote is pasted as the empty line it is -- whitespace a style or a
+`<pre>` keeps, a no-break space, this editor's HTML from before it marked its
+blocks, and a copy of nothing but empty blocks. ProseMirror (and so Tiptap)
+says where its copy's edges are, in the `data-pm-slice="<openStart> <openEnd>
+…"` its first element carries: an end it marks closed (`0`, as a select-all
+copy does) is whole blocks the reader selected, and its empty blocks are kept;
+an open end is a drag's, and its empty blocks go as any other's.
+
+A drag begun in a `<details>`' body leaves its `<summary>` out of the copy, and
+WebKit writes the start tags of every closed `<details>` a drag crosses at the
+front, around everything after them. So a `<details>` on the copy's start edge
+-- the first element, its first child and so on down, through the page's own
+wrapper (a `<div class="faq">`, a `<section>`), Chromium's and WebKit's content
+slot around a nested `<details>` and an editor's content `<div>` -- with no
+summary of its own (nor one in WebKit's content slot) is read as its body, in
+its place and at its depth: the answers paste as paragraphs, never as an empty
+toggle the reader's text is indented into. One with its summary, one anywhere
+after the start, one that draws nothing, and one a closed ProseMirror slice
+starts with are toggles as before; a whole summary-less `<details>` at the very
+start of a paste cannot be told from a drag's, and is read as its body too.
+
+A known limit, Chromium: a drag that starts before a `<details>` and ends
+anywhere inside it -- in its summary or in its open body, open or closed, in a
+wrapper or not -- can copy the rest of the page after that `<details>` as HTML
+-- text the reader never selected, though the plain text is only what was
+selected -- and the paste then holds all of it. That HTML is what a copy
+running to the end of the page would write, so the reader cannot tell it from
+one; ending the drag outside the `<details>` takes only the selection.
+
+No control character but the tab and the line feed enters the document: a
+`\r\n` or a lone `\r` is a line break like `\n` -- spelled in Markdown as
+`&#13;&#10;` too -- and so is a vertical tab or a form feed (PowerPoint's
+`line1\vline2` is two lines, and one that ends a pasted block adds no line);
+every other C0 control
+-- a NUL, a bell, an escape --, DEL and the C1 controls are dropped. Pasted
+plain text, pasted HTML, Markdown, a callout's icon and a stored document
+through `normalizeDocument` are all cleaned the same way, so what is pasted is
+what is saved and what is loaded again.
 
 When the clipboard carries no HTML, the plain text is parsed as **Markdown** —
 `# `, `- `, `1. `, `> `, `- [x] `, `---` and fenced code, plus the inline rules.
@@ -684,10 +1405,12 @@ One line becomes one block, so soft-wrapped prose arrives as several paragraphs.
 Inline parsing replays the same rules used while typing, so pasting `**a**` and
 typing it give the same result. Two things differ, because a paste sees the
 whole line and typing only what is before the caret: a link destination that
-never closes on its line (`**see [docs](x**`) is not a link, so the bold
-applies, where typing waits for the `)` that may be the next key; and a
-backslash escape is honoured when pasted (`\*a*` is literal `*a*`), where a
-typed backslash stays a backslash.
+never closes on its line (`**see [docs](x**`, or `[a](<b and *y*` with no `>)`)
+is not a link, so the formatting after it applies, where typing waits for the
+`)` that may be the next key; and a backslash escape is honoured when pasted
+(`\*a*` is literal `*a*`; in a link destination `\$` is `$`), where a typed
+backslash stays a backslash -- including one inside a code span, which a paste
+reads as an escape and CommonMark does not.
 
 Where the paste lands depends on its shape:
 
@@ -701,12 +1424,33 @@ Where the paste lands depends on its shape:
   gets a paragraph of its own rather than being parked in a field a divider or
   a table never draws.
 - With **blocks selected**, the paste replaces them.
+- Lines follow `Enter`. Pasted into a toggle's or a callout's own text, they
+  become its children. **Plain lines** — text with no Markdown structure of its
+  own and no HTML beside it — pasted into a list item or a to-do become further
+  items at its depth, and the item you pasted into keeps its type and its check.
+- Into a **code block**, the paste is its text, with Windows and classic Mac line
+  endings read as newlines.
 
 Either way it is a single undo step.
 
 Copying selected blocks writes Markdown to `text/plain` and HTML to `text/html`,
 with genuinely nested `<ul>`/`<ol>` so depth survives a round trip through
-another application.
+another application. In the HTML a line break made with `Shift`+`Enter` is a
+`<br>` and every element holding text is marked `white-space: pre-wrap`, so a
+soft break, a run of spaces or a tab survives a paste into Gmail, Google Docs or
+any other rich-text field -- and back into this editor when the browser drops
+its private clipboard flag, as WebKit does between origins.
+
+Copying (or cutting) **text** selected inside one block writes the characters
+you selected to `text/plain` — not Markdown — and the runs as HTML, with each
+line break a `<br>` and the phrase in a `white-space: pre-wrap` span, so its
+spaces, tabs and indentation survive in other applications too. A range copied
+out of a code block is written as a code block, a `<pre>`. It is written from the model rather than left to the
+browser, whose copy carries the editor's computed styles: a link's underline
+and a checked to-do's line-through read back as formatting. A paste into any
+neditor reads the runs from an `application/x-neditor` entry beside them instead
+of the HTML, so they merge in at the caret exactly as they were; that entry is
+treated as untrusted, like a loaded document. A cut is one undo step.
 
 Callouts and toggles have no Markdown of their own, so both degrade to something
 readable that still parses back:
@@ -727,8 +1471,7 @@ quote, and an icon that is not an emoji still names a callout.
 
 Tables are faithful in both formats — a GFM table pasted as plain text becomes a
 real table, cell formatting included, and a ragged one is squared off rather
-than rejected. An image keeps its source and alt text in both, and its caption
-in HTML only. The delimiter row is read as GFM defines it, so `| - | - |`
+than rejected. An image keeps its source, alt text and caption in both. The delimiter row is read as GFM defines it, so `| - | - |`
 works as well as `| --- | --- |`, with or without alignment colons.
 
 One GFM allowance is not implemented: a row must keep its outer pipes. Deciding
@@ -816,6 +1559,20 @@ const back = toMarkdown(doc);
 `blocksFromHtml` take a `Document`, so on the server they need a DOM shim
 (`happy-dom`, `jsdom`) passed in as the first argument.
 
+`blocksFromHtml(doc, html, options)` takes an optional `HtmlReadOptions`:
+
+| Option       | Type                   | Default  | Description                                                                                                                                                                                                                                                                                                                                                   |
+| ------------ | ---------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `whitespace` | `'auto' \| 'preserve'` | `'auto'` | `'auto'` reads whitespace as a browser draws it. `'preserve'` reads every block's text as it stands: pass it for HTML stored from `blocksToHtml` in 0.1.3 or earlier, which wrote a soft line break as a raw newline and spaces as they stood. Only such HTML with a nested or checked block is recognised on its own; a document of plain paragraphs is not. |
+| `plain`      | `string`               | none     | The `text/plain` the HTML came with. For a block with no inline `white-space` on it or around it, each run of whitespace the plain text holds exactly as written, where the block stands in it, is kept (see [Copying and pasting](#copying-and-pasting)).                                                                                                    |
+
+```js
+import { blocksFromHtml } from '@neditor/core';
+
+// HTML a 0.1.3 or earlier `blocksToHtml` wrote, read back as it was written.
+const blocks = blocksFromHtml(document, stored, { whitespace: 'preserve' });
+```
+
 Importing the package on a server is safe: nothing touches `document` or
 `window` at module scope, so SSR frameworks can import it freely.
 
@@ -836,15 +1593,61 @@ touching the injected stylesheet:
 The floating toolbar, slash menu and link editor render outside the editor
 element so they are never clipped. They carry the `.neditor-portal` class and
 read the same tokens, so set custom properties on both selectors if you override
-them globally.
+them globally. When the page scrolls, the slash menu and the format toolbar
+follow the caret, and close once the caret or range itself has left the screen
+(not its block, which can be taller than the window); the table
+toolbar sits against the table, or against the caret's row when the table is
+taller than the screen (against the caret's line when the row is too), and
+goes with the caret's cell when that leaves the
+screen -- the screen being what every scrolling container that clips the
+editor leaves visible, the shadow pane of a web component the editor is
+slotted into included (a pane behind a `position: fixed` sheet, a modal
+dialog or popover does not, unless an ancestor between them makes the sheet
+its containing block -- a `transform`, `filter`, `perspective`, `will-change`,
+`contain` and the like -- so that the sheet scrolls with it; nor does a
+scrolling pane around a `position: absolute` panel that is not its containing
+block, nor a scrolling `<body>` under a panel placed against the page), and for
+an editor in a same-origin iframe, what the windows of the pages around the
+frame, and any scrolling pane there the frame sits in, leave visible too, at
+the scale the frame is drawn at (a `transform: scale()` or `zoom` on it or
+around it) -- every floating panel goes on the side of what it belongs to that
+more of that part shows, not by the frame's whole window --
+coming back with it (one `F10` gave focus keeps following
+the cell instead, and `F10` on a cell not wholly on screen first brings it to
+the middle of its own scroller, moving nothing around it; in a cell taller than
+that scroller, the caret -- or any part of a range -- is what has to be on
+screen, and the caret or the range's focus end is what is brought to the
+middle, an empty line included -- a caret at a line's wrap is judged by the line
+it is drawn on -- and `Escape` back to it moves nothing that is
+already on screen; a cell in a fixed panel that does not scroll itself is not
+scrolled at all). Enter in a cell taller than the screen -- and Shift+Enter, or
+Enter in a code block, in a block that is -- scrolls the least that shows the
+new line, never the whole block. With a range in a cell the format toolbar is drawn and the table toolbar
+is not; `F10` reaches it. An editor reads the tree it is drawn in -- the
+components it is slotted into -- when it is mounted; one moved into a
+component later is not heard scrolling there until it is mounted again.
 
 They are appended to the mount point's own root node, which is `document.body`
 for an ordinary mount and the shadow root for an editor inside a custom element
 — a shadow tree does not inherit the document's stylesheets, so a portal in the
 body would render with none of this. Pass `portalContainer` to put them
-somewhere else (a modal `<dialog>` is promoted to the top layer and paints above
-any z-index, so pass the dialog itself); the stylesheet is injected into that
-tree as well as the editor's.
+somewhere else. An editor inside the top layer needs it: a modal `<dialog>`, an
+open `popover` or a fullscreen element paints above any z-index, so portals
+left in the body are drawn under it -- pass that dialog, popover or
+fullscreen element itself (the default is not
+changed for you); the stylesheet is injected into that
+tree as well as the editor's. For an editor in a same-origin iframe that can be
+the page around the frame: the portals are placed against the text through the
+frame's offset and scale (a `transform: scale()` or CSS `zoom` on the frame or
+around it), and a press or focus on them is still the editor's own. Drawn in
+that page, they are not cut by the frame or by a scrolling pane of that page
+the frame sits in: they choose their side by that page's window (and by the
+pages around it, if it is a frame itself). A known
+limit: WebKit lays a frame under a CSS `zoom` out at the zoomed width, clips it,
+and reports the rects inside it in units of neither window, so there a portal
+in the outer page is not placed against the text (a `transform` is). They
+are placed as they open and as the frame's own document or a page around the
+frame scrolls.
 
 The layout uses logical properties throughout, so `dir="rtl"` on the editor
 mirrors indentation, list markers, the quote bar and the drag handle correctly.

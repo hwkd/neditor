@@ -7,6 +7,7 @@ import type { TableRows } from '../model/table.ts';
 import { tableSize } from '../model/table.ts';
 import type { RichText } from '../model/rich-text.ts';
 import { renderRichText } from './rich-dom.ts';
+import { readSelection } from './selection.ts';
 
 /**
  * The view layer.
@@ -15,7 +16,8 @@ import { renderRichText } from './rich-dom.ts';
  * renderer reconciles instead: it keeps one DOM element per block id, reuses it
  * across renders, and only writes `textContent` when it actually differs from
  * what the browser already holds. Typing therefore touches the model and the
- * DOM stays exactly as the user left it.
+ * DOM stays exactly as the user left it. A reorder moves the other blocks
+ * around the one the reader is in, never that one (`#positionAround`).
  */
 
 export interface BlockView {
@@ -232,6 +234,8 @@ export class Renderer {
     const placeholder = figure.ownerDocument.createElement('button');
     placeholder.type = 'button';
     placeholder.className = 'neditor-image__placeholder';
+    // WebKit skips a button with no tabindex; see the image trigger.
+    placeholder.tabIndex = 0;
     placeholder.textContent = this.#labels.imageAdd;
     placeholder.addEventListener('mousedown', (event) => {
       event.preventDefault();
@@ -317,7 +321,7 @@ export class Renderer {
       }
     }
 
-    blocks.forEach((block, index) => {
+    const order = blocks.map((block) => {
       let view = this.#views.get(block.id);
 
       // A change of shape swaps the elements, so the view is rebuilt.
@@ -329,14 +333,109 @@ export class Renderer {
 
       this.#updateView(view, block, numbers.get(block.id));
 
-      // insertBefore moves an existing node rather than cloning it, so this
-      // both inserts new blocks and reorders moved ones.
+      return view.root;
+    });
+
+    // Positioned only once every view is final, so that the block the reader
+    // is in is known: a view rebuilt above has already taken focus with it.
+    const kept = this.#readersBlock();
+
+    if (kept) {
+      this.#positionAround(order, kept);
+      return;
+    }
+
+    // insertBefore moves an existing node rather than cloning it, so this
+    // both inserts new blocks and reorders moved ones.
+    order.forEach((element, index) => {
       const current = this.#root.children.item(index);
 
-      if (current !== view.root) {
-        this.#root.insertBefore(view.root, current);
+      if (current !== element) {
+        this.#root.insertBefore(element, current);
       }
     });
+  }
+
+  /**
+   * The block element the reader is in, which a reorder must not move.
+   *
+   * First the one holding focus, asked of the mount's own root node -- the
+   * document, or the shadow root an editor drawn in one lives in, where
+   * `document.activeElement` is only the shadow host -- and climbed to the
+   * root's child it sits in, so focus on a control inside a block (the to-do
+   * checkbox, the callout icon, a table cell) names its block. The root itself
+   * (block selection) and the gutter are not blocks and name nothing.
+   *
+   * With no block holding focus, the one the selection is in: a page's own
+   * toolbar button holds focus while it acts on the reader's range (WebKit
+   * leaves focus on `<body>` and types into that range), and a block taken
+   * out and put back loses every range inside it -- pressed while a peer moved
+   * the block, the button bolded nothing.
+   */
+  #readersBlock(): HTMLElement | null {
+    const rootNode = this.#root.getRootNode() as Partial<DocumentOrShadowRoot>;
+    const focused = this.#blockOf(rootNode.activeElement ?? null);
+
+    if (focused) {
+      return focused;
+    }
+
+    const reading = readSelection(this.#root);
+    const block = reading ? this.#blockOf(reading.anchorNode) : null;
+
+    return block && block === this.#blockOf(reading!.focusNode) ? block : null;
+  }
+
+  /** The block view's element `node` is inside, if it is inside one. */
+  #blockOf(node: Node | null): HTMLElement | null {
+    while (node && node.parentNode !== this.#root) {
+      node = node.parentNode;
+    }
+
+    const element = asElement(node) as HTMLElement | null;
+    const id = element?.dataset.blockId;
+
+    return id !== undefined && this.#views.get(id)?.root === element ? element : null;
+  }
+
+  /**
+   * Puts the views in `order` without moving `kept`.
+   *
+   * A node is moved by taking it out and putting it back, and taking out the
+   * element focus is in blurs it in every engine: a peer's `setDocument` that
+   * moved the reader's block up -- or moved a block from above it to below,
+   * which the top-down loop does by moving the reader's block up past it --
+   * left focus on `<body>`, and the next keys typed nothing anywhere
+   * (R13-KEY-2). The same move ends a composition in it and collapses every
+   * range inside it onto the root. Any order can be reached with one element
+   * standing still, so the others are moved around it instead: those before
+   * it are placed from the root's start, exactly as the top-down loop places
+   * them (it never moves `kept`, which is not one of them), and those after it
+   * are each put right after the one before. Where the top-down loop would not
+   * have moved `kept` anyway, both make the same moves. Linear, like it.
+   */
+  #positionAround(order: readonly HTMLElement[], kept: HTMLElement): void {
+    const at = order.indexOf(kept);
+
+    for (let index = 0; index < at; index += 1) {
+      const element = order[index]!;
+      const current = this.#root.children.item(index);
+
+      if (current !== element) {
+        this.#root.insertBefore(element, current);
+      }
+    }
+
+    for (let index = at + 1; index < order.length; index += 1) {
+      const element = order[index]!;
+      // The element after the one before, as `children` counts: a text node
+      // a host left in the mount is not a position.
+      const next = order[index - 1]!.nextElementSibling;
+
+      if (next !== element) {
+        this.#root.insertBefore(element, next);
+      }
+    }
   }
 
   destroy(): void {
@@ -457,6 +556,11 @@ export class Renderer {
       const trigger = doc.createElement('button');
       trigger.type = 'button';
       trigger.className = 'neditor-image__trigger';
+      // Explicit, as on the chevron and the callout icon: WebKit leaves a
+      // button out of the Tab order unless it carries a tabindex, so there the
+      // picture's alt text could not be reached from the keyboard at all.
+      // Read-only it is `disabled`, which takes it out again whatever this says.
+      trigger.tabIndex = 0;
       trigger.setAttribute('aria-label', this.#labels.imageEdit);
       trigger.addEventListener('click', () => {
         this.#hooks.onEditImage(block.id, trigger);

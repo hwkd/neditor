@@ -289,6 +289,75 @@ describe('dragging a collapsed toggle takes its hidden children with it', () => 
     expect(texts(editor)).toEqual(['last', 'toggle', 'hidden']);
     expect(depths(editor)).toEqual([0, 0, 1]);
   });
+
+  /*
+   * R14-RV4B-1: the release is heard in the document's capture phase, so a
+   * page that stops it above the editor (a container with drag handling of
+   * its own) cannot leave the drag live. Heard in the bubble phase, a
+   * stopped `pointerup` never dropped the block, and a stopped
+   * `pointercancel` left the drag to commit at a later, unrelated release.
+   * The real browsers' versions are pinned in S6b and TO4c.
+   */
+  describe('on a page that stops the release above the editor', () => {
+    const dragOver = (stopped: string, end: () => void) => {
+      const stage = document.createElement('div');
+      document.body.append(stage);
+      stage.addEventListener(stopped, (event) => {
+        event.stopPropagation();
+      });
+      const host = document.createElement('div');
+      stage.append(host);
+      const editor = createEditor({ element: host, doc: { blocks: nested().slice(1) } });
+      editors.push(editor);
+      editor.element
+        .querySelector('.neditor-block')!
+        .dispatchEvent(new PointerEvent('pointerover', { bubbles: true, pointerId: 3 }));
+      const handle = editor.element.querySelector('.neditor-gutter__handle')!;
+      handle.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 3,
+          button: 0,
+          clientY: 0,
+        }),
+      );
+      document.dispatchEvent(
+        new PointerEvent('pointermove', { bubbles: true, pointerId: 3, clientY: 400 }),
+      );
+      expect(editor.element.dataset.dragging).toBe('true');
+      end();
+
+      return { editor, handle };
+    };
+
+    test('a stopped pointerup still drops the block', () => {
+      const { editor } = dragOver('pointerup', () => {
+        document
+          .querySelector('.neditor-gutter__handle')!
+          .dispatchEvent(
+            new PointerEvent('pointerup', { bubbles: true, pointerId: 3, clientY: 400 }),
+          );
+      });
+
+      expect(editor.element.dataset.dragging).not.toBe('true');
+      expect(texts(editor)).toEqual(['last', 'toggle', 'hidden']);
+    });
+
+    test('a stopped pointercancel still ends the drag, and a later release moves nothing', () => {
+      const { editor, handle } = dragOver('pointercancel', () => {
+        document
+          .querySelector('.neditor-gutter__handle')!
+          .dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, pointerId: 3 }));
+      });
+
+      expect(editor.element.dataset.dragging).not.toBe('true');
+      handle.dispatchEvent(
+        new PointerEvent('pointerup', { bubbles: true, pointerId: 3, clientY: 400 }),
+      );
+      expect(texts(editor)).toEqual(['toggle', 'hidden', 'last']);
+    });
+  });
 });
 
 describe('editing a block selection expands to the hidden children', () => {
