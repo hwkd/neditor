@@ -46,7 +46,10 @@ export const NEDITOR_STYLES: string = `
      on a popover, and an equation's error on the code tint: rgb(212 76 71)
      was 4.26:1 on white and 3.6:1 there -- small text, below 4.5. */
   --neditor-code-text: rgb(174 44 39);
-  --neditor-danger: rgb(185 50 45);
+  /* The error text again, in a selected equation, where the selection tint
+     lies under the code tint: rgb(185 50 45) held 4.22:1 there. This is
+     4.70:1 there, 5.59:1 on the tint and 6.59:1 on white. */
+  --neditor-danger: rgb(174 44 39);
   --neditor-shadow: 0 0 0 1px rgb(15 15 15 / 0.05), 0 3px 6px rgb(15 15 15 / 0.1),
     0 9px 24px rgb(15 15 15 / 0.2);
   --neditor-indent: 1.5em;
@@ -108,7 +111,10 @@ export const NEDITOR_STYLES: string = `
     --neditor-callout-bg: rgb(255 255 255 / 0.055);
     --neditor-table-border: rgb(255 255 255 / 0.14);
     --neditor-table-header-bg: rgb(255 255 255 / 0.04);
-    --neditor-danger: rgb(255 115 105);
+    /* Tuned on the worst ground it is drawn on: an equation's error in a
+       selected block, the code tint over the selection tint. rgb(255 115 105)
+       was 3.32:1 there; this is 4.67:1, and 8.12:1 on the raised surface. */
+    --neditor-danger: rgb(255 165 158);
     --neditor-shadow: 0 0 0 1px rgb(0 0 0 / 0.2), 0 3px 6px rgb(0 0 0 / 0.3),
       0 9px 24px rgb(0 0 0 / 0.4);
   }
@@ -133,7 +139,7 @@ export const NEDITOR_STYLES: string = `
   --neditor-callout-bg: rgb(255 255 255 / 0.055);
   --neditor-table-border: rgb(255 255 255 / 0.14);
   --neditor-table-header-bg: rgb(255 255 255 / 0.04);
-  --neditor-danger: rgb(255 115 105);
+  --neditor-danger: rgb(255 165 158);
   --neditor-shadow: 0 0 0 1px rgb(0 0 0 / 0.2), 0 3px 6px rgb(0 0 0 / 0.3),
     0 9px 24px rgb(0 0 0 / 0.4);
 }
@@ -396,7 +402,9 @@ export const NEDITOR_STYLES: string = `
 /* TeX reads left to right in every language. Under dir="rtl" its neutral
    characters -- plus, equals, a closing brace -- took the block's direction, and
    both the source and KaTeX's inline-block glyph boxes drew reordered; so the
-   source, the pictures and the popover's field are isolated as LTR. */
+   source and the pictures are isolated as LTR. The popover's field is set LTR
+   by MathEditor only while it holds TeX, so its placeholder -- prose -- keeps
+   the reader's direction. */
 .neditor-math-block > .neditor-block__content {
   direction: ltr;
   unicode-bidi: isolate;
@@ -1227,8 +1235,9 @@ export const NEDITOR_STYLES: string = `
   padding: 0.375rem;
 }
 
+/* No direction here: TeX is LTR, but the placeholder is prose in the reader's
+   language, so the field is made LTR only while it holds TeX (MathEditor). */
 .neditor-math-editor__input {
-  direction: ltr;
   font-family: var(--neditor-font-mono);
 }
 

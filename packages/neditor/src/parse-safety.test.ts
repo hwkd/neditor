@@ -4,7 +4,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import { blocksFromMarkdown } from './input/markdown.ts';
 import type { Block } from './model/document.ts';
 import { toMarkdown } from './model/document.ts';
-import { richToPlainText } from './model/rich-text.ts';
+import { MATH_ATOM, richToPlainText } from './model/rich-text.ts';
 import { blocksFromHtml, parseRichTextFromHtml } from './view/rich-dom.ts';
 
 /**
@@ -113,11 +113,45 @@ describe('parsing foreign HTML never creates a node in the live document', () =>
       '<details><span><summary>s</summary></span><p>body</p></details>',
       'body',
     ],
+    // Inside a list, too: the list readers took the document a node reports
+    // as its owner rather than the reader's, which happy-dom makes the live
+    // one, and every scratch node below them came from it.
+    [
+      'a wrapper distributed over a block, in a list',
+      '<ol><li>a</li><b><p>x</p><img src="/nope.png" onerror="window.__pwned = 1"></b></ol>',
+      'x',
+    ],
+    // And in a list nested in an item, which the item reads through
+    // `visitBlocks` with that same document.
+    [
+      'a wrapper distributed over a block, in a list in an item',
+      '<ul><li>a<ul><li>p</li><b><p>x</p><img src="/nope.png" onerror="window.__pwned = 1"></b></ul></li></ul>',
+      'x',
+    ],
+    [
+      'a KaTeX copy with no TeX in a wrapper, in a list',
+      '<ul><li>a</li>x<b><p>p</p><span class="katex"><span class="katex-mathml"><math><mi>m</mi></math></span><span class="katex-html">h</span></span></b></ul>',
+      'h',
+    ],
     // A nested table's text joins its cell's, as the reader writes it.
     [
       'a table cell',
       '<table><tr><td>c<table><tr><td>n</td></tr></table></td></tr></table>',
       'c\\nn',
+    ],
+    // A KaTeX copy is canonicalized before it is read, and that rewrite makes
+    // nodes of its own.
+    [
+      'math: katex with annotation',
+      '<p>a <span class="katex"><span class="katex-mathml"><math><semantics><mi>x</mi><annotation encoding="application/x-tex">x</annotation></semantics></math></span><span class="katex-html">x</span></span> b</p>',
+      ' b',
+    ],
+    // With no TeX to recover, the assistive copy is left in place, and
+    // distributing the `<b>` clones it away -- leaving a stand-in behind.
+    [
+      'math: katex copy with no TeX in a distributed wrapper',
+      '<b><p>p</p><span class="katex"><span class="katex-mathml"><math><mi>m</mi></math></span><span class="katex-html">h</span></span></b>',
+      'h',
     ],
   ];
 
@@ -133,18 +167,26 @@ describe('parsing foreign HTML never creates a node in the live document', () =>
     expect(calls).toEqual([]);
   });
 
-  test('parseRichTextFromHtml', () => {
+  test.each([
+    [
+      'an image and a video',
+      '<b>a<img src="/nope.png" onerror="window.__pwned = 1"></b><video src="/n.mp4"></video>',
+      'a',
+    ],
+    // Canonicalized before it is read, as in `blocksFromHtml`; the formula is
+    // one atom of plain text.
+    [
+      'math: katex with annotation',
+      'a <span class="katex"><span class="katex-mathml"><math><semantics><mi>x</mi><annotation encoding="application/x-tex">x</annotation></semantics></math></span><span class="katex-html">x</span></span> b',
+      `a ${MATH_ATOM} b`,
+    ],
+  ])('parseRichTextFromHtml: %s', (_name, html, expected) => {
     let text = '';
     const calls = liveCalls(() => {
-      text = richToPlainText(
-        parseRichTextFromHtml(
-          document,
-          '<b>a<img src="/nope.png" onerror="window.__pwned = 1"></b><video src="/n.mp4"></video>',
-        ),
-      );
+      text = richToPlainText(parseRichTextFromHtml(document, html));
     });
 
-    expect(text).toBe('a');
+    expect(text).toBe(expected);
     expect(calls).toEqual([]);
   });
 });

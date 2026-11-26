@@ -1062,7 +1062,6 @@ export function parseInlineMarkdown(source: string): RichText {
     let link = match.link;
     const tail = matchable.slice(innerEnd, match.end);
 
-    //
     // Which form the destination has is asked of the projection, never of the
     // content: there an escaped `<` is the `<` itself, so `[a](\<u@x.test)`
     // read as the angled form and lost a character at each end -- a link to

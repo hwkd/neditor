@@ -1821,9 +1821,13 @@ function indentTargets(
  * `#splitBlock` gives when Enter would give a collapsed toggle a hidden child.
  *
  * `alsoShow` names new blocks that must be visible too: what the reader was
- * looking at can travel in a block with a fresh id. A paste moves the text
- * after the caret into its last block, which is also where the caret goes, and
- * when that is a pasted collapsed toggle's child both would vanish.
+ * looking at can travel in a block with a fresh id. A duplicate passes the
+ * copies of the blocks the reader selected, which a copied collapsed toggle
+ * would otherwise fold away. A paste moves the text after the caret into its
+ * last block, which is also where the caret goes, and when that is a pasted
+ * collapsed toggle's child both would vanish; it passes that block only when
+ * it holds text the reader already had or sits in a fold that was already in
+ * the document, and a closed `<details>` pasted last otherwise stays closed.
  */
 function keepVisible(
   before: readonly Block[],
@@ -3343,6 +3347,7 @@ export class NEditor {
       ...cell,
     };
     this.#toolbar.hide();
+    this.#syncPortalDirection();
     this.#mathEditor.open(
       this.#mathAnchor(target.content, content, start, existing) ??
         this.#selectionRect() ??
@@ -11229,10 +11234,17 @@ export class NEditor {
    * The first pasted block merges into the block being typed in and the last
    * one absorbs whatever followed the caret, so pasting into the middle of a
    * paragraph splits it rather than leaving an empty remnant. At the very
-   * start of a block with text (or with children), several blocks -- or one
-   * that cannot merge -- go in front of it instead, and it takes the last one's
-   * text when that is prose at the paste's top level: the block the reader is
-   * in stays itself.
+   * start of a block with text, several blocks -- or one that cannot merge --
+   * go in front of it instead, and it takes the last one's text when that is
+   * prose at the paste's top level: the block the reader is in stays itself.
+   * So do they at the start of an empty block a paste may not replace: one
+   * with blocks nested under it (a list item or a to-do with sub-items), or a
+   * toggle or callout at `MAX_DEPTH` when the first pasted block cannot merge.
+   * An empty toggle or callout is otherwise the exception: the paste goes in
+   * as typed there, its first line of prose the block's own text and the rest
+   * -- a table too -- its children, or at `MAX_DEPTH` its siblings. Plain
+   * lines pasted into a list item or a to-do go in front of nothing: they are
+   * its further items (`continuing`), as Enter makes them.
    *
    * Both of those moves carry text and nothing else, which is only the whole of
    * a block when the block is text. A table, an image or a divider keeps its
@@ -11420,6 +11432,13 @@ export class NEditor {
       };
 
       blocks = this.#blocks.map((block) => (block.id === target.id ? replacement : block));
+    } else if (created.length === 0 && richEquals(targetContent, target.content)) {
+      // A paste that brings nothing back to where it started -- `## ` as plain
+      // text parses to one empty heading, which merges as no text at all --
+      // keeps the target itself, so `#commit` sees the document it already has
+      // and records nothing. Rebuilt, an equal block was still a new one: an
+      // undo step and a `change` for a document nobody had touched.
+      blocks = this.#blocks;
     } else {
       blocks = updateBlock(this.#blocks, target.id, {
         content: targetContent,

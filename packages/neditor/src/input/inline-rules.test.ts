@@ -909,3 +909,182 @@ describe('a formula inside a link destination', () => {
     ).toBeNull();
   });
 });
+
+describe('the formula rule and the destination rules, together', () => {
+  /**
+   * The math work taught the typed matcher (`matchInlineRuleInRuns`) about
+   * formulas and code runs; the editor audit taught `matchInlineRule` which
+   * `](` really opens a destination (a label behind it), and gave the reader a
+   * look ahead along the line. A `$` asks the destination question too -- no
+   * formula closes inside an open destination -- so each side's answer now
+   * reaches the other's rule. These pin the combination, typed and pasted.
+   */
+  const typed = (runs: Array<{ text: string; marks?: Array<'code'> }>) =>
+    matchInlineRuleInRuns(
+      runs,
+      runs.reduce((length, run) => length + run.text.length, 0),
+    );
+
+  test('a "](" with no label behind it holds no formula open, typed or pasted', () => {
+    // TeX's half-open interval: `]0,1](` is no link, so the `$` closes.
+    expect(typed([{ text: '$x \\in ]0,1]($' }])).toMatchObject({
+      start: 0,
+      math: 'x \\in ]0,1](',
+    });
+    expect(parseInlineMarkdown('$x \\in ]0,1]($')).toEqual([{ text: '￼', math: 'x \\in ]0,1](' }]);
+    expect(typed([{ text: 'ref [x] then f]($y$' }])).toMatchObject({ start: 16, math: 'y' });
+    expect(parseInlineMarkdown('ref [x] then f]($y$')).toEqual([
+      { text: 'ref [x] then f](' },
+      { text: '￼', math: 'y' },
+    ]);
+  });
+
+  test('a labelled destination holds a typed formula open; the reader sees whether it closes', () => {
+    // Typing cannot know whether the `)` is the next key, so the dollars wait
+    // inside the destination, as `_y_` does. The reader has the line: a
+    // destination that never closes on it is no link, and the formula is a
+    // formula -- the typing/pasting divergence the look ahead documents.
+    expect(typed([{ text: '[t](https://a.test/$y$' }])).toBeNull();
+    expect(parseInlineMarkdown('[t](https://a.test/$y$ z')).toEqual([
+      { text: '[t](https://a.test/' },
+      { text: '￼', math: 'y' },
+      { text: ' z' },
+    ]);
+    // One that does close is a URL, dollars and all.
+    expect(parseInlineMarkdown('[t](https://a.test/$y$)')).toEqual([
+      { text: 't', link: 'https://a.test/$y$' },
+    ]);
+  });
+
+  test("a code span's dollar in an angled destination is the URL's own, typed or pasted", () => {
+    // The angled destination holds its spaces open (`inOpenDestination`), so
+    // pasted, a code span opened inside it closes nothing: the backticks are
+    // the URL's own characters, and the projection never reaches the href.
+    // (The 16 Nov merge audit read this as a span closing in the destination,
+    // which the browser audit's angled rule does not let happen.) Typed, the
+    // code run's text is the `$` alone, and the link closes on `)`.
+    expect(
+      typed([{ text: '[x](<https://a.test/p q ' }, { text: '$', marks: ['code'] }, { text: '>)' }]),
+    ).toMatchObject({ start: 0, link: 'https://a.test/p%20q%20$' });
+    expect(parseInlineMarkdown('[x](<https://a.test/p q `$`>)')).toEqual([
+      { text: 'x', link: 'https://a.test/p%20q%20%60$%60' },
+    ]);
+  });
+
+  test('a backtick pair typed inside a held destination is the URL, not a code span', () => {
+    // The closer is a backtick, so this pins the editor audit's rule, not the
+    // formula's: the `$` between them is the URL's, not a code span's.
+    expect(typed([{ text: '[t](https://a.test/`$`' }])).toBeNull();
+  });
+
+  test('a destination or autolink opened inside the TeX holds nothing', () => {
+    // Asked of the whole window, a `](` or `<http://` that the formula itself
+    // holds kept it open: `$[0,1](x$)` -- an interval in parentheses -- lost
+    // its formula on the `)` after it, typed or pasted, and the writer emits
+    // exactly that. Only one opened before the formula's `$` holds it.
+    expect(typed([{ text: '$[a](b$' }])).toMatchObject({ start: 0, math: '[a](b' });
+    expect(parseInlineMarkdown('(see $[0,1](x$)')).toEqual([
+      { text: '(see ' },
+      { text: '\uFFFC', math: '[0,1](x' },
+      { text: ')' },
+    ]);
+    expect(typed([{ text: '$a<http://b$' }])).toMatchObject({ start: 0, math: 'a<http://b' });
+    expect(parseInlineMarkdown('$a<http://b$')).toEqual([{ text: '\uFFFC', math: 'a<http://b' }]);
+    // One opened before the formula still holds its dollars as its own --
+    // judged by where its label opens, not where its `](` is: the `[` of
+    // `[Save $](…)` came first, so the link is the link.
+    expect(typed([{ text: '[Save $](https://a.test/?q=$' }])).toBeNull();
+    expect(parseInlineMarkdown('[Save $](https://a.test/?q=$)')).toEqual([
+      { text: 'Save $', link: 'https://a.test/?q=$' },
+    ]);
+    expect(typed([{ text: '<https://a.test/$y$' }])).toBeNull();
+    expect(typed([{ text: '[t](https://a.test/$y$' }])).toBeNull();
+    expect(parseInlineMarkdown('[t](https://a.test/$y$)')).toEqual([
+      { text: 't', link: 'https://a.test/$y$' },
+    ]);
+  });
+
+  test('so does an angled destination opened inside the TeX', () => {
+    // The angled form is answered on its own (`inOpenDestination`), held open
+    // across spaces, and asked the same question: whose label opened first.
+    expect(typed([{ text: '$[a](<b c$' }])).toMatchObject({ start: 0, math: '[a](<b c' });
+    expect(parseInlineMarkdown('(see $[0,1](<x y$)')).toEqual([
+      { text: '(see ' },
+      { text: '\uFFFC', math: '[0,1](<x y' },
+      { text: ')' },
+    ]);
+    expect(typed([{ text: '[Save $](<https://a.test/?q=$' }])).toBeNull();
+    expect(parseInlineMarkdown('[Save $](<https://a.test/a b?q=$>)')).toEqual([
+      { text: 'Save $', link: 'https://a.test/a%20b?q=$' },
+    ]);
+  });
+
+  test('a label of formulas alone makes no link, and loses nothing', () => {
+    // A formula takes no link, so the rule took the brackets and the URL and
+    // the link then had nothing to hang on: only the formula was left.
+    expect(typed([{ text: '[' }, { text: '\uFFFC' }, { text: '](https://a.test/)' }])).toBeNull();
+    expect(parseInlineMarkdown('[$x$](https://a.test/)')).toEqual([
+      { text: '[' },
+      { text: '\uFFFC', math: 'x' },
+      { text: '](https://a.test/)' },
+    ]);
+    // With any text beside it, the text is the link.
+    expect(parseInlineMarkdown('[a $x$](https://a.test/)')).toEqual([
+      { text: 'a ', link: 'https://a.test/' },
+      { text: '\uFFFC', math: 'x' },
+    ]);
+  });
+
+  test("a code span's bracket beside a paren is no hinge", () => {
+    // `` [t`]`(x `` holds no `](` in the source, and the span's `]` is
+    // projected away once it closes (`projectCode`), so no destination opens
+    // there and the formula after it closes. (The 16 Nov merge audit, where a
+    // closed span's text stayed visible, made the reader look ahead on any
+    // line with a `]` and a `(` for this.)
+    expect(parseInlineMarkdown('[t`]`(x$y$')).toEqual([
+      { text: '[t' },
+      { text: ']', marks: ['code'] },
+      { text: '(x' },
+      { text: '\uFFFC', math: 'y' },
+    ]);
+  });
+
+  test('typed over a long block of code dollars and hinges, the matcher stays linear', () => {
+    // `matchInlineRuleInRuns` reads the runs once per keystroke and the rules
+    // only within their window, so eight times the block costs about eight
+    // times as much: never the square.
+    const runsOf = (n: number) => {
+      const runs: Array<{ text: string; marks?: Array<'code'> }> = [];
+
+      for (let index = 0; index < n; index += 1) {
+        runs.push({ text: '[a](b ' }, { text: 'x$', marks: ['code'] });
+      }
+
+      runs.push({ text: ' $y$' });
+      return runs;
+    };
+    const elapsed = (n: number): number => {
+      const runs = runsOf(n);
+      let best = Infinity;
+
+      for (let run = 0; run < 3; run += 1) {
+        const started = performance.now();
+
+        for (let key = 0; key < 20; key += 1) {
+          typed(runs);
+        }
+
+        best = Math.min(best, performance.now() - started);
+      }
+
+      return Math.max(best, 0.1);
+    };
+
+    expect(typed(runsOf(3))).toMatchObject({ math: 'y' });
+
+    const short = elapsed(2000);
+    const long = elapsed(16000);
+
+    expect(long / short, `${Math.round(short)}ms -> ${Math.round(long)}ms`).toBeLessThan(20);
+  });
+});

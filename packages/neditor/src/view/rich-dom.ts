@@ -3308,15 +3308,14 @@ function findWithin(
  * the drawing that now came next, and its text was lost. For the same reason
  * it keeps the class a copy before it judges its source by
  * (`keepDrawingClass`): where the source was the drawing, the copy is still
- * the copy.
- *
- * Made by the reader's own inert document where the caller has it: the
- * source's owner is the template's contents document in a browser, but
- * happy-dom builds a template's content with the window's document, and the
- * rule that no reader makes a node in the live document is pinned there
- * (`parse-safety.test.ts`).
+ * the copy. Made by `doc`, which every caller must pass: the reader's inert
+ * document, as every scratch node a reader makes is (`inertDocument`). The
+ * source's own document is no substitute: the source's owner is the
+ * template's contents document in a browser, but happy-dom builds a
+ * template's content with the window's document, and the rule that no reader
+ * makes a node in the live document is pinned there (`parse-safety.test.ts`).
  */
-function standIn(source: Node, doc: Document = source.ownerDocument!): Element {
+function standIn(source: Node, doc: Document): Element {
   const made = doc.createElement('template');
 
   keepDrawingClass(source, made);
@@ -5390,15 +5389,18 @@ function titleOf(summary: Element, details: Element): RichText {
  * below `details` holds the summary, so nothing else can be affected; the
  * elements above it have already been answered and acted on.
  *
- * The block and image answers are the observable ones: an inline wrapper
- * outside the toggle asks whether the elements below it hold a block before
- * the toggle is reached, and a cell beside the picture the summary held is
- * asked whether it holds one. Every other memo built on `firstDescendant` is
- * forgotten too, though nothing asks those questions of these elements first,
- * so that a question added earlier later cannot be answered with a node that
- * has left the tree. `math.ts`'s answers about a MathJax frame are not among
- * them: they are judged as the frame stood (`contentEdges` asks of every one
- * before anything is edited), as `cloneDeep` judges an assistive copy.
+ * Two of those answers are observable today, and both are pinned. The block
+ * answer: an inline wrapper outside the toggle asks whether the elements below
+ * it hold a block before the toggle is reached ("a wrapped summary's block
+ * does not split the body"). The image answer: a cell beside the picture the
+ * summary held is asked whether it holds one, and its line break was lost ("a
+ * <details> whose wrapped summary is taken out reads as it does alone"). Every
+ * other memo built on `firstDescendant` is forgotten defensively: nothing
+ * asks those questions of these elements first, but a question moved earlier
+ * one day must not be answered with a node that has left the tree.
+ * `math.ts`'s answers about a MathJax frame are not among them: they are
+ * judged as the frame stood (`contentEdges` asks of every one before anything
+ * is edited), as `cloneDeep` judges an assistive copy.
  */
 function detachSummary(doc: Document, summary: Element, details: Element): void {
   for (let at = summary.parentElement; at !== null; at = at.parentElement) {

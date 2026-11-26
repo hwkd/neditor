@@ -223,7 +223,8 @@ function inOpenAutolink(window: string): boolean {
 }
 
 /**
- * Whether the `]` at `close` ends a label the link patterns accept.
+ * Where the label opens that the `]` at `close` ends, if the link patterns
+ * accept one there; -1 if not.
  *
  * Both spell a label `\[([^\]]+)\]`, and {@link linkOpener} starts them at the
  * last `[` before the `]`: so the label opens there, holds no `]`, and is at
@@ -231,20 +232,20 @@ function inOpenAutolink(window: string): boolean {
  * `[]` is. Stops at the first `]` behind the hinge, so the label scans of
  * successive hinges never cover the same text twice.
  */
-function closesLabel(window: string, close: number): boolean {
+function labelStart(window: string, close: number): number {
   for (let at = close - 1; at >= 0; at -= 1) {
     const code = window.charCodeAt(at);
 
     if (code === 93) {
-      return false;
+      return -1;
     }
 
     if (code === 91) {
-      return at < close - 1;
+      return at < close - 1 ? at : -1;
     }
   }
 
-  return false;
+  return -1;
 }
 
 /**
@@ -265,7 +266,7 @@ export interface DestinationAhead {
  * Whether the text ends inside a link destination whose `)` has not arrived.
  *
  * Only a `](` behind a label the link patterns accept can open one (see
- * {@link closesLabel}). Any `](` used to count, so a `[x]` already closed, an
+ * {@link labelStart}). Any `](` used to count, so a `[x]` already closed, an
  * empty `[]` or no `[` at all held the marks off text that could never become
  * a link: `ref [x] then f](g*h*` lost its italic. The nearest such hinge
  * decides, and it has to be in the caret's own token, since a destination
@@ -291,15 +292,22 @@ export interface DestinationAhead {
  * `before` passes over any hinge at or after that offset. The code rule gives
  * its opening backtick: a code span binds tighter than a link, so a `](` inside
  * the span being closed opens nothing, and ``Write `[label](` `` is code.
+ *
+ * `labelBefore` passes over any hinge whose label opens at or after that
+ * offset. The formula rule gives its opening `$`: a link whose `[` came first
+ * holds the formula's dollars as its own (`[Save $](https://a.test/?q=$)` is
+ * a link), and one whose `[` is inside the TeX is the TeX's (`$[0,1](x$)`).
  */
 function inOpenDestination(
   window: string,
   ahead?: DestinationAhead,
   before: number = window.length,
+  labelBefore: number = window.length,
 ): boolean {
   // Only the last `](<` can be open in the angled form: an earlier one would
   // hold this one's `<`, which that form does not admit.
   const angled = window.lastIndexOf('](<');
+  const angledLabel = angled === -1 ? -1 : labelStart(window, angled);
 
   if (
     angled !== -1 &&
@@ -307,7 +315,8 @@ function inOpenDestination(
     window.lastIndexOf('<') === angled + 2 &&
     window.lastIndexOf('>') < angled &&
     window.lastIndexOf('\n') < angled &&
-    closesLabel(window, angled)
+    angledLabel !== -1 &&
+    angledLabel < labelBefore
   ) {
     return ahead?.angledCloses() ?? true;
   }
@@ -315,7 +324,7 @@ function inOpenDestination(
   let at = window.lastIndexOf('](');
   // Everything from here to the caret is known to hold no whitespace, so each
   // character is looked at once however many hinges are passed over. A label
-  // may hold spaces, and `closesLabel` reads past them.
+  // may hold spaces, and `labelStart` reads past them.
   let clean = window.length;
 
   for (; at !== -1; at = at === 0 ? -1 : window.lastIndexOf('](', at - 1)) {
@@ -327,8 +336,12 @@ function inOpenDestination(
 
     clean = at;
 
-    if (at + 2 <= before && closesLabel(window, at)) {
-      break;
+    if (at + 2 <= before) {
+      const label = labelStart(window, at);
+
+      if (label !== -1 && label < labelBefore) {
+        break;
+      }
     }
   }
 
@@ -443,6 +456,8 @@ export interface InlineRuleMatch {
 const DOLLAR = 36;
 /** U+FFFC, the character a finished formula occupies (see `MATH_ATOM`). */
 const ATOM = 0xfffc;
+/** A label made of formulas alone. Anchored at both ends, so it is linear. */
+const ONLY_ATOMS = /^\uFFFC+$/;
 
 /**
  * What a code span's `$` is projected to for the formula rule: by the
@@ -699,9 +714,24 @@ export function matchInlineRule(
 
   // A `$` closes nothing but a formula, and nothing closes inside a link
   // destination or an autolink but the link itself or a code span: a URL may
-  // hold dollars (`?price=$5$`), and they are its characters.
+  // hold dollars (`?price=$5$`), and they are its characters. Only a link
+  // whose `[`, or an autolink whose `<`, came before the formula's own `$`,
+  // though: one that opens inside the TeX is the TeX's, and asked of the whole
+  // window, `$[0,1](x$)` -- a half-open interval in parentheses -- held its
+  // formula open on the `)` after it, and `$a<http://b$` on its own text.
   if (closer === '$') {
-    return inDestination || inAutolink ? null : matchMath(window, offset);
+    const formula = matchMath(window, offset);
+
+    if (!formula) {
+      return null;
+    }
+
+    const opener = formula.start - offset;
+
+    return inOpenDestination(window, options.ahead, window.length, opener) ||
+      (inAutolink && window.lastIndexOf('<') < opener)
+      ? null
+      : formula;
   }
 
   for (const rule of INLINE_RULES) {
@@ -765,6 +795,22 @@ export function matchInlineRule(
     const inner = match?.[1];
 
     if (!match || whole === undefined || inner === undefined || inner.length === 0) {
+      continue;
+    }
+
+    // A link needs text to hang on, and a formula takes none (`makeRun`): a
+    // label of nothing but formulas lost its brackets and its URL to the rule
+    // and then the link to the atom, so `[$x$](https://a.test/)` kept only the
+    // formula. The writer never spells one -- it has no link to write -- so
+    // this only reads foreign Markdown, and leaves it as written.
+    if (rule.isLink && ONLY_ATOMS.test(inner)) {
+      // The angled form refuses outright, as for an unsafe href below: the
+      // plain rule would retry from a `[` inside the refused URL, and
+      // `[$x$](<javascript:void[x](//evil.test/>)` linked `x`.
+      if (rule.angled) {
+        return null;
+      }
+
       continue;
     }
 
@@ -865,12 +911,14 @@ export function matchInlineRule(
       // as it is, and a literal NUL in a block's text must not become a link
       // to a host the text does not hold.
       // The reader projects a finished code span's `$` to `CODE_DOLLAR`,
-      // which in a destination is the `$` it stands for:
-      // `[x](https://`$`.test/)` is a link to that host. A formula's atom is
-      // not: a formula can close in an angled destination with a space in it
-      // (which `inOpenDestination` does not call open), and its TeX is no
-      // URL's characters -- read as a `$`, `[x](<https://a.test/p q $y$>)`
-      // linked to `…%20$`, and typed, to `…%20%EF%BF%BC`. So there is no link.
+      // which in a destination is the `$` it stands for. A code span that
+      // opens inside a destination the rules hold open -- plain, or angled
+      // with spaces in it -- closes nothing there: it is the URL's own
+      // characters, backticks and all, so `[x](<https://a.test/p q `$`>)`
+      // links to `…%60$%60`. A formula's atom is not: a formula already in
+      // the text a typed link closes around is no URL's characters -- read
+      // as a `$`, `[x](<https://a.test/p q $y$>)` linked to `…%20$`, and
+      // typed, to `…%20%EF%BF%BC`. So there is no link.
       const destination = match[2] ?? '';
 
       if (destination.includes(String.fromCharCode(ATOM))) {

@@ -373,3 +373,82 @@ describe('typing reads a code run as code, as the Markdown reader does', () => {
     });
   });
 });
+
+// The rest are from the 14 Nov audit of the math merge, kept here beside the
+// paste cases they extend: a no-op paste, the depth ceiling, and the equation
+// popover's direction.
+
+describe('a paste that changes nothing records nothing', () => {
+  // Each of these parses, as plain text with no HTML, to one empty block that
+  // merges as no text at all: the document comes back exactly as it was.
+  test.each(['## ', '# ', '- ', '> ', '1. ', '- [ ] '])('%j mid-paragraph', (plain) => {
+    const editor = mount([block({ id: 'p', content: text('abcd') })]);
+    const before = editor.getDocument();
+    let changes = 0;
+    editor.on('change', () => (changes += 1));
+    caret(hostOf(editor, 'p'), 2);
+    hostOf(editor, 'p').dispatchEvent(pasteEvent('', plain));
+
+    expect(editor.getDocument()).toEqual(before);
+    expect(changes).toBe(0);
+    expect(editor.canUndo).toBe(false);
+  });
+});
+
+describe('a callout at the depth ceiling cannot take a paste as children', () => {
+  test('a table pasted into an empty one goes in front, as for any block', () => {
+    // A chain of paragraphs, each one level deeper, so the callout really sits
+    // at MAX_DEPTH (32) after `normalizeDepths`.
+    const chain = Array.from({ length: 32 }, (_, depth) =>
+      block({ id: `d${depth}`, depth, content: text(`d${depth}`) }),
+    );
+    const editor = mount([...chain, block({ id: 'c', type: 'callout', depth: 32, content: [] })]);
+    caret(hostOf(editor, 'c'), 0);
+    hostOf(editor, 'c').dispatchEvent(pasteEvent(TABLE, 'a\tb'));
+
+    // Not `callout:32:` followed by a sibling table -- an empty husk above
+    // nothing of its own, which is what the paste into its text was meant to
+    // avoid.
+    expect(shape(editor).slice(32)).toEqual(['table:32:a\tb', 'callout:32:']);
+    expect(editor.getDocument().blocks[33]?.id).toBe('c');
+  });
+
+  test('prose pasted into an empty toggle there is its text, and its siblings after', () => {
+    // Only a first block that cannot merge goes in front. Prose merges, as
+    // Enter at the ceiling makes siblings: put in front, the toggle's title
+    // became the paste's *last* line.
+    const chain = Array.from({ length: 32 }, (_, depth) =>
+      block({ id: `d${depth}`, depth, content: text(`d${depth}`) }),
+    );
+    const editor = mount([...chain, block({ id: 't', type: 'toggle', depth: 32, content: [] })]);
+    caret(hostOf(editor, 't'), 0);
+    hostOf(editor, 't').dispatchEvent(pasteEvent('<p>a</p><p>b</p>', 'a\n\nb'));
+
+    expect(shape(editor).slice(32)).toEqual(['toggle:32:a', 'paragraph:32:b']);
+    expect(editor.getDocument().blocks[32]?.id).toBe('t');
+  });
+});
+
+describe('the equation popover follows a direction change made while the editor has focus', () => {
+  test('opening it re-reads the direction', () => {
+    const editor = mount([block({ id: 'p', content: text('x') })]);
+    const host = hostOf(editor, 'p');
+    caret(host, 1);
+    const real = window.getComputedStyle.bind(window);
+    window.getComputedStyle = ((element: Element, pseudo?: string | null) => {
+      const style = real(element, pseudo);
+      return element === editor.element
+        ? new Proxy(style, { get: (t, k) => (k === 'direction' ? 'rtl' : Reflect.get(t, k)) })
+        : style;
+    }) as typeof window.getComputedStyle;
+
+    try {
+      editor.openMathEditor();
+
+      expect(document.querySelector<HTMLElement>('.neditor-math-editor')!.hidden).toBe(false);
+      expect(document.querySelector<HTMLElement>('.neditor-math-editor')!.dir).toBe('rtl');
+    } finally {
+      window.getComputedStyle = real;
+    }
+  });
+});

@@ -37,8 +37,10 @@ that changes what you store or what other applications receive is listed first.
   `<div data-neditor-math-block="TeX">$$TeX$$</div>`. Copying a text range
   that holds a formula now writes this too, instead of the browser's copy of
   what the renderer drew.
-- **The light theme's `--neditor-danger`** is `rgb(185 50 45)`, darkened from
-  `rgb(212 76 71)` so error text clears 4.5:1 on white and on the code tint.
+- **`--neditor-danger`** is `rgb(174 44 39)` in the light theme, darkened from
+  `rgb(212 76 71)`, and `rgb(255 165 158)` in the dark one, lightened from
+  `rgb(255 115 105)`, so error text clears 4.5:1 on white, on the code tint
+  behind an equation, and on that tint inside a selected block.
 
 - **Markdown (`toMarkdown`, and the `text/plain` of a block copy).**
   - Whitespace and newlines at the edge of a block's text are written as
@@ -143,14 +145,20 @@ that changes what you store or what other applications receive is listed first.
   when the document was saved.
 - **A pasted code block or equation stands as a block of its own.** Pasted
   into a paragraph, its text was merged into the paragraph's.
-- **Pasted at the very start of a block with text (or with blocks nested
-  under it), several blocks -- or one that cannot merge, a table, an image, a
-  divider, a code block or an equation -- go in front of it** and leave it
-  itself: its type, id, check, icon and children. A last pasted block of prose
-  at the paste's top level joins its text to the start of the block. The
-  block was split at the caret instead and its text rebuilt as a new block: a
-  heading lost its level, a checked to-do its check, both their ids, and a
-  toggle or callout its children, which passed to another block.
+- **Pasted at the very start of a block with text, several blocks -- or one
+  that cannot merge, a table, an image, a divider, a code block or an
+  equation -- go in front of it** and leave it itself: its type, id, check,
+  icon and children. A last pasted block of prose at the paste's top level
+  joins its text to the start of the block. The block was split at the caret
+  instead and its text rebuilt as a new block: a heading lost its level, a
+  checked to-do its check, both their ids, and a toggle or callout its
+  children, which passed to another block. The same holds for an empty block
+  with blocks nested under it, a list item or a to-do with sub-items, and for
+  a table or another block that cannot merge pasted into an empty toggle or
+  callout at the deepest level. Otherwise an empty toggle or callout takes
+  the paste, as typed there: its first line of prose becomes the block's text
+  and the rest, a table too, nests under it -- or, at the deepest level,
+  follows it, as Enter there does.
 - **Pasted blocks keep their own shape, from the depth of the block they land
   in** -- at the caret, at the start of a block, into an empty one or over
   selected blocks -- and lines pasted into a toggle's or a callout's own text
@@ -161,11 +169,13 @@ that changes what you store or what other applications receive is listed first.
   reader's own text after the caret. A collapsed toggle a paste brings (a
   closed `<details>`) opens when the reader's own blocks, or the text after
   the caret, would otherwise end up hidden under it.
-- **A block a paste replaces keeps none of its old type's fields**, and a
-  block with children under it is never replaced, even with no text: pasted
-  into an empty toggle that has children, a table goes in front of it. A table that replaced an
-  empty to-do kept `checked`, and one that replaced an empty toggle kept
-  `collapsed` and took its children. A replaced block keeps its id and depth.
+- **A block a paste replaces keeps none of its old type's fields**, and
+  neither a block with children under it nor a toggle or callout is ever
+  replaced, even with no text: pasted into an empty to-do that has sub-items,
+  a table goes in front of it, and into an empty toggle, under it. A table
+  that replaced an empty to-do kept `checked`, and one that replaced an empty
+  toggle kept `collapsed` and took its children. A replaced block keeps its id
+  and depth.
 
 ### Fixed
 
@@ -182,6 +192,28 @@ that changes what you store or what other applications receive is listed first.
   succeeded or failed. Past that template, everything the reader builds is
   now made in a document with no browsing context, where nothing loads.
   Nothing pasted reached the document model either way.
+- A link longer than the inline rules reach (about 2,000 characters, as a
+  signed or tracking URL can be) came back from `toMarkdown` as its Markdown
+  text, and with characters missing from its URL: `_x_` in it read as
+  italic. The writer now escapes `*`, `_`, `~` and `$` in such a destination,
+  so the text survives; the link itself still cannot (HTML keeps it). A link
+  whose URL leaves (about) no room for any label is also no longer split at
+  its label's spaces, which wrote its URL once a word and came back as all of
+  those spellings; with a little room, a long label still can be (see the
+  README's Inline Markdown limits).
+- Applying TeX the renderer refused, from the equation popover, said
+  nothing to a screen reader: the popover closed with the error only ever
+  named as the field's description. A live region now announces it.
+- A formula whose TeX held a `](` or an autolink opener (`$[0,1](x$)`, an
+  interval in parentheses; `$a<http://b$`) closed nothing, typed or pasted,
+  so the writer's own Markdown came back as text. Only a link whose `[`, or
+  an autolink whose `<`, came before the formula's `$` holds it now.
+- Pasted Markdown with a link whose label is a formula alone
+  (`[$x$](https://a.test/)`) lost its brackets and URL, keeping only the
+  formula. It is now left as written, the formula inside it.
+- A paste that changed nothing -- `## `, `- ` or `> ` as plain text, each an
+  empty block, pasted mid-paragraph -- still recorded an undo step and fired
+  `change`.
 - A `Tab` that cannot indent, pressed with blocks selected, left the block
   selected behind a visible caret, so the next key replaced the block.
 - Dragging, by its handle, the block holding the caret left that caret live, so
@@ -244,7 +276,10 @@ that changes what you store or what other applications receive is listed first.
   (`mailto:team@example.com?subject=Feedback%20(v2)`) was read back, and typed,
   as a link to `https://%3Cmailto:…`. A link or image destination that opens
   with `<` is only ever the angle form, and a closed one whose URL is refused
-  is text, with no link made out of a `[…](` inside it.
+  is not a link; a `[…](` inside it that runs past its `>` is no link either
+  (within the inline rules' reach of about 2,000 characters). A link written
+  whole inside its URL is still read as one (see the README's nested-link
+  limit).
 - A carriage return in a block's text, a table cell or a caption (pasted HTML
   can carry one as `&#13;`) was written raw. Every reader takes it for a line
   break, so the block came back split, and a table came back as paragraphs. It

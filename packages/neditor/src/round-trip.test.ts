@@ -34,6 +34,8 @@ const b = (over: Partial<Block>): Block =>
 const t = (text: string, extra: Record<string, unknown> = {}) => [{ text, ...extra }];
 /** One inline formula: the atom character, carrying its TeX. */
 const m = (tex: string) => ({ text: '\uFFFC', math: tex });
+/** A URL longer than the inline rules reach, holding what they would read. */
+const LONG_URL = `https://a.test/${'b'.repeat(2100)}/_x_/*y*/~~z~~?p=$5$`;
 
 const CORPUS: Record<string, Block[]> = {
   'plain paragraph': [b({ content: t('hello world') })],
@@ -439,11 +441,21 @@ const CORPUS: Record<string, Block[]> = {
   // U+FFFC there lost the link. Registered below: it comes back encoded.
   'relative link whose href holds U+FFFC': [b({ content: t('x', { link: '/a￼' }) })],
   'image whose src holds U+FFFC': [b({ type: 'image', src: '/i￼.png', alt: 'p' })],
-  // A `](` with no label before it opens no destination (`closesLabel` in
+  // A `](` with no label before it opens no destination (`labelStart` in
   // inline-rules.ts), so the `$` after it closes the formula.
+  // A link opener or an autolink opener inside TeX is the TeX's: only one
+  // that opened before the formula's `$` holds it. Asked of the whole line,
+  // each held the formula open, and `$[0,1](x$)` -- an interval in
+  // parentheses -- came back as text.
   'inline TeX holding an unclosed link opener': [b({ content: [m('x \\in ]0,1](')] })],
-  // Known failures, registered below.
+  'inline TeX holding a labelled link opener, in parentheses': [
+    b({ content: [...t('(see '), m('[0,1](x'), ...t(')')] }),
+  ],
+  'inline TeX holding a link opener, a ")" straight after': [
+    b({ content: [m('[a](b'), ...t(')')] }),
+  ],
   'inline TeX holding an autolink opener': [b({ content: [m('a<http://b')] })],
+  // Known failures, registered below.
   'inline TeX with a backtick, beside a code span in a table cell': [
     b({
       type: 'table',
@@ -457,6 +469,7 @@ const CORPUS: Record<string, Block[]> = {
   'inline TeX ending in an unpaired backslash': [b({ content: [m('x\\')] })],
   'display TeX holding a $$ line': [b({ type: 'math', content: t('a\n$$\nb') })],
   'inline formula longer than the reader reaches': [b({ content: [m('x'.repeat(2100))] })],
+  'link longer than the reader reaches': [b({ content: t('see', { link: LONG_URL }) })],
 };
 
 /** Currently broken through `toMarkdown` -> `blocksFromMarkdown`. */
@@ -471,11 +484,6 @@ const KNOWN_MARKDOWN_FAILURES: Record<string, string> = {
   'inline TeX holding a bare dollar': 'invalid TeX: a bare $ ends the formula early',
   'inline TeX ending in an unpaired backslash': 'invalid TeX: the backslash escapes the closing $',
   'display TeX holding a $$ line': 'invalid TeX: a $$ line closes the equation early',
-  // The reader decides the formula when its closing `$` arrives, and this
-  // puts the text behind it in a state where no `$` closes: an open
-  // autolink. The writer cannot escape inside TeX.
-  'inline TeX holding an autolink opener':
-    'TeX holding "<http://" leaves an autolink open at the closing $',
   // GFM pairs backticks across a cell before any inline parsing, so a lone
   // one in TeX pairs with a code span's, and the <br> between them is code.
   'inline TeX with a backtick, beside a code span in a table cell':
@@ -483,6 +491,10 @@ const KNOWN_MARKDOWN_FAILURES: Record<string, string> = {
   // The reader looks back INLINE_SPAN_LIMIT characters for an opening `$`,
   // and a formula has no other spelling to cut it into.
   'inline formula longer than the reader reaches': 'beyond INLINE_SPAN_LIMIT, as for any span',
+  // The link rule reaches back no further than any other, and a URL has no
+  // shorter spelling: a long signed or tracking URL comes back as its
+  // Markdown, with no link (its text intact, pinned below). HTML carries it.
+  'link longer than the reader reaches': 'beyond INLINE_SPAN_LIMIT, as for any span',
   // Kept as a link, which is what `formula atom in a link destination` below
   // pins: the writer percent-encodes the atom, so the same resource comes
   // back under another spelling, as `/a b` comes back `/a%20b`.
@@ -1400,13 +1412,127 @@ describe('audit 12', () => {
   );
 });
 
+describe('a link longer than the reader reaches', () => {
+  // Registered above as a known failure: the link itself cannot survive. Its
+  // URL's text must: unescaped, `_x_` came back italic with its underscores
+  // gone, `*y*` and `~~z~~` likewise, and `$5$` became a formula.
+  test('comes back as its own Markdown, character for character', () => {
+    const markdown = toMarkdown({ blocks: [b({ content: t('see', { link: LONG_URL }) })] });
+
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual([{ text: `[see](${LONG_URL})` }]);
+  });
+
+  test('so does one whose label has spaces, written once rather than once a word', () => {
+    // Split at its spaces, every piece carried the whole URL and none could be
+    // read: `[see](URL)[ the](URL)[ docs](URL)`.
+    const markdown = toMarkdown({
+      blocks: [b({ content: t('see the docs', { link: LONG_URL }) })],
+    });
+
+    expect(markdown.split('](').length).toBe(2);
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual([
+      { text: `[see the docs](${LONG_URL})` },
+    ]);
+  });
+
+  test.each(['I agree with this', `a${' '.repeat(50)}b`])(
+    'so does %j beside a URL that leaves no room for a label',
+    (label) => {
+      // `[`, `](`, `)` and a 1,996-character destination leave the reach no
+      // room for one character of label, so no piece of a split is readable:
+      // cut at its spaces, it wrote the URL once a word -- once a space, for a
+      // run of them -- and came back as all of those spellings.
+      const url = `https://a.test/${'u'.repeat(1981)}`;
+      const markdown = toMarkdown({ blocks: [b({ content: t(label, { link: url }) })] });
+
+      expect(markdown.split('](').length).toBe(2);
+      expect(blocksFromMarkdown(markdown)[0]?.content).toEqual([{ text: `[${label}](${url})` }]);
+    },
+  );
+
+  test.each([
+    // Room for a word at a time beside the URL: each word is its own piece.
+    ['a URL that leaves room for a word', `https://a.test/${'u'.repeat(1975)}`, 60],
+    // Written twice as long as it reads (every `|` escaped), but readable in
+    // pieces beside a label.
+    ['a URL written longer than it reads', `https://a.test/${'|'.repeat(1385)}`, 400],
+  ])('a long label beside %s still comes back as one link', (_name, url, words) => {
+    const label = 'word '.repeat(words).trim();
+    const markdown = toMarkdown({ blocks: [b({ content: t(label, { link: url }) })] });
+
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual([{ text: label, link: url }]);
+  });
+
+  test.each([
+    // A rest longer than the reach is kept as the model's raw text, as a
+    // marker that it is too long. Measured as the reader counts -- each
+    // backslash pair once -- it passed for Markdown and went out unescaped and
+    // unlinked: an asterisk pair became italic, a bracketed link a live one,
+    // and a fence swallowed the paragraph after it. Measured as written, it
+    // never can.
+    ['a label of paths', 'C:\\dir words '.repeat(278).trim()],
+    [
+      'a label carrying markup',
+      `${'a\\b '.repeat(970)}*not italic* [plain](https://other.test/) \n\n\`\`\`\nafter`,
+    ],
+  ])('a long label holding backslashes is written as text: %s', (_name, label) => {
+    const url = 'https://a.test/x';
+    const blocks = blocksFromMarkdown(
+      toMarkdown({
+        blocks: [b({ content: t(label, { link: url }) }), b({ content: t('next paragraph') })],
+      }),
+    );
+
+    expect(blocks.map((block) => block.content)).toEqual([
+      [{ text: label, link: url }],
+      [{ text: 'next paragraph' }],
+    ]);
+  });
+
+  test('a link reachable only once its escapes are counted as one reads the same', () => {
+    // Over the reach as written, within it as read: the escapes it gains are
+    // resolved, and the href is the URL's own.
+    const url = `https://a.test/${'|'.repeat(1000)}_x_`;
+    const markdown = toMarkdown({ blocks: [b({ content: t('see', { link: url }) })] });
+
+    expect(markdown.length).toBeGreaterThan(2000);
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual([{ text: 'see', link: url }]);
+  });
+
+  test('a link the reader does reach is untouched by the escapes', () => {
+    const url = 'https://a.test/_x_/*y*/~~z~~?p=$5$';
+    const markdown = toMarkdown({ blocks: [b({ content: t('see', { link: url }) })] });
+
+    expect(markdown).toBe(`[see](${url})`);
+    expect(blocksFromMarkdown(markdown)[0]?.content).toEqual([{ text: 'see', link: url }]);
+  });
+});
+
 describe('audit 13', () => {
   // A closed angle form whose URL is refused is not a link, and neither is
   // anything inside it: the plain rule used to retry from a `[` in the URL.
+  // Within the reader's reach (`INLINE_SPAN_LIMIT`): a link longer than that
+  // is never read as one, and what it holds is read on its own.
   test.each(['[y](<.[x](/q>)', '[y](<javascript:void[x](//evil.test/>)'])(
     '%s is not a link',
     (markdown) => {
       expect(blocksFromMarkdown(markdown)[0]?.content).toEqual(t(markdown));
+    },
+  );
+
+  // Nor is anything inside one whose label is a formula alone, which makes no
+  // link either: refused that way, the angled rule handed the line to the
+  // plain one, which retried from the `[` inside the URL.
+  test.each(['[$x$](<javascript:void[x](//evil.test/>)', '[$x$](<[y](https://b.test/>)'])(
+    '%s links nothing',
+    (markdown) => {
+      const runs = blocksFromMarkdown(markdown)[0]?.content ?? [];
+
+      expect(runs.some((run) => run.link !== undefined)).toBe(false);
+      expect(runs.filter((run) => run.math === undefined).map((run) => run.text)).toEqual([
+        '[',
+        markdown.slice(markdown.indexOf('$](') + 1),
+      ]);
     },
   );
 

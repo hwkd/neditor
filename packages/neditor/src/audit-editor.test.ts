@@ -642,12 +642,13 @@ describe('two copies of the package on one page do not share ids', () => {
     expect(b.nextId('probe')).toBe(first + 1);
   });
 
-  test('the renderer and both dialogs number from that shared store', async () => {
+  test('the renderer and every dialog number from that shared store', async () => {
     const { nextId } = await import('./util/ids.ts');
     const base = {
       renderer: nextId('renderer'),
       link: nextId('link-error'),
       image: nextId('image-error'),
+      math: nextId('math-error'),
     };
     const editor = mount([block({ id: 'x', type: 'todo', content: text('t') })]);
 
@@ -657,6 +658,11 @@ describe('two copies of the package on one page do not share ids', () => {
     );
     expect(document.querySelector('.neditor-image-editor__error')!.id).toBe(
       `neditor-image-error-${base.image + 1}`,
+    );
+    // The equation popover kept a module-level counter of its own after the
+    // other two had moved, so two bundles both named theirs `-1`.
+    expect(document.querySelector('.neditor-math-editor__error')!.id).toBe(
+      `neditor-math-error-${base.math + 1}`,
     );
   });
 });

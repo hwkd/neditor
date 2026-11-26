@@ -1082,6 +1082,50 @@ describe('a URL holding a dollar', () => {
     ).toBe('https://a.test/a\\$b `c$`');
   });
 
+  // Audit of the merge, 15 Nov: a later link destination's `$`, and a later
+  // URL's in the same run, are written bare too, and were not counted --
+  // `<https://a.test/_a$b>\_ [l](https://c.test/$)` read back as a formula
+  // that swallowed the text, and the link was gone.
+  test.each([
+    [
+      'a link after it',
+      [{ text: 'https://a.test/_a$b_ ' }, { text: 'l', link: 'https://c.test/$' }],
+    ],
+    ['a second URL in the same run', [{ text: 'https://a.test/_a$b_ https://c.test/_c$d_' }]],
+    [
+      'a link after a bold one',
+      [
+        { text: 'https://a.test/_a$b_', marks: ['bold'] },
+        { text: ' ' },
+        { text: 'l', link: 'https://c.test/_c$d_' },
+      ],
+    ],
+  ] satisfies Array<[string, TextRun[]]>)(
+    'keeps the escaped spelling before %s',
+    (_name, content) => {
+      const [read] = blocksFromMarkdown(toMarkdown({ blocks: [para(content)] }));
+
+      expect(read?.content).toEqual(
+        normalizeDocument({ blocks: [para(content)] }).blocks[0]?.content,
+      );
+    },
+  );
+
+  // Audit of the merge, round 13: a run long enough to be split is escaped a
+  // piece at a time, and a `$`-holding URL ending one piece paired with one
+  // starting the next -- each piece's own check saw no URL after it.
+  test('keeps the escaped spelling across the pieces of a long marked run', () => {
+    const content: TextRun[] = [
+      {
+        text: `${'w '.repeat(740)}https://a.test/a$b https://c.test/c$d${' w'.repeat(400)}`,
+        marks: ['bold'],
+      },
+    ];
+    const [read] = blocksFromMarkdown(toMarkdown({ blocks: [para(content)] }));
+
+    expect(read?.content).toEqual(content);
+  });
+
   test('round-trips either way', () => {
     for (const content of [
       [{ text: 'see https://h.test/?$filter=a and more' }],

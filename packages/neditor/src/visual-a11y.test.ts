@@ -7,6 +7,7 @@ import type { NEditor } from './editor.ts';
 import { DEFAULT_LABELS } from './labels.ts';
 import { ImageEditor } from './ui/image-editor.ts';
 import { LinkEditor } from './ui/link-editor.ts';
+import { MathEditor } from './ui/math-editor.ts';
 import { createPortal, positionPortal } from './ui/portal.ts';
 import { TableToolbar } from './ui/table-toolbar.ts';
 
@@ -300,7 +301,7 @@ describe('visible text is part of the accessible name (WCAG 2.5.3)', () => {
   });
 });
 
-describe('a URL field reads left to right in a right-to-left dialog', () => {
+describe('a URL or TeX field reads left to right in a right-to-left dialog', () => {
   /**
    * Portals take the editor's direction, so under dir="rtl" the URL fields did
    * too, and the bidi algorithm reordered what they held: Chromium and WebKit
@@ -420,6 +421,53 @@ describe('a URL field reads left to right in a right-to-left dialog', () => {
     dialog.open(at, { src: '', alt: '' });
 
     expect(dirOf(src)).toBe('');
+  });
+
+  /*
+   * The TeX field had the opposite defect: `direction: ltr` in the stylesheet,
+   * which no attribute could undo, so a translated `mathPlaceholder` was drawn
+   * left-aligned in an RTL dialog. TeX is LTR in the same way a URL is.
+   */
+  function math(): { dialog: MathEditor; input: HTMLInputElement } {
+    const dialog = new MathEditor(document, hooks, DEFAULT_LABELS, undefined);
+    document.body.append(dialog.element);
+
+    return { dialog, input: dialog.element.querySelector('input')! };
+  }
+
+  test('the TeX field takes no direction from the stylesheet', () => {
+    expect(ruleBody('.neditor-math-editor__input')).not.toContain('direction:');
+  });
+
+  test('an empty TeX field inherits the direction, so its placeholder does', () => {
+    const { dialog, input } = math();
+
+    dialog.open(at, '', false);
+
+    expect(dirOf(input)).toBe('');
+  });
+
+  test('a TeX field holding a formula is LTR, and follows what is typed, both ways', () => {
+    const { dialog, input } = math();
+
+    dialog.open(at, '\\frac{a}{b}', true);
+    expect(dirOf(input)).toBe('ltr');
+
+    type(input, '');
+    expect(dirOf(input)).toBe('');
+
+    type(input, 'x');
+    expect(dirOf(input)).toBe('ltr');
+  });
+
+  test('reopening the TeX field empty after a formula drops the LTR again', () => {
+    const { dialog, input } = math();
+    dialog.open(at, 'x^2', true);
+    dialog.close();
+
+    dialog.open(at, '', false);
+
+    expect(dirOf(input)).toBe('');
   });
 });
 

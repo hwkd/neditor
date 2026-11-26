@@ -4,6 +4,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { Block } from './index.ts';
 import { NEDITOR_STYLES, createEditor } from './index.ts';
 import type { NEditor } from './editor.ts';
+import { DEFAULT_LABELS } from './labels.ts';
 
 /**
  * Accessibility regressions.
@@ -993,6 +994,137 @@ describe('a rejected URL is signalled by more than a colour', () => {
       /forced-colors: active[\s\S]*neditor-link-editor__input\[data-invalid='true'\]/,
     );
     expect(NEDITOR_STYLES).toMatch(/forced-colors: active[\s\S]*neditor-link-editor__error/);
+  });
+});
+
+describe('TeX the renderer refused is said aloud when it is applied', () => {
+  /**
+   * The equation popover named its error as the field's description, added
+   * while typing. Enter leaves focus in the field, so a description that
+   * appears there is never read, and there was no live region: applying TeX
+   * the renderer refused said nothing at all. Applying always closes this
+   * dialog (refused TeX is written as source), so an alert inside it would be
+   * hidden in the same tick; it has to be somewhere that outlives the close.
+   */
+  const refusing = (): HTMLInputElement => {
+    const editor = mount([block({ id: 'p', content: [{ text: 'ab' }] })], {
+      renderMath: () => {
+        throw new Error('ParseError');
+      },
+    });
+    editor.focusRange('p', 1, 1);
+    editor.openMathEditor();
+
+    return document.querySelector<HTMLInputElement>('.neditor-math-editor input')!;
+  };
+
+  /** Alerts carrying the refusal, among those a reader could still hear. */
+  const spoken = (): HTMLElement[] =>
+    [...document.querySelectorAll<HTMLElement>('[role="alert"]')].filter(
+      (alert) =>
+        alert.textContent === DEFAULT_LABELS.mathError &&
+        alert.closest('[hidden], [aria-hidden="true"]') === null,
+    );
+
+  const type = (field: HTMLInputElement, tex: string): void => {
+    field.value = tex;
+    field.dispatchEvent(new Event('input'));
+  };
+
+  test('destroying the editor takes the alert with it, wherever the portals live', () => {
+    // It sits beside the dialog, outside it, so tearing the dialog down does
+    // not remove it on its own.
+    for (const shadow of [false, true]) {
+      const host = document.createElement('div');
+      document.body.append(host);
+      const root = shadow ? host.attachShadow({ mode: 'open' }) : document.body;
+      const mountPoint = document.createElement('div');
+      root.append(mountPoint);
+      const editor = createEditor({
+        element: mountPoint,
+        doc: { blocks: [block({ id: 'p', content: [{ text: 'ab' }] })] },
+        renderMath: () => {
+          throw new Error('ParseError');
+        },
+      });
+      // Registered like every other editor here, so a failing assertion
+      // still leaves `afterEach` to destroy it.
+      editors.push(editor);
+      editor.focusRange('p', 1, 1);
+      editor.openMathEditor();
+
+      expect(root.querySelectorAll('.neditor-math-editor ~ [role="alert"]')).toHaveLength(1);
+
+      editor.destroy();
+
+      expect(root.querySelectorAll('[role="alert"].neditor-live-region')).toHaveLength(0);
+      host.remove();
+    }
+  });
+
+  test('Enter on refused TeX fills an alert that survives the dialog closing', () => {
+    const field = refusing();
+    type(field, '\\frac{');
+
+    field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+    expect(document.querySelector<HTMLElement>('.neditor-math-editor')!.hidden).toBe(true);
+    expect(spoken()).toHaveLength(1);
+  });
+
+  test('so does Apply', () => {
+    const field = refusing();
+    type(field, '\\frac{');
+
+    document
+      .querySelector<HTMLButtonElement>('.neditor-math-editor .neditor-link-editor__button')!
+      .click();
+
+    expect(document.querySelector<HTMLElement>('.neditor-math-editor')!.hidden).toBe(true);
+    expect(spoken()).toHaveLength(1);
+  });
+
+  test('not on every keystroke: typing refused TeX announces nothing', () => {
+    const field = refusing();
+
+    type(field, '\\');
+    type(field, '\\fr');
+    type(field, '\\frac{');
+
+    expect(spoken()).toHaveLength(0);
+  });
+
+  test('TeX that drew applies silently, and reopening takes a stale refusal back', () => {
+    const editor = mount([block({ id: 'p', content: [{ text: 'ab' }] })], {
+      renderMath: (tex: string) => {
+        if (tex.includes('{') && !tex.includes('}')) {
+          throw new Error(tex);
+        }
+
+        return tex;
+      },
+    });
+    const field = (): HTMLInputElement =>
+      document.querySelector<HTMLInputElement>('.neditor-math-editor input')!;
+    const enter = (): void => {
+      field().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    };
+
+    editor.focusRange('p', 1, 1);
+    editor.openMathEditor();
+    type(field(), 'x^2');
+    enter();
+    expect(spoken()).toHaveLength(0);
+
+    editor.focusRange('p', 0, 0);
+    editor.openMathEditor();
+    type(field(), '\\frac{');
+    enter();
+    expect(spoken()).toHaveLength(1);
+
+    editor.focusRange('p', 0, 0);
+    editor.openMathEditor();
+    expect(spoken()).toHaveLength(0);
   });
 });
 

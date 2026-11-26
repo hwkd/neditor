@@ -1202,8 +1202,23 @@ function escapeWithAutolinks(text: string, struck = false, dollarAfter = false):
 
   let written = '';
   let from = 0;
+  const matches = [...text.matchAll(AUTOLINKABLE)];
+  // Whether a URL after each one in this text holds a `$`: an autolink writes
+  // it bare, so it pairs with this one's as a later run's would (see
+  // `RunContext.dollarAfter`). One pass from the end.
+  const laterDollar: boolean[] = [];
 
-  for (const match of text.matchAll(AUTOLINKABLE)) {
+  for (let index = matches.length - 1; index >= 0; index -= 1) {
+    const later = matches[index + 1];
+    laterDollar[index] =
+      later !== undefined &&
+      (laterDollar[index + 1] === true ||
+        text
+          .slice(later.index, gfmUrlEnd(text, later.index, later.index + later[0].length))
+          .includes('$'));
+  }
+
+  for (const [index, match] of matches.entries()) {
     const start = match.index;
     const end = gfmUrlEnd(text, start, start + match[0].length);
 
@@ -1220,7 +1235,7 @@ function escapeWithAutolinks(text: string, struck = false, dollarAfter = false):
       end - start <= match[0].indexOf('//') + 2 ||
       end - start > INLINE_SPAN_LIMIT - 2 ||
       unsafe.test(url) ||
-      (dollarAfter && url.includes('$'))
+      ((dollarAfter || laterDollar[index] === true) && url.includes('$'))
     ) {
       continue;
     }
@@ -1531,6 +1546,23 @@ const MARK_DELIMITERS: ReadonlyArray<readonly [Mark, string, string]> = [
 const SAFE_SPAN = Math.floor(INLINE_SPAN_LIMIT * 0.75);
 
 /**
+ * How long a span is as the reader counts it: an escape is one character, as
+ * it is in the projection the inline rules match against.
+ */
+function readLength(markdown: string): number {
+  let escapes = 0;
+
+  for (let at = 0; at < markdown.length - 1; at += 1) {
+    if (markdown.charCodeAt(at) === 92) {
+      escapes += 1;
+      at += 1;
+    }
+  }
+
+  return markdown.length - escapes;
+}
+
+/**
  * Where to cut a span that is too long: the last space or line break at or
  * before `SAFE_SPAN`, or 0 if there is none.
  *
@@ -1558,9 +1590,12 @@ interface RunContext {
   inTable?: boolean;
   /**
    * A later run in the block is written with a bare `$` the reader can pair
-   * with: a formula's, or one in a code run. An autolink's text is plain once
-   * it closes, so a `$` in it then opens a formula that swallows the rest of
-   * the URL -- `<https://a.test/a$b> c$y$` read as a formula `b> c`.
+   * with: a formula's, one in a code run, one in a link's destination, or one
+   * in a URL that may be written as an autolink. An autolink's text is plain
+   * once it closes, so a `$` in it then opens a formula that swallows the rest
+   * of the URL -- `<https://a.test/a$b> c$y$` read as a formula `b> c`, and
+   * `<https://a.test/_a$b>\_ [l](https://c.test/$)` lost the link to one. A
+   * later URL in the same run is asked of in `escapeWithAutolinks`.
    */
   dollarAfter?: boolean;
 }
@@ -1682,7 +1717,29 @@ function runToMarkdown(run: TextRun, context: RunContext = {}): string {
   }
 
   if (run.link) {
-    core = `[${core}](${destinationToMarkdown(linkDestination(run.link))})`;
+    const destination = destinationToMarkdown(linkDestination(run.link));
+    const linked = `[${core}](${destination})`;
+
+    // A link longer than the reader reaches is never read as one (a known
+    // failure: a URL has no shorter spelling), and nothing then protects its
+    // destination either, so the emphasis and formula rules read straight
+    // through it -- a long signed URL holding `_x_` came back with both
+    // underscores gone. Escaped, the URL survives as its text, and a link the
+    // reader does reach reads the same: it takes the href from the content.
+    core =
+      linked.length > INLINE_SPAN_LIMIT
+        ? `[${core}](${destination.replace(/[*_~$]/g, '\\$&')})`
+        : linked;
+
+    // A destination that leaves the reach no room for even one character of
+    // label beside it, counted as the reader counts, makes every piece of a
+    // split unreadable: cut at its spaces, the link went out once a word with
+    // its URL each time and came back as all of those spellings. Kept whole,
+    // its text comes back once. Only then: wherever a piece could be read,
+    // the split below is what it always was.
+    if (readLength(destination) + 5 > INLINE_SPAN_LIMIT) {
+      return core;
+    }
   }
 
   // And one span per readable length: a span whose opening delimiter the reader
@@ -1701,6 +1758,24 @@ function runToMarkdown(run: TextRun, context: RunContext = {}): string {
   const pieces: string[] = [];
   let rest = run.text;
   let written = core;
+  // Each piece is escaped on its own, so it has to be told what the pieces
+  // after it hold: a `$`-holding URL starting later in the run is written
+  // bare as an autolink and pairs with one this piece writes bare, exactly as
+  // a later run's would (`RunContext.dollarAfter`). Where the last such URL
+  // starts, found once; `consumed` is where `rest` starts in the run.
+  let lastDollarUrl = -1;
+
+  if (run.text.includes('$')) {
+    for (const match of run.text.matchAll(AUTOLINKABLE)) {
+      const end = gfmUrlEnd(run.text, match.index, match.index + match[0].length);
+
+      if (run.text.slice(match.index, end).includes('$')) {
+        lastDollarUrl = match.index;
+      }
+    }
+  }
+
+  let consumed = 0;
 
   for (;;) {
     if (written.length <= INLINE_SPAN_LIMIT) {
@@ -1715,8 +1790,14 @@ function runToMarkdown(run: TextRun, context: RunContext = {}): string {
       break;
     }
 
-    pieces.push(runToMarkdown({ ...run, text: rest.slice(0, at) }, context));
+    pieces.push(
+      runToMarkdown(
+        { ...run, text: rest.slice(0, at) },
+        { ...context, dollarAfter: context.dollarAfter === true || lastDollarUrl >= consumed + at },
+      ),
+    );
     rest = rest.slice(at);
+    consumed += at;
     // Escaping never shortens, so a rest longer than the limit is known to be
     // too long without being written.
     written =
@@ -1851,7 +1932,9 @@ export function richToMarkdown(
     dollarFrom[index] =
       dollarFrom[index + 1] === true ||
       isMathRun(run) ||
-      (run.marks?.includes('code') === true && run.text.includes('$'));
+      (run.marks?.includes('code') === true && run.text.includes('$')) ||
+      run.link?.includes('$') === true ||
+      (run.text.includes('$') && /https?:\/\//i.test(run.text));
   }
 
   const contextAt = (index: number): RunContext => ({

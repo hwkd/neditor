@@ -241,7 +241,9 @@ describe('theme tokens', () => {
    * screen in a block selection, and Select All selects everything. Measured
    * there, the code block's placeholder was 4.27:1 in light and 3.92:1 in dark,
    * an empty callout's 4.31:1 and inline code in a callout 3.92:1 (axe flagged
-   * that one in all three engines).
+   * that one in all three engines). An equation the renderer refused says so
+   * in danger red on the code tint, and Escape or Select All puts the
+   * selection under that too: 4.22:1 in light and 3.32:1 in dark.
    *
    * Each pairing is one a renderer actually draws: a placeholder is never on
    * inline code, and muted text appears as captions and completed to-dos on the
@@ -276,6 +278,7 @@ describe('theme tokens', () => {
         ['inline code', '--neditor-code-text', tint('--neditor-code-bg')],
         ['inline code in a callout', '--neditor-code-text', tint('--neditor-code-bg', callout)],
         ['inline code in a header cell', '--neditor-code-text', tint('--neditor-code-bg', header)],
+        ['an equation the renderer refused', '--neditor-danger', code],
       ] as const) {
         expect(
           contrast(over(read(token), ground), ground),

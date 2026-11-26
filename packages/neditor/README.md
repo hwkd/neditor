@@ -638,6 +638,35 @@ before it. A
 plain link destination may hold balanced parentheses, as CommonMark allows
 (`[wiki](https://en.wikipedia.org/wiki/Foo_(bar))`).
 
+Every inline rule reaches back about 2,000 characters for its opener, typed or
+pasted, and no further (pasted Markdown counts an escape such as `\_` as one
+character). A span longer than that is never read as one -- a link too,
+whichever form its destination takes. So a link whose URL is that long, such as
+a signed or tracking URL, does not survive this editor's own Markdown: it comes
+back as its Markdown text -- every character of its label and URL, though
+formatting inside the label still applies -- with no link (HTML keeps it). A
+long label is split into pieces the reader can reach, each written as a link
+that repeats the URL, so beside a long URL it can be written many times over;
+any piece that still does not fit (a word too long for the room beside the URL,
+or, after a word of more than about 1,500 characters, that word and the rest of
+the label) comes back as its own Markdown text, brackets and URL included. A URL that leaves (about) no room for any label is
+written once, whole, for each stretch of the label that shares its formatting
+(a bold word in the middle of a label makes three).
+
+A link written inside another link's destination -- `[x](…)` inside a URL,
+which only foreign Markdown can hold, since the writer escapes every `](` in a
+destination -- is read as a link the moment its own `)` arrives, before the
+outer link is known, where CommonMark would keep it as URL text. So when the
+outer link then closes, the inner link's brackets and URL drop out of the outer
+URL and only its label stays (`[a](https://a.test/[x](https://b.test/)y)` links
+`a` to `https://a.test/xy`); when the outer one never forms, the inner one
+generally stays a link of its own. The exception is text read as an autolink
+still open -- after a `<http://` or `<https://`, an angled destination that
+starts with one included, up to the next whitespace and within the reach above
+-- where no link closes, so a `[x](…)` there stays text. Where the inner link
+is refused (an unsafe URL), the formatting characters after it in the outer
+URL are no longer protected.
+
 ### Block Markdown
 
 Typing these at the start of a paragraph converts the block:
@@ -1296,13 +1325,13 @@ safe markup for any input. KaTeX does unless you enable its `trust` option.
 - Some TeX has no Markdown spelling, and does not round-trip through
   `toMarkdown` (HTML keeps it). Three shapes are invalid TeX anyway: a bare `$`
   inside a formula, a formula ending in an unpaired backslash, and an equation
-  with a line that is exactly `$$`. Three are not: inline TeX holding `](` with
-  no `)` after it, or an autolink opener such as `<https://` -- each leaves a
-  link or an autolink open
-  where the formula should close -- and, in a table cell, a backtick in TeX
-  beside a code span, which GFM pairs before anything else is read. Nor does an
-  inline formula of about 2,000 characters or more, the furthest the inline
-  reader looks back for an opening `$`.
+  with a line that is exactly `$$`. One is not: in a table cell, a backtick in
+  TeX beside a code span, which GFM pairs before anything else is read. Nor
+  does an inline formula of about 2,000 characters or more, the furthest the
+  inline reader looks back for an opening `$`. (A `](` or an autolink opener
+  such as `<https://` inside TeX is the TeX's own: only a link whose `[`, or
+  an autolink whose `<`, came before the formula holds its dollars as the
+  URL's.)
 - Inline TeX is one line with no edge whitespace: a line break becomes a space,
   and U+FFFC and U+FFFF, which mean nothing in TeX, are dropped.
 - Safari strips the `<annotation>` from HTML on the clipboard, so KaTeX copied
@@ -1566,14 +1595,16 @@ When the clipboard carries no HTML, the plain text is parsed as **Markdown** —
 inline rules.
 One line becomes one block, so soft-wrapped prose arrives as several paragraphs.
 Inline parsing replays the same rules used while typing, so pasting `**a**` and
-typing it give the same result. Two things differ, because a paste sees the
+typing it give the same result. Three things differ, because a paste sees the
 whole line and typing only what is before the caret: a link destination that
 never closes on its line (`**see [docs](x**`, or `[a](<b and *y*` with no `>)`)
 is not a link, so the formatting after it applies, where typing waits for the
-`)` that may be the next key; and a backslash escape is honoured when pasted
+`)` that may be the next key; a backslash escape is honoured when pasted
 (`\*a*` is literal `*a*`; in a link destination `\$` is `$`), where a typed
 backslash stays a backslash -- including one inside a code span, which a paste
-reads as an escape and CommonMark does not.
+reads as an escape and CommonMark does not; and a rule that fires inside a
+formula while it is typed has already taken its delimiters out of the TeX by
+the time the closing `$` arrives (`$a*b*c$` typed is `abc`, pasted `a*b*c`).
 
 Where the paste lands depends on its shape:
 
