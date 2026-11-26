@@ -134,6 +134,125 @@ interface MarkChange {
   remove: Mark[];
 }
 
+/** The values that name a decoration's line, `none` among them. */
+const DECORATION_LINES = new Set([
+  'underline',
+  'line-through',
+  'overline',
+  'blink',
+  'none',
+  'spelling-error',
+  'grammar-error',
+]);
+
+/** The line keywords a decoration value names. */
+function decorationLines(value: string): Set<string> {
+  return new Set(value.split(/\s+/).filter((word) => DECORATION_LINES.has(word)));
+}
+
+/**
+ * Whether an element states a decoration line of its own: any line keyword
+ * but `none`, read as `marksForElement` reads it.
+ */
+function statesLine(element: Element): boolean {
+  const style = (element as HTMLElement).style as CSSStyleDeclaration | undefined;
+
+  if (!style) {
+    return false;
+  }
+
+  const value = withFallbacks(
+    `${style.textDecorationLine ?? ''} ${style.textDecoration ?? ''}`.trim().toLowerCase(),
+  ).value;
+
+  return [...decorationLines(value)].some((line) => line !== 'none');
+}
+
+/** A CSS value the reader cannot resolve to on or off. */
+function unresolved(value: string): boolean {
+  return /^\s*(?:inherit|unset|revert|revert-layer)(?:\s+(?:inherit|unset|revert|revert-layer))*\s*$/.test(
+    value,
+  );
+}
+
+/**
+ * A value with each `var()` replaced by its fallback, and whether anything
+ * was substituted -- a `var()` with no fallback, an `env()` or an `attr()`
+ * leaving nothing. Pasted HTML seldom carries the page's custom properties,
+ * so what a browser draws for one is usually its fallback (GitHub writes
+ * `<strong>`'s weight as `var(--base-text-weight-semibold, 600)`); one the
+ * paste defines inline on the element is not looked up. `env()` and `attr()`
+ * draw their fallback only when the user agent does not know the name, or
+ * the attribute is missing, which the reader does not check: they decide
+ * nothing. One pass, counting depth: a fallback holds functions of its own
+ * (`var(--a, rgb(0 0 0) underline)`). Written in chunks, an identifier held
+ * back until what follows it says whether it names one of the three: sliced
+ * off the text so far, a value of hundreds of thousands of them took seconds.
+ */
+function withFallbacks(value: string): { value: string; substituted: boolean } {
+  const out: string[] = [];
+  let word = '';
+  // Per open parenthesis: whether it is one of the three (and which), and
+  // past its comma.
+  const frames: Array<{ fn: '' | 'var' | 'other'; past: boolean }> = [];
+  // How many of the three are open and not past their comma: inside any of
+  // them, nothing is written.
+  let hidden = 0;
+  let substituted = false;
+
+  const write = (text: string): void => {
+    if (hidden === 0) {
+      out.push(text);
+    }
+  };
+
+  for (const char of value) {
+    if (/[a-z0-9_-]/.test(char)) {
+      word += char;
+      continue;
+    }
+
+    if (char === '(') {
+      const fn = word === 'var' ? 'var' : word === 'env' || word === 'attr' ? 'other' : '';
+
+      if (fn === '') {
+        write(word);
+        write(char);
+      } else {
+        hidden += 1;
+        substituted = true;
+      }
+
+      frames.push({ fn, past: false });
+    } else {
+      write(word);
+
+      const top = frames.at(-1);
+
+      if (char === ',' && top?.fn === 'var' && !top.past) {
+        top.past = true;
+        hidden -= 1;
+      } else if (char === ')' && top !== undefined) {
+        frames.pop();
+
+        if (top.fn !== '' && !top.past) {
+          hidden -= 1;
+        }
+
+        write(top.fn === '' ? char : ' ');
+      } else {
+        write(char);
+      }
+    }
+
+    word = '';
+  }
+
+  write(word);
+
+  return { value: out.join(''), substituted };
+}
+
 /**
  * Reads an element's formatting, letting an inline style override its tag.
  *
@@ -163,33 +282,91 @@ function marksForElement(element: Element): MarkChange {
   }
 
   // Word, Google Docs and browser-native formatting all emit styled spans.
-  const weight = style.fontWeight;
+  // A value the reader cannot resolve decides nothing: `inherit` asks for the
+  // mark around the element, and a custom property with no fallback could be
+  // anything (`withFallbacks`). Read as "off", each took away a mark the
+  // browser draws. On a mark's own tag it takes the tag's mark away too --
+  // `<b style="font-weight: inherit">` is the weight around it, as CSS
+  // replaces the user agent's -- and leaves the element to what surrounds it.
+  // `revert` rolls back to the user agent's value, which on a mark's own tag
+  // is the tag's mark: that one stays -- spelled once per value the reader
+  // joins (a decoration's longhand and shorthand both).
+  const undecided = (mark: Mark, value: string): void => {
+    if (!/^\s*revert(?:-layer)?(?:\s+revert(?:-layer)?)*\s*$/.test(value)) {
+      add.delete(mark);
+      remove.delete(mark);
+    }
+  };
+  // Lowercased: a DOM may keep a value's case as written -- a server's, and
+  // every browser inside a `var()` -- and `BOLD` or `UNDERLINE` is still one.
+  const read = (raw: string): ReturnType<typeof withFallbacks> =>
+    withFallbacks(raw.trim().toLowerCase());
+  // A value built from custom properties decides only through a keyword the
+  // reader knows: with none -- no fallback, an empty one (`unset`, at the time
+  // it is used), one the property does not take, or one it does that names no
+  // line or weight (`var(--c, red)`, which as a literal would read as no line)
+  // -- it decides nothing.
+  const vague = (value: ReturnType<typeof withFallbacks>, known: boolean): boolean =>
+    !known && value.substituted;
+  const weight = read(style.fontWeight ?? '');
+  const heavy = weight.value.trim();
 
-  if (weight) {
-    set('bold', weight === 'bold' || weight === 'bolder' || Number.parseInt(weight, 10) >= 600);
+  if (
+    vague(weight, /^(?:bold|bolder|lighter|normal|\d+(?:\.\d+)?)$/.test(heavy)) ||
+    unresolved(heavy)
+  ) {
+    undecided('bold', heavy);
+  } else if (heavy !== '') {
+    // `lighter` is no number, so it reads as normal weight -- which it is
+    // under every ordinary bold (700 or 600). Under 750 and up it is still
+    // bold, which this reader, tracking marks rather than weights, reads wrong.
+    set('bold', heavy === 'bold' || heavy === 'bolder' || Number.parseInt(heavy, 10) >= 600);
   }
 
-  if (style.fontStyle) {
-    set('italic', style.fontStyle === 'italic' || style.fontStyle === 'oblique');
+  const fontStyle = read(style.fontStyle ?? '');
+  const slant = fontStyle.value.trim();
+
+  if (vague(fontStyle, /^(?:italic|oblique(?:\s.*)?|normal)$/.test(slant)) || unresolved(slant)) {
+    undecided('italic', slant);
+  } else if (slant !== '') {
+    set(
+      'italic',
+      slant === 'italic' || (slant.startsWith('oblique') && !/^oblique\s+0(?:deg)?$/.test(slant)),
+    );
   }
 
   // Shorthand and longhand both turn up in pasted markup, and either one is the
   // element's own decoration — including `none`, which clears what `<u>` or
-  // `<s>` implied.
-  const decoration = `${style.textDecorationLine} ${style.textDecoration}`.trim();
+  // `<s>` implied. The reader joins the two, which every engine answers for a
+  // decoration given either way. Its line keywords decide, and only they: a
+  // colour that is a custom property (`underline var(--accent)`) leaves the
+  // line it names, and one whose name holds a keyword (`var(--underline-color)`)
+  // is no line.
+  const decoration = read(`${style.textDecorationLine ?? ''} ${style.textDecoration ?? ''}`);
+  const keywords = decorationLines(decoration.value);
 
-  if (decoration) {
-    // A link's underline is how links look, not a mark on its text: Google
-    // Docs underlines a span inside every `<a>`, and Chromium and WebKit copy
-    // a link out of this editor with its computed `text-decoration` inlined,
-    // so a pasted link came back underlined too and its Markdown read
-    // `[<u>docs</u>](…)`. Neither direction is read on or inside an `<a href>`
-    // -- its `none` says nothing either -- and a `<u>` there is still one.
+  // A link's underline is how links look, not a mark on its text: Google
+  // Docs underlines a span inside every `<a>`, and Chromium and WebKit copy
+  // a link out of this editor with its computed `text-decoration` inlined,
+  // so a pasted link came back underlined too and its Markdown read
+  // `[<u>docs</u>](…)`. Neither direction is read on or inside an `<a href>`
+  // -- its `none` says nothing either, nor does a value the reader cannot
+  // resolve -- and a `<u>` there is still one.
+  if (
+    vague(decoration, keywords.size > 0) ||
+    (keywords.size === 0 && unresolved(decoration.value))
+  ) {
     if (!inLink(element)) {
-      set('underline', decoration.includes('underline'));
+      undecided('underline', decoration.value);
     }
 
-    set('strikethrough', decoration.includes('line-through'));
+    undecided('strikethrough', decoration.value);
+  } else if (decoration.value.trim() !== '') {
+    if (!inLink(element)) {
+      set('underline', keywords.has('underline'));
+    }
+
+    set('strikethrough', keywords.has('line-through'));
   }
 
   return { add: [...add], remove: [...remove] };
@@ -540,6 +717,15 @@ function hasContentAfter(node: Node, root: Node, skip?: SkipPredicate): boolean 
       return true;
     }
 
+    // A picture handed on ends the line here where the run is cut at it: a
+    // `<br>` before it is filler, as it was when the run was cut there. Where
+    // it is marked but cuts nothing (`pushTextBlock`), it is content like
+    // text: the line it stands on is a line the `<br>` before it ended, and
+    // a blank line before it is the author's.
+    if (imageAtoms !== null && tagNameOf(current) === 'IMG' && hasUsableImage(current as Element)) {
+      return !imageCut;
+    }
+
     // Whitespace between block tags is formatting, not content -- but a
     // no-break space is content, which `trim` would take for whitespace, and
     // so is any whitespace a style preserves: under `pre-wrap` the spaces
@@ -600,6 +786,33 @@ function drawsNothingInLine(node: Node): boolean {
     node.nodeType === COMMENT_NODE ||
     (node.nodeType === ELEMENT_NODE && readerSkips(node as Element) && !startsLine(node as Element))
   );
+}
+
+/** The tags the reader skips that a browser draws no box for, in a row or out. */
+const BOXLESS_TAGS: ReadonlySet<string> = new Set([
+  'SCRIPT',
+  'STYLE',
+  'NOSCRIPT',
+  'TEMPLATE',
+  'HEAD',
+  'TITLE',
+  'META',
+  'LINK',
+  'BASE',
+]);
+
+/**
+ * Whether an element draws no box: a box-less tag, or an assistive copy of a
+ * formula, which its typesetter takes out of the flow. Not every element the
+ * reader skips -- an `<svg>`, an `<iframe>` or an `<object>` is drawn.
+ */
+function drawsNoBox(element: Element): boolean {
+  return BOXLESS_TAGS.has(tagNameOf(element)) || isAssistiveMathCopy(element);
+}
+
+/** A skipped element a row draws as an item of its own: an `<svg>` star. */
+function boxedItem(element: Element): boolean {
+  return !drawsNoBox(element) && isItem(element);
 }
 
 /** Whitespace-only text, as `walk` asks: a no-break space is content. */
@@ -734,6 +947,7 @@ function breakLine(
     }
 
     out.push(run);
+    breakAfterPicture = true;
   }
 }
 
@@ -795,6 +1009,27 @@ let pasteLast = new Set<Node>();
  * `<br>` run after it ends that line rather than making a blank one.
  */
 let lineOpen = false;
+
+/**
+ * Set while `flushInline` reads a run, and while `pushTextBlock` reads a block
+ * whose pictures are handed on after it: the walk writes one `IMAGE_ATOM` per
+ * picture it would hand on, in document order, and notes the `<br>`s between
+ * them, so the text is read in one parse -- every cell, inline box, item and
+ * comment judged where it stands -- and the pictures are found in it after.
+ * Copied out piece by piece around each picture instead, the pieces lost what
+ * stood beside them, and words ran together that the same run read apart
+ * without the picture. (`pushTextBlock` leaves notes in `imageBreaks` too,
+ * which no one reads before `flushInline` resets them.)
+ */
+let imageAtoms: Element[] | null = null;
+/** Per stretch of a run between two of `imageAtoms`: whether it holds a `<br>`. */
+let imageBreaks: boolean[] = [];
+/**
+ * Whether the run is cut at its pictures, as `flushInline` cuts it: a `<br>`
+ * with only a picture after it is then filler. A block reading its own text
+ * (`pushTextBlock`) marks its pictures without cutting there.
+ */
+let imageCut = false;
 
 /** Set while `collapseWhitespace` parses, the only reader of its marks. */
 let collapsing = false;
@@ -981,7 +1216,7 @@ function codeText(root: Element): string {
  * read as a `<br>` and stand (R4-FMT-6c).
  */
 function sourceWhitespace(raw: string, mode: WhiteSpace, converted: boolean): string {
-  const value = raw.replace(/[\uFDD0-\uFDD6]/g, (char) => LITERAL + char);
+  const value = raw.replace(/[\uFDD0-\uFDD7]/g, (char) => LITERAL + char);
   const laid = (
     mode === 'pre'
       ? value.replace(/[ \t\n]/g, (char) => PRESERVED[char]!)
@@ -1041,7 +1276,7 @@ function walkText(
   }
 
   if (text.length > 0) {
-    out.push({ text, marks: [...marks], link });
+    out.push({ text: ownText(text), marks: [...marks], link });
 
     if (/[^ \t\n\r\f\u200b]/.test(converted)) {
       solidTexts += 1;
@@ -1074,12 +1309,20 @@ function walk(
       // line before, and adds nothing.
       const last = out.at(-1);
 
-      if (last) {
-        DEFERRED_BREAKS.delete(last);
+      // A block's break this `<br>` makes stand is a line of the author's --
+      // its own, or any block's written since the last picture, whatever
+      // stands between.
+      if ((last && DEFERRED_BREAKS.delete(last)) || breakAfterPicture) {
+        lineAfterPicture = true;
+      }
+
+      if (imageAtoms !== null) {
+        imageBreaks[imageAtoms.length] = true;
       }
 
       if (hasContentAfter(child, root, skip)) {
         out.push({ text: '\n', marks: [...marks], link });
+        lineAfterPicture = true;
       } else if (collapsing) {
         // Nor is it filler after a line break a style preserved, however much
         // collapsible space sits between: the break is a line of its own then,
@@ -1099,6 +1342,17 @@ function walk(
     const tag = tagNameOf(element);
 
     if (SKIP_TAGS.has(tag) || isAssistiveMathCopy(element)) {
+      // Skipped, but drawn: an `<svg>` a row lays out as an item stands
+      // between the words either side, as an empty block would.
+      if (boxedItem(element)) {
+        breakLine(out, marks, link, true);
+      }
+
+      continue;
+    }
+
+    if (imageAtoms !== null && tag === 'IMG' && hasUsableImage(element)) {
+      writePicture(element, out);
       continue;
     }
 
@@ -1178,7 +1432,7 @@ function walk(
     // counts: an empty one -- KaTeX's rule line or radical -- draws nothing,
     // so it takes no gap and passes on the one before it.
     const apart = !isBlock && (isStackedInBox(element) || displayOf(element).cell);
-    const armed = apart && apartEnd === out.length;
+    const armed = apart && apartEnd === place(out);
     const solidBefore = solidTexts;
     let gapAt = -1;
 
@@ -1190,8 +1444,7 @@ function walk(
       gapAt = out.length > gapAt ? gapAt : -1;
     }
 
-    const { add, remove } = marksForElement(element);
-    const nextMarks = [...marks, ...add].filter((mark) => !remove.includes(mark));
+    const nextMarks = marksWithin(marks, element, isBlock);
     let nextLink = link;
 
     if (tag === 'A') {
@@ -1206,8 +1459,13 @@ function walk(
       const remainder = subtreeText(element);
 
       if (remainder.length > 0) {
-        out.push({ text: remainder, marks: [...nextMarks], link: nextLink });
+        out.push({ text: ownText(remainder), marks: [...nextMarks], link: nextLink });
         solidTexts += 1;
+      }
+
+      // Its pictures are still handed on, after its text.
+      if (imageAtoms !== null) {
+        remainderPictures(element, out);
       }
     } else {
       inlineNesting += 1;
@@ -1225,7 +1483,7 @@ function walk(
     if (isBlock) {
       breakLine(out, marks, link, true);
     } else if (apart && solidTexts > solidBefore) {
-      apartEnd = out.length;
+      apartEnd = place(out);
     } else if (apart) {
       // Nothing drawn: the gap goes, and an armed neighbour stays armed.
       if (gapAt !== -1) {
@@ -1245,7 +1503,7 @@ function walk(
       }
 
       if (armed) {
-        apartEnd = out.length;
+        apartEnd = place(out);
       }
     }
   }
@@ -1282,7 +1540,10 @@ let solidTexts = 0;
  * or a line break of its own.
  */
 function wordGap(out: TextRun[], marks: Mark[], link: string | undefined): void {
-  const previous = out.at(-1)?.text ?? '';
+  // Past the pictures marked where they cut nothing, which are no text --
+  // only those: unmarked, the text's own U+FDD6 is text.
+  const previous =
+    out[imageAtoms !== null && !imageCut ? lastNotPicture(out) : out.length - 1]?.text ?? '';
 
   if (previous !== '' && !/[ \t\n\r\f]/.test(previous[previous.length - 1]!)) {
     const run = { text: ' ', marks: [...marks], link };
@@ -1290,6 +1551,35 @@ function wordGap(out: TextRun[], marks: Mark[], link: string | undefined): void 
     SKIPPED_SPACES.add(run);
     out.push(run);
   }
+}
+
+const NOT_PICTURE = new WeakMap<TextRun[], { length: number; at: number }>();
+
+/**
+ * The index of the last run in `out` that is no picture's atom, or -1.
+ * Remembered per `out`: an empty cell after thousands of pictures looked back
+ * past all of them, and the gap it then took back left the next to look again.
+ */
+function lastNotPicture(out: TextRun[]): number {
+  let memo = NOT_PICTURE.get(out);
+
+  // Shorter than when last asked, a run was taken back since: count again.
+  // (`wordGap` asks before it writes its gap, so taking that gap back leaves
+  // what it asked at.)
+  if (memo === undefined || memo.length > out.length) {
+    memo = { length: 0, at: -1 };
+  }
+
+  for (let index = memo.length; index < out.length; index += 1) {
+    if (out[index]!.text !== IMAGE_ATOM) {
+      memo.at = index;
+    }
+  }
+
+  memo.length = out.length;
+  NOT_PICTURE.set(out, memo);
+
+  return memo.at;
 }
 
 /** Reads a rendered (or pasted) subtree back into canonical runs. */
@@ -1307,6 +1597,11 @@ function readRichText(
   const out: TextRun[] = [];
   // A read sees one tree: the readers edit theirs only between reads.
   const outer = settledRuns;
+  // And leaves the count of pictures as it found it: one count across reads
+  // made a cell's gap depend on how many pictures earlier pastes held
+  // (`place`), where only the pictures within a read are its business.
+  const outerAtoms = atomsWritten;
+
   settledRuns = new WeakMap();
 
   try {
@@ -1315,15 +1610,40 @@ function readRichText(
     });
   } finally {
     settledRuns = outer;
+    atomsWritten = outerAtoms;
   }
 
   // Only the deferred breaks after the last text can lack text after them.
   // Dropped in one pass: a splice each was quadratic in how many there were.
+  // A picture is no text: where the run is cut at it (`flushInline`), the
+  // line a block ended before it is ended by the picture, which goes as a
+  // block of its own, so a deferred break with only a picture after it is
+  // dropped too.
   let lastText = -1;
 
   for (let index = out.length - 1; index >= 0 && lastText === -1; index -= 1) {
-    if (!DEFERRED_BREAKS.has(out[index]!) && /[^ \t\n\r\f]/.test(out[index]!.text)) {
+    if (
+      !DEFERRED_BREAKS.has(out[index]!) &&
+      !(imageAtoms !== null && out[index]!.text === IMAGE_ATOM) &&
+      /[^ \t\n\r\f]/.test(out[index]!.text)
+    ) {
       lastText = index;
+    }
+  }
+
+  // Whether the next run that is no deferred break is a picture, walked back.
+  const beforePicture: boolean[] = [];
+
+  // Only where the run is cut at its pictures: in a heading's text the
+  // picture cuts nothing, and the line before it is still a line. Collapsible
+  // space between the block and the picture is no text either.
+  for (let index = out.length - 1, picture = false; index >= 0; index -= 1) {
+    const run = out[index]!;
+
+    beforePicture[index] = picture;
+
+    if (!DEFERRED_BREAKS.has(run) && !/^[ \t\r\f]+$/.test(run.text)) {
+      picture = imageCut && run.text === IMAGE_ATOM;
     }
   }
 
@@ -1334,7 +1654,7 @@ function readRichText(
     out
       .filter((run, index) => {
         if (DEFERRED_BREAKS.has(run)) {
-          return index <= lastText;
+          return index <= lastText && !beforePicture[index];
         }
 
         if (SKIPPED_SPACES.has(run)) {
@@ -2127,20 +2447,14 @@ function imageSource(image: Element): string | null {
   }
 
   const own = srcsetSource(image.getAttribute('srcset') ?? '');
-  const picture = image.parentNode;
+  // The original's: a copy out of its `<picture>` has none (`cloneDeep`).
+  const picture = originalPicture(image).parentNode;
 
   if (own !== null || picture === null || tagNameOf(picture) !== 'PICTURE') {
     return own;
   }
 
-  const sources = [...picture.childNodes].filter(
-    (node): node is Element => tagNameOf(node) === 'SOURCE',
-  );
-
-  for (const source of [
-    ...sources.filter((candidate) => !candidate.hasAttribute('type')),
-    ...sources.filter((candidate) => candidate.hasAttribute('type')),
-  ]) {
+  for (const source of pictureSources(picture as Element)) {
     const found = srcsetSource(source.getAttribute('srcset') ?? '');
 
     if (found !== null) {
@@ -2149,6 +2463,30 @@ function imageSource(image: Element): string | null {
   }
 
   return null;
+}
+
+const PICTURE_SOURCES = new WeakMap<Element, readonly Element[]>();
+
+/**
+ * A `<picture>`'s `<source>`s, untyped first: listed once per picture, not
+ * once per `<img>` in it.
+ */
+function pictureSources(picture: Element): readonly Element[] {
+  let known = PICTURE_SOURCES.get(picture);
+
+  if (known === undefined) {
+    const sources = [...picture.childNodes].filter(
+      (node): node is Element => tagNameOf(node) === 'SOURCE',
+    );
+
+    known = [
+      ...sources.filter((candidate) => !candidate.hasAttribute('type')),
+      ...sources.filter((candidate) => candidate.hasAttribute('type')),
+    ];
+    PICTURE_SOURCES.set(picture, known);
+  }
+
+  return known;
 }
 
 /**
@@ -2271,13 +2609,28 @@ function formattingWithin(
   const marks = new Map(format.marks);
   const soft = new Set(format.soft);
   const { add, remove } = marksForElement(wrapper);
+  const states = (weak || startsLine(wrapper)) && statesLine(wrapper);
 
-  // Nearest wrapper wins, except over a mark only a container implied: a
+  // The outermost wrapper wins (see above), except over a mark only a
+  // container implied, which the next one may still decide: a
   // `<footer style="text-decoration: underline">` says nothing about
   // strikethrough, but the shorthand reads as turning it off, and locking that
   // in dropped the `<s>` inside it.
   const decide = (mark: Mark, on: boolean): void => {
     if (marks.has(mark) && !soft.has(mark)) {
+      return;
+    }
+
+    // A container -- or any wrapper that starts a line -- stating a line of
+    // its own adds it; the `off` its shorthand implies for a line an outer
+    // container has on, softly, is no decision (as `yieldSoft` has it for a
+    // block).
+    if (
+      !on &&
+      states &&
+      marks.get(mark) === true &&
+      (mark === 'underline' || mark === 'strikethrough')
+    ) {
       return;
     }
 
@@ -2326,20 +2679,6 @@ function nearestFormatting(format: InlineFormatting, wrapper: Element): InlineFo
   const href = tagNameOf(wrapper) === 'A' ? (wrapper.getAttribute('href') ?? '') : null;
 
   return { link: href ?? format.link, marks, soft: new Set() };
-}
-
-const DISPLAY_BLOCK_DESCENDANTS = new WeakMap<Element, Element | null>();
-
-/** Whether an element holds one a browser lays out as a block. */
-function holdsDisplayBlock(element: Element): boolean {
-  return (
-    firstDescendant(
-      element,
-      (candidate) => DISPLAY_BLOCK_TAGS.has(tagNameOf(candidate)),
-      DISPLAY_BLOCK_DESCENDANTS,
-      readerSkips,
-    ) !== null
-  );
 }
 
 /**
@@ -2493,20 +2832,53 @@ function pushFormattingInward(doc: Document, wrapper: Element): DocumentFragment
   ].filter((part) => part.length > 0);
   let parent: ParentNode = fragment;
 
+  // A flex or grid row holding no block keeps its items in one shell, the
+  // shell around the row: copied around each item, the break between two
+  // items stood outside both and read unmarked, where the same row in a list
+  // item or split around a picture reads as one run. A row further in is a
+  // block the walk reads bare: there each item keeps a shell of its own, laid
+  // out so the item is still one (`distributeFormatting`).
+  const whole = display.items && !containsBlockLevel(wrapper) ? formattingShell(doc, format) : null;
+
+  if (whole) {
+    fragment.append(whole.outer);
+    parent = whole.inner;
+  }
+
   if (style.length > 0) {
     const holder = doc.createElement('span');
 
     holder.setAttribute('style', style.join('; '));
-    fragment.append(holder);
+    parent.appendChild(holder);
     parent = holder;
   }
 
   // One at a time: spread into one call, a wrapper of a hundred thousand
   // children passed the engine's limit on arguments and the paste threw.
-  for (const child of [...copy.childNodes]) {
+  const children = [...copy.childNodes];
+
+  for (const child of children) {
     parent.appendChild(child);
   }
-  distributeFormatting(doc, parent as Node, format, false);
+
+  // The shell and the holder stand where the copy's content stood, at the
+  // paste's edges too, as `wrapRun`'s shells do: without them a space at a
+  // paste's edge went only when the container happened to be styled.
+  for (const edge of [pasteFirst, pasteLast]) {
+    if (children.some((child) => edge.has(child))) {
+      for (
+        let at: Node | null = parent as Node;
+        at !== null && at !== fragment;
+        at = at.parentNode
+      ) {
+        edge.add(at);
+      }
+    }
+  }
+
+  if (!whole) {
+    distributeFormatting(doc, parent as Node, format, false);
+  }
 
   return fragment;
 }
@@ -2528,7 +2900,10 @@ function pushFormattingInward(doc: Document, wrapper: Element): DocumentFragment
  */
 /** A text node holding nothing but source layout. */
 function isSourceWhitespace(node: Node): boolean {
-  return node.nodeType !== ELEMENT_NODE && (node.nodeValue ?? '').trim().length === 0;
+  // Not `trim`: a no-break space (or U+3000) is content, as `walk` reads it
+  // (`isWhitespaceText`) -- taken for layout, it was parked out of every run,
+  // and lost the marks and the link around it.
+  return node.nodeType !== ELEMENT_NODE && !/[^ \t\n\r\f]/.test(node.nodeValue ?? '');
 }
 
 /**
@@ -2603,7 +2978,7 @@ function distributeFormatting(
   // One copy around the whole run, not one per node: a space between two
   // elements would read as separating blocks once it had a copy of its own,
   // and be dropped as indentation.
-  const wrapRun = (atBlock: boolean): void => {
+  const wrapRun = (atBlock: boolean, item = false): void => {
     // Trailing indentation is no more content than leading indentation. Two
     // things narrow it, because distributing a wrapper has to produce what
     // writing it inside each block by hand produces — this function's stated
@@ -2629,6 +3004,24 @@ function distributeFormatting(
 
     run = [];
 
+    // Nothing drawn -- source whitespace, a comment, a skipped element that
+    // is no item (`drawsNoBox`: what the reader skips and draws as a box is
+    // an item, and never reaches here) -- in a row takes no shell: shelled,
+    // it became an item of spaces, which a paste's edge kept.
+    if (
+      parent.nodeType === ELEMENT_NODE &&
+      laysOutItems(parent) &&
+      !item &&
+      nodes.every(
+        (node) =>
+          isSourceWhitespace(node) ||
+          node.nodeType === COMMENT_NODE ||
+          (node.nodeType === ELEMENT_NODE && readerSkips(node as Element)),
+      )
+    ) {
+      return;
+    }
+
     const shell = first ? formattingShell(doc, format) : null;
 
     if (!first || !shell) {
@@ -2637,15 +3030,42 @@ function distributeFormatting(
 
     parent.insertBefore(shell.outer, first);
 
+    // A flex or grid item copied into a shell of its own is still an item:
+    // the shell lays it out as one, so the walk still starts a line at it
+    // (`startsLine`) inside the shell's marks, and asks `marksWithin` of it as
+    // an item. Loose text in a row is an item too -- an anonymous one -- so it
+    // goes into a span of its own in such a shell: in a plain one, the break
+    // beside it was drawn outside the marks, and a link around a card's
+    // `Price: <span>$1</span>` came back as two links.
+    const loose =
+      !item &&
+      parent.nodeType === ELEMENT_NODE &&
+      laysOutItems(parent) &&
+      nodes.some(
+        (node) => node.nodeType === TEXT_NODE && /[^ \t\n\r\f]/.test(node.nodeValue ?? ''),
+      );
+    let into: Element = shell.inner;
+
+    if (item || loose) {
+      const own = shell.inner.getAttribute('style');
+
+      shell.inner.setAttribute('style', own ? `${own}; display: flex` : 'display: flex');
+    }
+
+    if (loose) {
+      into = doc.createElement('span');
+      shell.inner.append(into);
+    }
+
     for (const node of nodes) {
-      shell.inner.append(node);
+      into.append(node);
     }
 
     // The shell stands where its run stood, at the paste's edges too: read as
     // the run, it decides whether a space at an edge stays.
     for (const edge of [pasteFirst, pasteLast]) {
       if (nodes.some((node) => edge.has(node))) {
-        for (let at: Node | null = shell.inner; at; at = at.parentNode) {
+        for (let at: Node | null = into; at; at = at.parentNode) {
           edge.add(at);
 
           if (at === shell.outer) {
@@ -2670,9 +3090,20 @@ function distributeFormatting(
       // and what it was: `visitBlocks` starts a new paragraph at an element
       // holding blocks, so the content on either side of one must not run
       // together, and a block parsed whole still reads its tag and style.
+      // A styled container is spent the same way, its mark taken up weakly as
+      // `pushFormattingInward` takes it: left to be pushed inward again when
+      // the walk reached its copy, a chain of them copied everything below
+      // once per level, and a thousand ran the heap out.
+      if (!sealed && CONTAINER_TAGS.has(tag) && isInlineWrapper(element)) {
+        distributeFormatting(doc, element, formattingWithin(format, element, true), false);
+        DISTRIBUTED.add(element);
+
+        continue;
+      }
+
       if (!STRUCTURE_TAGS.has(tag) && isInlineWrapper(element)) {
         if (sealed) {
-          distributeFormatting(doc, element, format, true);
+          distributeFormatting(doc, element, yieldSoft(format, element), true);
         } else {
           distributeFormatting(doc, element, formattingWithin(format, element), false);
           DISTRIBUTED.add(element);
@@ -2681,7 +3112,12 @@ function distributeFormatting(
         continue;
       }
 
-      distributeFormatting(doc, element, format, sealed || sealsFormatting(element, tag));
+      distributeFormatting(
+        doc,
+        element,
+        yieldSoft(format, element),
+        sealed || sealsFormatting(element, tag),
+      );
       continue;
     }
 
@@ -2702,19 +3138,31 @@ function distributeFormatting(
     if (run.length === 0 && child.nodeType === TEXT_NODE) {
       // Not spread into one call: a hundred thousand comments waiting before
       // the text passed the engine's limit on arguments, and the paste threw.
+      // Before a paste's first text, indentation is layout: left standing,
+      // where the paste's edge drops it, rather than shelled with the text,
+      // where it was kept as a space.
       for (const node of ahead) {
-        run.push(node);
+        if (!(pasteFirst.has(child) && isIndentation(node))) {
+          run.push(node);
+        }
       }
     }
 
     ahead = [];
 
-    // A flex or grid item takes a copy of its own: one copy around them all
-    // took them out of their container, and they ran together.
-    if (element && isItem(element)) {
+    // A flex or grid item takes a copy of its own, around it -- so its own
+    // formatting stays innermost and wins -- laid out so it is still an item:
+    // one copy around them all took them out of their container, and they ran
+    // together; one inside each put the chain's marks over the item's own,
+    // and a `<del>` in a link's price row lost its strike.
+    // What draws no box -- a `<script>`, a `<template>` -- is no item: it
+    // joins the text beside it, which is one anonymous item, as it reads in
+    // place. What the reader skips but a browser draws, an `<svg>` star or an
+    // `<iframe>`, is still an item, and the words either side stay apart.
+    if (element && isItem(element) && !drawsNoBox(element)) {
       wrapRun(false);
       run.push(child);
-      wrapRun(false);
+      wrapRun(false, true);
       continue;
     }
 
@@ -2724,11 +3172,81 @@ function distributeFormatting(
   wrapRun(false);
 }
 
+/**
+ * The chain's formatting below an element that turns a mark off, where only a
+ * container implied that mark: the nearer element wins, as the browser draws
+ * it. A container's mark is pushed in as a shell around each run, below
+ * everything inside the container, so without this a `<p style="font-weight:
+ * 400">` -- Chromium writes the matched rule inline -- read bold inside a
+ * semibold `<header>`. A decoration too, by the rule this reader has for
+ * text read in place, where a `text-decoration: none` below takes it off --
+ * and `formattingWithin` has for a wrapper. (A browser draws a decoration
+ * through its descendants.) Asking it of bold and italic alone left a footer
+ * underlined or not depending on whether its text sat in a block.
+ */
+function yieldSoft(format: InlineFormatting, element: Element): InlineFormatting {
+  if (format.soft.size === 0) {
+    return format;
+  }
+
+  // A block's own decoration is no mark here, so the `off` its shorthand
+  // implies for the others is none either: a decoration yields to a block
+  // only when the block states no line of its own (`none`). A wrapper's
+  // decoration is a mark, read where it stands, and yields as it does there.
+  const { remove } = marksForElement(element);
+  const keeps = startsLine(element) && statesLine(element);
+  const gone = remove.filter(
+    (mark) =>
+      format.soft.has(mark) && (!keeps || (mark !== 'underline' && mark !== 'strikethrough')),
+  );
+
+  if (gone.length === 0) {
+    return format;
+  }
+
+  const marks = new Map(format.marks);
+  const soft = new Set(format.soft);
+
+  for (const mark of gone) {
+    marks.delete(mark);
+    soft.delete(mark);
+  }
+
+  return { link: format.link, marks, soft };
+}
+
 /** What to walk when descending into an element that is not a block itself. */
 function contentsOf(doc: Document, element: Element): Node {
-  return !DISTRIBUTED.has(element) && isInlineWrapper(element) && containsBlockLevel(element)
+  return !DISTRIBUTED.has(element) && pushesInward(element)
     ? pushFormattingInward(doc, element)
     : element;
+}
+
+/**
+ * Whether an element's formatting is pushed into what it holds.
+ *
+ * An inline wrapper's is, where it holds a block. So is a styled container's
+ * -- `<header>`, `<footer>`, `<nav>`, `<main>`, `<dl>` -- whatever it holds:
+ * the mark it states applies, weakly, so a tag inside may still overrule it.
+ * Asked only of a container that held an image, it was read beside a picture
+ * and dropped without one. A container is never inline, so no copy of it is
+ * wrapped around its content again.
+ */
+function pushesInward(element: Element): boolean {
+  return (
+    isInlineWrapper(element) &&
+    (CONTAINER_TAGS.has(tagNameOf(element)) || containsBlockLevel(element))
+  );
+}
+
+/**
+ * Whether `visitBlocks` buffers an element holding no block whole, as inline
+ * content read where it stands -- rather than walking a container's children
+ * (`pushesInward`), reading a `<p>` as its own block (`pushBlock`) or drawing a
+ * rule. Tags it dispatches by name before asking are no concern here.
+ */
+function readsWhole(tag: string): boolean {
+  return !CONTAINER_TAGS.has(tag) && tag !== 'P' && tag !== 'HR';
 }
 
 /** A checkbox written as text, including what `blocksToHtml` emits. */
@@ -2810,8 +3328,8 @@ function standIn(source: Node, doc: Document = source.ownerDocument!): Element {
  * A deep copy made without recursion, for the same reason.
  *
  * An assistive MathML copy the reader skips is left out, judged where it
- * stands: cloned away from its frame -- into a formatting shell or a run split
- * around a picture -- it had no drawing beside it, and the formula read twice.
+ * stands: cloned away from its frame -- into a formatting shell or a run of
+ * its own -- it had no drawing beside it, and the formula read twice.
  * Every path that moves content before reading it clones it through here. A
  * stand-in keeps its place.
  *
@@ -2827,6 +3345,12 @@ function cloneDeep(node: Node, doc: Document): Node {
       source.nodeType === ELEMENT_NODE && tagNameOf(source) === 'TEMPLATE'
         ? standIn(source, doc)
         : source.cloneNode(false);
+
+    // A copy of a picture out of its `<picture>` no longer has the
+    // `<source>`s its source may be: `imageSource` reads its original's.
+    if (tagNameOf(source) === 'IMG') {
+      PICTURE_ORIGINALS.set(made, PICTURE_ORIGINALS.get(source) ?? (source as Element));
+    }
 
     if (pasteFirst.has(source)) {
       pasteFirst.add(made);
@@ -2876,13 +3400,6 @@ function pushBlock(
   skip: SkipPredicate = isNestedList,
   stripMarker: RegExp | null = null,
 ): void {
-  let runs = readBlockText(element, skip);
-
-  // A Word list marker left in the text (see `wordListItemSanitized`).
-  if (stripMarker) {
-    runs = richDelete(runs, 0, stripMarker.exec(richToPlainText(runs))?.[0].length ?? 0);
-  }
-
   // Given a depth, the block hands its images on after it, as a list item
   // does: read as text, a heading's logo or a quote's screenshot was dropped.
   // Not one in what the text skips: a Word item's picture bullet is its
@@ -2892,20 +3409,144 @@ function pushBlock(
       ? textImages(element, skip).filter(hasUsableImage)
       : [];
 
-  // A break that followed the image ended the image's line, not the text's.
-  if (images.length > 0 && richToPlainText(runs).startsWith('\n')) {
-    runs = richDelete(runs, 0, 1);
+  pushTextBlock(out, type, element, depth, images, skip, stripMarker);
+
+  for (const image of images) {
+    pushImage(out, image, imagesAt!);
+  }
+}
+
+/**
+ * The text block of `pushBlock`, beside the images its caller hands on: the
+ * lines those images stood on alone are theirs, not the text's
+ * (`withoutPictureLines`), and a block holding nothing but images is none.
+ */
+function pushTextBlock(
+  out: Block[],
+  type: BlockType,
+  element: Element,
+  depth: number,
+  images: readonly Element[],
+  skip: SkipPredicate = isNestedList,
+  stripMarker: RegExp | null = null,
+): boolean {
+  // With pictures, they are marked where they stand, so the lines they stood
+  // on alone are read off the parse itself: a line of nothing but pictures is
+  // theirs, handed on with them, and the break that ended it goes too. A
+  // `<br>` the author wrote before a picture, or text on its line, stays.
+  let runs = readBlockText(element, skip, images.length > 0);
+
+  // A Word list marker left in the text (see `wordListItemSanitized`).
+  if (stripMarker) {
+    runs = richDelete(runs, 0, stripMarker.exec(richToPlainText(runs))?.[0].length ?? 0);
   }
 
   // Holding nothing but images, it is those images: an empty heading above a
   // README's logo would be a block the source never had.
   if (images.length === 0 || !isRichEmpty(runs)) {
     out.push(createBlock(type, runs, depthOf(element, depth)));
+    return true;
   }
 
-  for (const image of images) {
-    pushImage(out, image, imagesAt!);
+  return false;
+}
+
+/**
+ * Text with its pictures' atoms taken out: each line holding nothing but
+ * pictures (and space) goes with the break that ended it -- or, ending the
+ * text, with the break before it -- then every atom left, and the escapes
+ * `ownText` put before the text's own characters. One pass over the text,
+ * one over the runs.
+ */
+function withoutPictureLines(runs: RichText, lineAfter: boolean): RichText {
+  const text = richToPlainText(runs);
+  const drop = new Uint8Array(text.length);
+  // Per line: where it starts, and whether it holds only pictures.
+  let start = 0;
+  let pictures = 0;
+  let other = false;
+  // Where a run of picture-only lines at the end of the text began.
+  let trailing = -1;
+
+  for (let at = 0; at <= text.length; at += 1) {
+    const char = text[at];
+
+    if (char === LITERAL) {
+      drop[at] = 1;
+      at += 1;
+      other = true;
+      continue;
+    }
+
+    if (at < text.length && char !== '\n') {
+      if (char === IMAGE_ATOM) {
+        drop[at] = 1;
+        pictures += 1;
+      } else if (char !== ' ' && char !== '\t') {
+        other = true;
+      }
+
+      continue;
+    }
+
+    const theirs = pictures > 0 && !other;
+
+    // A last line after the pictures holding nothing, or only the source's
+    // indentation, that no `<br>` made -- a newline of the source's, which
+    // draws none at the end -- leaves them the last lines, and goes with them.
+    // (So does a `pre-wrap` block's last line of spaces after a picture, which
+    // a browser would draw: the price of reading pretty-printed markup.) One a
+    // `<br>` made is the author's.
+    if (at === text.length && pictures === 0 && !other && !lineAfter) {
+      if (trailing !== -1) {
+        drop.fill(1, start, at);
+      }
+
+      break;
+    }
+
+    if (theirs) {
+      drop.fill(1, start, Math.min(at + 1, text.length));
+
+      if (trailing === -1) {
+        trailing = start;
+      }
+    } else {
+      trailing = -1;
+    }
+
+    start = at + 1;
+    pictures = 0;
+    other = false;
   }
+
+  // Ending the text, the picture-only lines take the break before them.
+  if (trailing > 0) {
+    drop[trailing - 1] = 1;
+  }
+
+  const result: TextRun[] = [];
+  let offset = 0;
+
+  for (const run of runs) {
+    let kept = '';
+
+    for (let index = 0; index < run.text.length; index += 1) {
+      if (drop[offset + index] !== 1) {
+        kept += run.text[index];
+      }
+    }
+
+    if (kept.length === run.text.length) {
+      result.push(run);
+    } else if (kept.length > 0) {
+      result.push({ ...run, text: kept });
+    }
+
+    offset += run.text.length;
+  }
+
+  return normalizeRuns(result);
 }
 
 /** Word's `mso-list:l0 level2 lfo1`: the paragraph is a list item at that level. */
@@ -3468,7 +4109,19 @@ function endsWithSourceNewline(element: Element, skip?: SkipPredicate): boolean 
 
       const tag = tagNameOf(node);
 
-      if (SKIP_TAGS.has(tag) || skip?.(node as Element, tag)) {
+      if (SKIP_TAGS.has(tag)) {
+        continue;
+      }
+
+      if (skip?.(node as Element, tag)) {
+        // A block handed on that stays in the line -- a link around a picture
+        // a list item hands on -- and draws a `<br>` before anything else:
+        // that break ends the line the newline opened, so the newline is a
+        // line of the text's own, not the end of its last one.
+        if (!startsLine(node as Element) && opensWithBreak(node as Element)) {
+          return false;
+        }
+
         continue;
       }
 
@@ -3480,6 +4133,41 @@ function endsWithSourceNewline(element: Element, skip?: SkipPredicate): boolean 
     // Children in document order onto the stack, so the last is popped first.
     for (const child of node.childNodes) {
       stack.push(child);
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Whether the first thing an element draws is a `<br>`, before any picture or
+ * text other than whitespace. Walked, not recursed into.
+ */
+function opensWithBreak(element: Element): boolean {
+  const walker = element.ownerDocument.createTreeWalker(element, SHOW_ELEMENT | SHOW_TEXT, {
+    acceptNode: (candidate) =>
+      candidate.nodeType === ELEMENT_NODE && readerSkips(candidate as Element)
+        ? FILTER_REJECT
+        : FILTER_ACCEPT,
+  });
+
+  for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
+    if (found.nodeType === TEXT_NODE) {
+      if (/[^ \t\n\r\f]/.test(found.nodeValue ?? '')) {
+        return false;
+      }
+
+      continue;
+    }
+
+    const tag = tagNameOf(found);
+
+    if (tag === 'BR') {
+      return true;
+    }
+
+    if (tag === 'IMG') {
+      return false;
     }
   }
 
@@ -3502,12 +4190,39 @@ const COLLAPSIBLE = /[\t\n\r\f]| {2}/;
  * whitespace is one space, none stands beside a line break, and none at either
  * edge of the block -- except a typed space at the paste's own edge, which
  * lands mid-line, as in the inline buffer.
+ *
+ * @param pictures Whether the block's pictures are handed on after it
+ * (`pushTextBlock`): each reading is then made with them marked where they
+ * stand, and the lines they stood on alone go with them
+ * (`withoutPictureLines`) before anything else is asked of the text -- the
+ * plain text included, which holds no picture.
  */
-function readBlockText(element: Element, skip?: SkipPredicate): RichText {
+function readBlockText(element: Element, skip?: SkipPredicate, pictures = false): RichText {
   const whitespace = blockWhitespace(element, skip);
+  // One parse, with the pictures marked where they stand when they are
+  // handed on, and the lines that were only theirs taken out of it.
+  const read = (): RichText => {
+    if (!pictures) {
+      return parseRichText(element, skip);
+    }
+
+    imageAtoms = [];
+
+    let marked: RichText;
+
+    try {
+      marked = parseRichText(element, skip);
+    } finally {
+      imageAtoms = null;
+    }
+
+    // The collapse pass below reads the picture marks: they are taken out of
+    // what it leaves, not out of the parse it reads.
+    return collapsingSource ? marked : withoutPictureLines(marked, lineAfterPicture);
+  };
 
   if (!whitespace.collapses) {
-    let runs = parseRichText(element, skip);
+    let runs = read();
 
     // A source newline that ends a block a style preserves ends its last
     // line, as it does where the plain text decides (`arbitrate`) and in a
@@ -3529,11 +4244,16 @@ function readBlockText(element: Element, skip?: SkipPredicate): RichText {
 
   let runs: RichText;
 
+  // Whether the walk wrote a line after the last picture, for the reading
+  // collapsed below (`withoutPictureLines`).
+  let lineAfter = false;
+
   collapsingSource = true;
   collapsing = true;
 
   try {
-    runs = parseRichText(element, skip);
+    runs = read();
+    lineAfter = lineAfterPicture;
   } finally {
     collapsingSource = false;
     collapsing = false;
@@ -3571,11 +4291,25 @@ function readBlockText(element: Element, skip?: SkipPredicate): RichText {
     for (const char of run.text) {
       if (literal) {
         literal = false;
-        content(index, char);
+        // The text's own picture mark, and the escape that says so, stay
+        // escaped for `withoutPictureLines`, which takes the escape out.
+        content(
+          index,
+          pictures && (char === LITERAL || char === IMAGE_ATOM) ? LITERAL + char : char,
+        );
       } else if (char === LITERAL) {
         literal = true;
       } else if (char === STANDS) {
         // A `<br>` after a preserved break: that break is a line of its own.
+        lastBreak = -1;
+      } else if (pictures && char === IMAGE_ATOM) {
+        // A picture handed on after the block cuts nothing: the text reads
+        // as it would without it, so the space either side of it is one
+        // space, and a line it starts is still a line start. A line of
+        // nothing but pictures goes with them after this pass. A preserved
+        // break before it no longer ends the text, and the last character is
+        // no longer that break for the pop below.
+        chars[index]!.push(char);
         lastBreak = -1;
       } else if (char === EDGE_LINE_END) {
         if (space !== -1) {
@@ -3616,11 +4350,15 @@ function readBlockText(element: Element, skip?: SkipPredicate): RichText {
     chars[lastBreak]!.pop();
   }
 
-  const collapsed = normalizeRuns(
+  let collapsed = normalizeRuns(
     runs
       .map((run, index) => ({ ...run, text: chars[index]!.join('') }))
       .filter((run) => run.text.length > 0),
   );
+
+  if (pictures) {
+    collapsed = withoutPictureLines(collapsed, lineAfter);
+  }
 
   // Asked whenever collapsing changed something the plain text can confirm:
   // whitespace a browser draws differently, or a space at a block's start --
@@ -3646,7 +4384,7 @@ function readBlockText(element: Element, skip?: SkipPredicate): RichText {
 
   return plainArbiter
     ? arbitrate(
-        asked ? parseRichText(element, skip) : null,
+        asked ? read() : null,
         collapsed,
         whitespace.layout || cell,
         plainIndent(plainArbiter, element),
@@ -4543,12 +5281,26 @@ function pushCallout(out: Block[], element: Element, depth: number, icon: string
 /** Everything left below the bound, as one block rather than none. */
 function pushRemainder(out: Block[], node: Node | readonly Node[], depth: number): void {
   // A run of a list's loose content is one remainder, as it is one block.
-  const text = normalizeControlCharacters(
-    'nodeType' in node ? subtreeText(node) : node.map(subtreeText).join(''),
-  );
+  const nodes = 'nodeType' in node ? [node] : node;
+  const text = normalizeControlCharacters(nodes.map(subtreeText).join(''));
 
   if (text.trim().length > 0) {
     out.push(createBlock('paragraph', text, depth));
+  }
+
+  // Its pictures are still handed on, after its text, as past the inline
+  // bound: walked, not recursed into.
+  for (const part of nodes) {
+    if (part.nodeType !== ELEMENT_NODE) {
+      continue;
+    }
+
+    const images =
+      tagNameOf(part) === 'IMG' ? [part as Element] : textImages(part as Element, () => false);
+
+    for (const image of images) {
+      pushImage(out, image, depth);
+    }
   }
 }
 
@@ -4652,7 +5404,6 @@ function detachSummary(doc: Document, summary: Element, details: Element): void 
   for (let at = summary.parentElement; at !== null; at = at.parentElement) {
     BLOCK_LEVEL_DESCENDANTS.delete(at);
     IMAGE_DESCENDANTS.delete(at);
-    DISPLAY_BLOCK_DESCENDANTS.delete(at);
     LIST_ITEM_DESCENDANTS.delete(at);
     SUMMARY_DESCENDANTS.delete(at);
 
@@ -4833,18 +5584,33 @@ function pushTable(out: Block[], element: Element, depth: number): void {
  *
  * The quote's own text is read skipping every list in it, so without visiting
  * them separately a quoted list — the ordinary shape on GitHub, Wikipedia and
- * Stack Overflow — is dropped on the floor. Its images are handed on after it,
- * a level in, except those in its lists, which are the lists' own.
+ * Stack Overflow — is dropped on the floor. Its images are handed on among
+ * those lists where they stand, a level in -- at its own depth for a quote of
+ * nothing but lists and images, which is those -- except the ones in the lists,
+ * which are the lists' own. A callout keeps no images.
  */
-function visitQuote(element: Element, depth: number, out: Block[]): void {
+function visitQuote(doc: Document, element: Element, depth: number, out: Block[]): void {
   const icon = element.getAttribute(CALLOUT_ATTR);
   const lists = outermostLists(element);
   const quoteDepth = depthOf(element, depth);
 
-  const images =
+  // How many of the images come before each list, found by the walk that
+  // finds them: a quote's pictures go among its lists where they stand, as a
+  // list item's go among its blocks. Handed on ahead of every list, one after
+  // a list landed above it.
+  const passed = new Map<Element, number>();
+  const found =
     icon === null && containsImage(element)
-      ? textImages(element, isNestedList).filter(hasUsableImage)
+      ? textImages(element, isNestedList, (list, count) => passed.set(list, count))
       : [];
+  // Counted among the usable ones, which are the only ones handed on.
+  const usable = [0];
+
+  for (const image of found) {
+    usable.push(usable[usable.length - 1]! + (hasUsableImage(image) ? 1 : 0));
+  }
+
+  const images = found.filter(hasUsableImage);
 
   // A blockquote holding nothing but a list is that list, and one holding
   // nothing but an image -- a quoted screenshot -- is that image: an empty
@@ -4855,21 +5621,37 @@ function visitQuote(element: Element, depth: number, out: Block[]): void {
     (lists.length > 0 || images.length > 0) &&
     isRichEmpty(parseRichText(element, isNestedList));
 
+  // Whether the quote is a block at all: one whose text all goes with its
+  // pictures (`withoutPictureLines`) is none, as a bare one is, and what it
+  // held stands where it stood rather than a level under the block before.
+  let pushed = false;
+
   if (!bare) {
     if (icon === null) {
-      pushBlock(out, 'quote', element, depth, quoteDepth + 1);
+      pushed = pushTextBlock(out, 'quote', element, depth, images);
     } else {
       pushCallout(out, element, depth, icon.length > 0 ? icon : DEFAULT_CALLOUT_ICON);
-    }
-  } else {
-    for (const image of images) {
-      pushImage(out, image, quoteDepth);
+      pushed = true;
     }
   }
 
+  const inner = pushed ? quoteDepth + 1 : quoteDepth;
+  let next = 0;
+
+  const imagesUntil = (until: number): void => {
+    for (; next < until; next += 1) {
+      pushImage(out, images[next]!, inner);
+    }
+  };
+
   for (const list of lists) {
-    visitList(list, bare ? quoteDepth : quoteDepth + 1, out);
+    const count = passed.get(list);
+
+    imagesUntil(count === undefined ? next : usable[count]!);
+    visitList(doc, list, inner, out);
   }
+
+  imagesUntil(images.length);
 }
 
 /**
@@ -5124,25 +5906,67 @@ function opensLine(element: Element, handedOn: (child: Element) => boolean): boo
 /**
  * The images in an element's own text, past whatever `skip` hides. `pushImage`
  * refuses any whose source is unusable.
+ *
+ * @param passed Told, for each element `skip` hides, how many of the images
+ * come before it, and whether the text since the last usable one -- or since
+ * the last element skipped, whichever is later -- ended a line: a list item and a
+ * quote use it to hand each image on among their blocks where it stands, in
+ * the same walk that finds them.
  */
-function textImages(root: Element, skip: SkipPredicate): Element[] {
+function textImages(
+  root: Element,
+  skip: SkipPredicate,
+  passed?: (skipped: Element, images: number, ended: boolean) => void,
+): Element[] {
   const images: Element[] = [];
+  // Asked only for `passed`: a `<br>`, or an element that is a line of its
+  // own, met after the last usable picture or skipped element -- or the end
+  // of the child of `root` that held it, where that child is a line. A
+  // line-starting element deeper than that is opened before the picture and
+  // never seen to close, so the picture inside it reads as still open: the
+  // walk's blind spot. A newline a style preserves ends nothing here: it is
+  // the item text's own, which keeps it, so its line is drawn there already.
+  let ended = false;
+  let top: Node | null = null;
   const walker = root.ownerDocument.createTreeWalker(root, SHOW_ELEMENT, {
     acceptNode: (candidate) => {
       const tag = tagNameOf(candidate);
 
+      if (passed && candidate.parentNode === root) {
+        if (top !== null && startsLine(top as Element)) {
+          ended = true;
+        }
+
+        top = candidate;
+      }
+
+      if (SKIP_TAGS.has(tag)) {
+        return FILTER_REJECT;
+      }
+
+      // The walk reaches what it skips in document order, so this is how
+      // many of the images come before it.
+      if (skip(candidate as Element, tag)) {
+        passed?.(candidate as Element, images.length, ended);
+        ended = false;
+        return FILTER_REJECT;
+      }
+
       // Nor a picture inside a copy the reader skips.
-      return SKIP_TAGS.has(tag) ||
-        skip(candidate as Element, tag) ||
-        isAssistiveMathCopy(candidate as Element)
-        ? FILTER_REJECT
-        : FILTER_ACCEPT;
+      return isAssistiveMathCopy(candidate as Element) ? FILTER_REJECT : FILTER_ACCEPT;
     },
   });
 
   for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
     if (tagNameOf(found) === 'IMG') {
       images.push(found as Element);
+
+      // One the reader cannot use is handed on as nothing, and ends nothing.
+      if (hasUsableImage(found as Element)) {
+        ended = false;
+      }
+    } else if (passed && (tagNameOf(found) === 'BR' || startsLine(found as Element))) {
+      ended = true;
     }
   }
 
@@ -5332,6 +6156,7 @@ function holdsUsablePicture(element: Element): boolean {
  * decoration rather than a signal to be read back.
  */
 function visitListItem(
+  doc: Document,
   item: Element,
   fallback: BlockType,
   depth: number,
@@ -5349,13 +6174,14 @@ function visitListItem(
   listNesting += 1;
 
   try {
-    visitListItemInner(item, fallback, depth, out, declared);
+    visitListItemInner(doc, item, fallback, depth, out, declared);
   } finally {
     listNesting -= 1;
   }
 }
 
 function visitListItemInner(
+  doc: Document,
   item: Element,
   fallback: BlockType,
   depth: number,
@@ -5434,7 +6260,7 @@ function visitListItemInner(
           // before it in the item's text -- and then there is no paragraph
           // to take. Nothing has been written out yet.
           if (afterMath && !keepsParagraphs) {
-            visitListItemInner(item, fallback, depth, out, declared, true);
+            visitListItemInner(doc, item, fallback, depth, out, declared, true);
             return;
           }
 
@@ -5464,23 +6290,73 @@ function visitListItemInner(
   // An image in the item's text -- its own paragraph, a wrapper, a promoted
   // paragraph, a loose to-do's line -- is handed on as a child image, as a
   // bare one is. Read as text it was dropped: the text has no image.
-  for (const image of textImages(item, skip)) {
-    pushImage(out, image, itemDepth + 1);
+  //
+  // A list nested inside the item continues one level deeper, and so does
+  // every other block it holds, in the order the item holds them -- and the
+  // images go among them where the browser draws them. The text is read
+  // ahead of the blocks, but a picture is no part of the text: handed on
+  // ahead of every block, one after a nested list landed above it. Blocks
+  // with no image between them are still visited as one run.
+  const before = new Map<Element, { count: number; ended: boolean }>();
+  const isOwnBlock = (child: Node): boolean => blocks.has(child as Element);
+  const images = textImages(item, skip, (block, count, ended) =>
+    before.set(block, { count, ended }),
+  );
+  let next = 0;
+  let run: Element[] = [];
+
+  const visitRun = (): void => {
+    if (run.length > 0) {
+      visitBlocks(doc, item, itemDepth + 1, out, undefined, isOwnBlock, run);
+      run = [];
+    }
+  };
+
+  // As an inline image does, a picture leaves its line open -- a `<br>` that
+  // follows it ends that line rather than making a blank one -- unless the
+  // item's text ended it first: that text is read apart, and its own `<br>`
+  // is gone by the time the next block is.
+  const imagesUntil = (until: number, ended: boolean): void => {
+    if (until > next) {
+      visitRun();
+    }
+
+    for (; next < until; next += 1) {
+      if (pushImage(out, images[next]!, itemDepth + 1)) {
+        lineOpen = !ended;
+      }
+    }
+  };
+
+  if (blocks.size > 0) {
+    for (const child of item.children) {
+      if (blocks.has(child)) {
+        const placed = before.get(child);
+        const ended = placed?.ended ?? true;
+
+        imagesUntil(placed?.count ?? next, ended);
+
+        // A line the item's text ended between two of its blocks: the run
+        // they were visited in would carry the first one's line into the next.
+        if (ended) {
+          visitRun();
+          lineOpen = false;
+        }
+
+        run.push(child);
+      }
+    }
   }
 
-  // A list nested inside the item continues one level deeper, and so does
-  // every other block it holds, in the order the item holds them.
-  if (blocks.size > 0) {
-    visitBlocks(item.ownerDocument, item, itemDepth + 1, out, undefined, (child) =>
-      blocks.has(child as Element),
-    );
-  }
+  // What is left comes after the last block.
+  imagesUntil(images.length, true);
+  visitRun();
 }
 
-function visitList(list: Element, depth: number, out: Block[]): void {
+function visitList(doc: Document, list: Element, depth: number, out: Block[]): void {
   const fallback: BlockType = tagNameOf(list) === 'OL' ? 'numbered_list' : 'bulleted_list';
 
-  visitListChildren(list, fallback, list.hasAttribute(LIST_ATTR), depth, out);
+  visitListChildren(doc, list, fallback, list.hasAttribute(LIST_ATTR), depth, out);
 }
 
 const LIST_ITEM_DESCENDANTS = new WeakMap<Element, Element | null>();
@@ -5494,13 +6370,13 @@ const LIST_ITEM_DESCENDANTS = new WeakMap<Element, Element | null>();
  * item was wrapped.
  */
 function visitListChildren(
+  doc: Document,
   parent: Node,
   fallback: BlockType,
   declared: boolean,
   depth: number,
   out: Block[],
 ): void {
-  const doc = parent.ownerDocument!;
   let loose: Node[] = [];
 
   // Read where it stands, as a run of the list's own children: copied into a
@@ -5544,7 +6420,7 @@ function visitListChildren(
     lineOpen = false;
 
     if (tag === 'LI') {
-      visitListItem(child as Element, fallback, depth, out, declared);
+      visitListItem(doc, child as Element, fallback, depth, out, declared);
       // And ends it: an item ending in an image leaves the line open.
       lineOpen = false;
     } else if (tag !== 'UL' && tag !== 'OL') {
@@ -5558,7 +6434,7 @@ function visitListChildren(
       listNesting += 1;
 
       try {
-        visitListChildren(contentsOf(doc, child as Element), fallback, declared, depth, out);
+        visitListChildren(doc, contentsOf(doc, child as Element), fallback, declared, depth, out);
       } finally {
         listNesting -= 1;
       }
@@ -5575,7 +6451,7 @@ function visitListChildren(
       listNesting += 1;
 
       try {
-        visitList(child as Element, depth + 1, out);
+        visitList(doc, child as Element, depth + 1, out);
       } finally {
         listNesting -= 1;
       }
@@ -5654,12 +6530,98 @@ const LINE_BREAK = '\uFDD4';
 const LITERAL = '\uFDD3';
 /** A `<br>` after a preserved break: that break stands rather than ends the text. */
 const STANDS = '\uFDD5';
+/** Stands for a picture in a run `flushInline` splits; see `imageAtoms`. */
+const IMAGE_ATOM = '\uFDD6';
 /**
  * A display equation's line break with only source whitespace before it: a
  * line break where that whitespace is the paste's edge space, which stays,
  * and nothing where it collapses away.
  */
-const EDGE_LINE_END = '\uFDD6';
+const EDGE_LINE_END = '\uFDD7';
+
+/** The `<img>` each copy `cloneDeep` made of one was copied from. */
+const PICTURE_ORIGINALS = new WeakMap<Node, Element>();
+
+/**
+ * Text as the walk writes it. Where a block marks its pictures without a
+ * collapse pass (`pushTextBlock`, in a block that keeps its whitespace), the
+ * text's own U+FDD6 -- and the escape that says so -- are escaped as
+ * `collapseWhitespace` and `readBlockText`'s collapse (`sourceWhitespace`)
+ * escape them, so no character of the text is taken for a picture.
+ */
+function ownText(text: string): string {
+  return imageAtoms !== null && !collapsing && /[\uFDD3\uFDD6]/.test(text)
+    ? text.replace(/[\uFDD3\uFDD6]/g, (char) => LITERAL + char)
+    : text;
+}
+
+/**
+ * Writes a picture's atom. Out of `walk`, whose frame is its stack depth: the
+ * inline walk runs thousands of levels deep, and every local in it is paid
+ * once per level.
+ */
+function writePicture(image: Element, out: TextRun[]): void {
+  out.push({ text: IMAGE_ATOM, marks: [] });
+  imageAtoms!.push(image);
+  atomsWritten += 1;
+  lineAfterPicture = false;
+  breakAfterPicture = false;
+}
+
+/**
+ * Whether the walk wrote a line after the last picture it marked: a `<br>`'s,
+ * or a block's break a `<br>` made stand. A block's break alone stands only
+ * where text follows it, which is no empty last line. Without one, an empty
+ * (or blank) last line after the pictures is source layout
+ * (`withoutPictureLines`), not a line of the text's.
+ */
+let lineAfterPicture = false;
+
+/** Whether a block's break (`breakLine`) was written since the last picture. */
+let breakAfterPicture = false;
+
+/** The atoms `writePicture` has written, so `place` can look past this read's. */
+let atomsWritten = 0;
+
+/**
+ * Where `walk` stands in `out`, for the gap between two cells or two parts
+ * stacked in a box. A picture marked where it cuts nothing (`pushTextBlock`)
+ * is nothing between them -- at whatever depth it was written -- so it is
+ * not counted; one the run is cut at ends the line, and is.
+ */
+function place(out: readonly TextRun[]): number {
+  return out.length - (imageCut ? 0 : atomsWritten);
+}
+
+/** The atoms of the pictures in a subtree read whole past the nesting bound. */
+function remainderPictures(element: Element, out: TextRun[]): void {
+  for (const image of textImages(element, () => false)) {
+    if (hasUsableImage(image)) {
+      writePicture(image, out);
+    }
+  }
+}
+
+/**
+ * The marks below an element read in place. A block that states a decoration
+ * line of its own keeps the lines around it -- its shorthand's `off` for the
+ * others is no decision, as `yieldSoft` has it where the marks are pushed
+ * into blocks. Out of `walk`, whose frame is its stack depth.
+ */
+function marksWithin(marks: Mark[], element: Element, isBlock: boolean): Mark[] {
+  const { add, remove } = marksForElement(element);
+  const keeps = isBlock && statesLine(element);
+
+  return [...marks, ...add].filter(
+    (mark) =>
+      !remove.includes(mark) || (keeps && (mark === 'underline' || mark === 'strikethrough')),
+  );
+}
+
+/** A picture as itself, where `cloneDeep` copied it. */
+function originalPicture(image: Element): Element {
+  return PICTURE_ORIGINALS.get(image) ?? image;
+}
 
 type WhiteSpace = 'normal' | 'pre' | 'pre-line';
 
@@ -6006,6 +6968,93 @@ const WHITE_SPACE_VALUES = new Map<string, WhiteSpace>([
 const INHERITING = new Set(INHERITING_KEYWORDS);
 
 /**
+ * A run split at its pictures (`atoms`, the offsets `collapseWhitespace` found
+ * them at): one part before each and one after the last, the atoms dropped.
+ */
+function splitAtPictures(runs: RichText, atoms: readonly number[]): RichText[] {
+  // One pass over the runs and the offsets together.
+  const parts: TextRun[][] = [[]];
+  let next = 0;
+  let offset = 0;
+
+  for (const run of runs) {
+    let from = 0;
+
+    while (next < atoms.length && atoms[next]! < offset + run.text.length) {
+      const at = atoms[next]! - offset;
+
+      if (at > from) {
+        parts[parts.length - 1]!.push({ ...run, text: run.text.slice(from, at) });
+      }
+
+      parts.push([]);
+      from = at + 1;
+      next += 1;
+    }
+
+    if (from < run.text.length) {
+      parts[parts.length - 1]!.push(from === 0 ? run : { ...run, text: run.text.slice(from) });
+    }
+
+    offset += run.text.length;
+  }
+
+  return parts.map((part) => normalizeRuns(part));
+}
+
+/**
+ * A run's reading as it stands, for `arbitrate`, split at its pictures where
+ * `flushInline` splits the collapsed reading: read with them marked as that
+ * reading marks them, so the two agree on where each part ends, and the
+ * text's own marks, which `ownText` escaped, read back as themselves.
+ */
+function sourceAtPictures(wrapper: Element): RichText[] {
+  imageAtoms = [];
+  imageBreaks = [];
+  imageCut = true;
+
+  let runs: RichText;
+
+  try {
+    runs = parseRichText(wrapper);
+  } finally {
+    imageAtoms = null;
+    imageCut = false;
+  }
+
+  const parts: TextRun[][] = [[]];
+
+  for (const run of runs) {
+    let text = '';
+    let literal = false;
+
+    for (const char of run.text) {
+      if (literal) {
+        literal = false;
+        text += char;
+      } else if (char === LITERAL) {
+        literal = true;
+      } else if (char === IMAGE_ATOM) {
+        if (text.length > 0) {
+          parts[parts.length - 1]!.push({ ...run, text });
+        }
+
+        parts.push([]);
+        text = '';
+      } else {
+        text += char;
+      }
+    }
+
+    if (text.length > 0) {
+      parts[parts.length - 1]!.push(text === run.text ? run : { ...run, text });
+    }
+  }
+
+  return parts.map((part) => normalizeRuns(part));
+}
+
+/**
  * Reads inline content outside any paragraph as a browser lays it out: under
  * `white-space: normal` each run of spaces, tabs and line breaks in the source
  * is one space, and none stands at the start or end of a line -- a line a
@@ -6023,12 +7072,58 @@ const INHERITING = new Set(INHERITING_KEYWORDS);
 function collapseWhitespace(
   root: Element,
   edges: { start: boolean; end: boolean },
-): { runs: RichText; endsLine: boolean } {
+): { runs: RichText; endsLine: boolean; atoms: number[] } {
   const walker = root.ownerDocument.createTreeWalker(root, SHOW_TEXT);
+  // A flex or grid item is an element, or a stretch of text with whatever
+  // draws no box between -- comments (Vue's `<!--v-if-->`), a `<script>`, a
+  // `<template>` -- so whitespace there is drawn exactly when its stretch holds
+  // text. Settled once per stretch, at its first text node, before the pass
+  // below has marked any of it, so no node is looked at twice.
+  const stretches = new Map<Node, boolean>();
+  const passes = (node: Node): boolean =>
+    node.nodeType === TEXT_NODE ||
+    node.nodeType === COMMENT_NODE ||
+    (node.nodeType === ELEMENT_NODE && readerSkips(node as Element));
+  const undrawn = (text: Node): boolean => {
+    const known = stretches.get(text);
+
+    if (known !== undefined) {
+      return known;
+    }
+
+    let first = text;
+
+    while (first.previousSibling !== null && passes(first.previousSibling)) {
+      first = first.previousSibling;
+    }
+
+    const texts: Node[] = [];
+    let blank = true;
+
+    for (let at: Node | null = first; at !== null && passes(at); at = at.nextSibling) {
+      if (at.nodeType === TEXT_NODE) {
+        texts.push(at);
+        blank &&= !/[^ \t\n\r\f]/.test(at.nodeValue ?? '');
+      }
+    }
+
+    for (const node of texts) {
+      stretches.set(node, blank);
+    }
+
+    return blank;
+  };
 
   for (let found = walker.nextNode(); found !== null; found = walker.nextNode()) {
-    const value = (found.nodeValue ?? '').replace(/[\uFDD0-\uFDD6]/g, (char) => LITERAL + char);
-    const mode = whiteSpaceOf(found.parentElement);
+    const value = (found.nodeValue ?? '').replace(/[\uFDD0-\uFDD7]/g, (char) => LITERAL + char);
+    // Whitespace between the items of a flex or grid container is not drawn,
+    // whatever its `white-space`: preserved here, the walk no longer saw it
+    // as whitespace and kept blank lines a browser never shows. Only where
+    // the whole stretch of text it is part of is whitespace (`undrawn`).
+    const mode =
+      laysOutItems(found.parentNode) && !/[^ \t\n\r\f]/.test(value) && undrawn(found)
+        ? 'normal'
+        : whiteSpaceOf(found.parentElement);
 
     // What a style preserves is marked, so the pass below keeps it.
     found.nodeValue =
@@ -6054,6 +7149,7 @@ function collapseWhitespace(
   }
 
   const chars = runs.map((): string[] => []);
+  const literalAtoms = new Set<string>();
   let suppress = !edges.start;
   let lastSpace = -1;
   let lastPreservedBreak = -1;
@@ -6067,6 +7163,12 @@ function collapseWhitespace(
       if (literal || char === LITERAL) {
         if (literal) {
           chars[index]!.push(char);
+
+          // The text's own: no picture stands here.
+          if (char === IMAGE_ATOM) {
+            literalAtoms.add(`${index}:${chars[index]!.length - 1}`);
+          }
+
           suppress = false;
           lastSpace = -1;
           lastPreservedBreak = -1;
@@ -6077,6 +7179,23 @@ function collapseWhitespace(
       } else if (char === STANDS) {
         lastPreservedBreak = -1;
         endsLine = true;
+      } else if (char === IMAGE_ATOM) {
+        // A picture is handed on as a block, so the text either side of it
+        // ends and starts a block: the space and the preserved break before
+        // it go, as at the end of a run, and space after it is collapsible.
+        if (lastSpace !== -1) {
+          chars[lastSpace]!.pop();
+        }
+
+        if (lastPreservedBreak !== -1) {
+          chars[lastPreservedBreak]!.pop();
+        }
+
+        chars[index]!.push(char);
+        suppress = true;
+        lastSpace = -1;
+        lastPreservedBreak = -1;
+        endsLine = false;
       } else if (char === ' ') {
         if (!suppress) {
           chars[index]!.push(' ');
@@ -6115,6 +7234,21 @@ function collapseWhitespace(
     chars[lastPreservedBreak]!.pop();
   }
 
+  // Where each picture stands in the text. Nothing is taken off a run but its
+  // last character, after the last picture in it, so these do not move.
+  const atoms: number[] = [];
+  let offset = 0;
+
+  for (const [index, list] of chars.entries()) {
+    for (const [at, char] of list.entries()) {
+      if (char === IMAGE_ATOM && !literalAtoms.has(`${index}:${at}`)) {
+        atoms.push(offset);
+      }
+
+      offset += char.length;
+    }
+  }
+
   return {
     runs: normalizeRuns(
       runs
@@ -6122,6 +7256,7 @@ function collapseWhitespace(
         .filter((run) => run.text.length > 0),
     ),
     endsLine,
+    atoms,
   };
 }
 
@@ -6132,7 +7267,8 @@ function collapseWhitespace(
  * so stray text at the top level is not silently dropped.
  *
  * @param include Which children to visit, where only some are blocks: a list
- * item's, whose text the item has already read in place.
+ * item's, whose text the item has already read in place. Given with
+ * `children`, it picks from that run alone.
  * @param children The children to visit, where they are a run of `node`'s:
  * loose content in a list, read where it stands rather than copied out.
  */
@@ -6148,10 +7284,12 @@ function visitBlocks(
   if (blockNesting >= MAX_BLOCK_NESTING) {
     // What the reader skips stays out here too: an excluded summary was read
     // into the body as well as the title.
-    for (const rest of children
-      ? [children]
-      : include
-        ? [...node.childNodes].filter(include)
+    // Picked by `include`, each child is a remainder of its own, whether or
+    // not the run it is picked from is given.
+    for (const rest of include
+      ? (children ?? [...node.childNodes]).filter(include)
+      : children
+        ? [children]
         : exclude
           ? [[...node.childNodes].filter((child) => child !== exclude)]
           : [node]) {
@@ -6182,19 +7320,16 @@ function visitBlocksInner(
   let buffer: Node[] = [];
 
   /**
-   * Keeps the place of a node the run leaves out (see `standIn`), or of a
-   * level it leaves (`source` absent: an empty `<template>`). Not at the head
-   * of the run, where nothing before it is judged by what comes next, nor
-   * straight after another: two in a row keep nothing apart that one does
-   * not, and the second is judged by nobody -- a `<template>` is no copy.
-   * Every level a picture split walked through left several, each cloned
-   * again when the run was read.
+   * Keeps the place of a node the run leaves out (see `standIn`). Not at the
+   * head of the run, where nothing before it is judged by what comes next,
+   * nor straight after another: two in a row keep nothing apart that one does
+   * not, and the second is judged by nobody.
    */
-  const holdPlace = (source?: Node): void => {
+  const holdPlace = (source: Node): void => {
     const last = buffer[buffer.length - 1];
 
     if (last !== undefined && tagNameOf(last) !== 'TEMPLATE') {
-      buffer.push(source ? standIn(source, doc) : doc.createElement('template'));
+      buffer.push(standIn(source, doc));
     }
   };
 
@@ -6203,114 +7338,8 @@ function visitBlocksInner(
   let closeAfter = false;
 
   /**
-   * Walks an inline wrapper's subtree in document order, without recursion:
-   * each image is flushed past as a block of its own, and everything else is
-   * buffered inside one shell carrying the formatting and link of the wrappers
-   * above it -- worked out a level at a time, so a deep chain costs its depth
-   * once rather than once per piece of text, and with the nearest wrapper
-   * winning, as it does for text read where it stands.
-   */
-  const splitAroundImages = (wrapper: Element): void => {
-    const empty: InlineFormatting = { link: null, marks: new Map(), soft: new Set() };
-    // `end` marks where an element's children end in the stack.
-    const stack: Array<{ node: Node; format: InlineFormatting; end?: true }> = [
-      { node: wrapper, format: empty },
-    ];
-
-    while (stack.length > 0) {
-      const { node, format, end } = stack.pop()!;
-      const tag = tagNameOf(node);
-
-      // The pieces of every level go into one run, so an element's first and
-      // last children would stand beside what stood beside the element, and
-      // an assistive copy is judged by what stands next to it: a `katex-mathml`
-      // before the element, no copy where it stood, became the copy of a
-      // drawing inside it, and its text was lost. An empty `<template>` keeps
-      // the levels apart on both sides. (One before a `katex-html` element was
-      // a copy where it stood, so it was left out, and never asks.)
-      if (end) {
-        holdPlace();
-
-        continue;
-      }
-
-      // Asked where it stands: cloned out alone, an assistive MathML copy has
-      // no drawing beside it to judge by, and the formula was read twice.
-      if (
-        node !== wrapper &&
-        (SKIP_TAGS.has(tag) ||
-          (node.nodeType === ELEMENT_NODE && isAssistiveMathCopy(node as Element)))
-      ) {
-        holdPlace(node);
-
-        continue;
-      }
-
-      // An image the reader cannot use is no block, so it splits nothing --
-      // and it keeps its place in the run, as anything left out of one does.
-      if (tag === 'IMG') {
-        if (hasUsableImage(node as Element)) {
-          flushInline(true);
-          pushImage(out, node as Element, depth);
-          lineOpen = true;
-        } else {
-          holdPlace(node);
-        }
-
-        continue;
-      }
-
-      if (node === wrapper || (node.nodeType === ELEMENT_NODE && containsImage(node as Element))) {
-        const inner = nearestFormatting(format, node as Element);
-        const children = node.childNodes;
-
-        holdPlace();
-
-        stack.push({ node, format, end: true });
-
-        for (let index = children.length - 1; index >= 0; index -= 1) {
-          stack.push({ node: children[index]!, format: inner });
-        }
-
-        continue;
-      }
-
-      // The piece is read detached, so what it inherited where it stood goes
-      // with it: its `white-space`, and whether it is the paste's edge.
-      let piece = cloneDeep(node, doc);
-      const mode = whiteSpaceOf(node.parentElement);
-
-      if (mode !== 'normal') {
-        const holder = doc.createElement('span');
-
-        holder.setAttribute('style', `white-space: ${mode === 'pre' ? 'pre-wrap' : 'pre-line'}`);
-        holder.appendChild(piece);
-        piece = holder;
-      }
-
-      const shell = formattingShell(doc, format);
-
-      if (shell) {
-        shell.inner.appendChild(piece);
-        piece = shell.outer;
-      }
-
-      if (pasteFirst.has(node)) {
-        pasteFirst.add(piece);
-      }
-
-      if (pasteLast.has(node)) {
-        pasteLast.add(piece);
-      }
-
-      buffer.push(piece);
-    }
-  };
-
-  /**
    * @param continues Whether what comes next goes on with the line -- an inline
-   * wrapper holding blocks or images, or an inline image -- rather than a
-   * block that starts a new one.
+   * wrapper holding blocks -- rather than a block that starts a new one.
    */
   const flushInline = (continues = false): void => {
     if (!continues) {
@@ -6391,7 +7420,7 @@ function visitBlocksInner(
     // them already read as one block holding a line break. At either end of
     // the paste there is nothing for it to stand between, and
     // `blocksFromHtml` trims it.
-    const blankLine = buffer.some(holdsBreak);
+    let blankLine = buffer.some(holdsBreak);
     // A run says how its whitespace is drawn when everything in it does: its
     // container declares it, or -- as Chromium and WebKit copy a phrase --
     // each element in it carries its own computed `white-space`. One inline
@@ -6420,17 +7449,77 @@ function visitBlocksInner(
     const source = asks ? subtreeText(wrapper) : '';
     const layout = COLLAPSIBLE.test(source);
     const lead = /^[ \t\n\r\f]+/.exec(source)?.[0];
+    // Split at the run's pictures as the collapsed reading is, so each part
+    // is decided against the plain text as the block it becomes.
     const raw =
       layout ||
       (lead !== undefined && !/[\n\r]/.test(lead)) ||
       (asks && blockWhitespace(wrapper).lineStart)
-        ? parseRichText(wrapper)
+        ? sourceAtPictures(wrapper)
         : null;
-    const collapsed = collapseWhitespace(wrapper, edges);
+
+    // Read in one parse, the run's pictures marked where they stand.
+    const pictures: Element[] = [];
+
+    imageAtoms = pictures;
+    imageBreaks = [];
+    imageCut = true;
+
+    let collapsed: ReturnType<typeof collapseWhitespace>;
+
+    try {
+      collapsed = collapseWhitespace(wrapper, edges);
+    } finally {
+      imageAtoms = null;
+      imageCut = false;
+    }
+
+    const breaks = imageBreaks;
+    const parts =
+      pictures.length > 0 ? splitAtPictures(collapsed.runs, collapsed.atoms) : [collapsed.runs];
+    // Each part moves the plain text's cursor on, in order, as a block does.
+    // A source reading split some other way decides nothing.
+    const sources = raw !== null && raw.length === parts.length ? raw : null;
+    const indent = plainArbiter ? plainIndent(plainArbiter, runParent) : 0;
+    const decided = (index: number): RichText =>
+      plainArbiter
+        ? arbitrate(sources?.[index] ?? null, parts[index]!, layout, indent)
+        : parts[index]!;
+    let runs: RichText;
+
+    // Each picture ends the text before it, which is read as it was when the
+    // run was cut there -- a run of its own that goes on with the line -- and
+    // is handed on, leaving its line open. What follows the last of them is
+    // the run, below.
+    if (pictures.length > 0) {
+      for (const [index, picture] of pictures.entries()) {
+        let part = decided(index);
+        const before = lineOpen;
+        const cut = before && richToPlainText(part).startsWith('\n');
+
+        if (cut) {
+          part = richDelete(part, 0, 1);
+        }
+
+        if (!isRichEmpty(part)) {
+          out.push(createBlock('paragraph', part, depth));
+        } else if (breaks[index] === true && (!before || cut)) {
+          const block = createBlock('paragraph', [], depth);
+
+          BLANK_LINES.add(block);
+          out.push(block);
+        }
+
+        pushImage(out, picture, depth);
+        lineOpen = true;
+      }
+
+      blankLine = breaks[pictures.length] === true;
+    }
+
+    runs = decided(pictures.length);
+
     const opened = lineOpen;
-    let runs = plainArbiter
-      ? arbitrate(raw, collapsed.runs, layout, plainIndent(plainArbiter, runParent))
-      : collapsed.runs;
 
     // A run that starts with a break on an open line -- after an inline
     // image, or a wrapper's own text -- ends that line rather than leaving a
@@ -6495,12 +7584,20 @@ function visitBlocksInner(
     const element = child as Element;
     const tag = tagNameOf(element);
 
-    // A copy is judged where it stands, as in `walk` and `splitAroundImages`:
-    // buffered and cloned into a wrapper of its own, it had no frame around
-    // it, and a formula drawn in a block frame read twice. A stand-in keeps
-    // its place in the run.
+    // A copy is judged where it stands, as `walk` judges it: buffered and
+    // cloned into a wrapper of its own, it had no frame around it, and a
+    // formula drawn in a block frame read twice. A stand-in keeps its place in
+    // the run.
     if (SKIP_TAGS.has(tag) || isAssistiveMathCopy(element)) {
-      holdPlace(element);
+      // One a row lays out as an item stands in the run as an empty block,
+      // which the read takes for a line of its own, as it does the item. Not
+      // as a copy of it: a `<br>` in an `<object>`'s fallback or an `<svg>`'s
+      // `foreignObject` would be read as the run's own.
+      if (boxedItem(element)) {
+        buffer.push(doc.createElement('div'));
+      } else {
+        holdPlace(element);
+      }
 
       continue;
     }
@@ -6530,19 +7627,19 @@ function visitBlocksInner(
 
     if (tag === 'UL' || tag === 'OL') {
       flushInline();
-      visitList(element, depth, out);
+      visitList(doc, element, depth, out);
       continue;
     }
 
     if (tag === 'LI') {
       flushInline();
-      visitListItem(element, 'bulleted_list', depth, out);
+      visitListItem(doc, element, 'bulleted_list', depth, out);
       continue;
     }
 
     if (tag === 'BLOCKQUOTE') {
       flushInline();
-      visitQuote(element, depth, out);
+      visitQuote(doc, element, depth, out);
       continue;
     }
 
@@ -6580,14 +7677,13 @@ function visitBlocksInner(
     }
 
     // An inline `<img>` sits on a line, which a `<br>` after it ends; a
-    // `<figure>` is a block.
+    // `<figure>` is a block. It is read with the run it stands in, which
+    // `flushInline` splits at it. One the reader cannot use (Outlook's `cid:`,
+    // Word's `file:`) is no picture and splits no sentence; a stand-in keeps
+    // its place in the run.
     if (tag === 'IMG') {
-      // One the reader cannot use (Outlook's `cid:`, Word's `file:`) is no
-      // block, so it splits no sentence; a stand-in keeps its place in it.
       if (hasUsableImage(element)) {
-        flushInline(true);
-        pushImage(out, element, depth);
-        lineOpen = true;
+        buffer.push(element);
       } else {
         holdPlace(element);
       }
@@ -6612,13 +7708,12 @@ function visitBlocksInner(
     }
 
     // <a href><img> and <p><img> are the commonest image markup on the web.
-    // Without this the image is buffered as inline content and emits nothing.
-    // An inline wrapper holding images and no block -- a link or bold around
-    // an icon -- stays on its line: its images become image blocks, and its
-    // text keeps the wrapper's link and marks, which visiting its children
-    // bare lost.
-    // Not one holding a display block either: that block's line breaks are
-    // read from it where it stands, and copying its text out lost them.
+    // An element holding pictures and no block is read as it is without them
+    // -- buffered whole, where it stands -- and `flushInline` hands each
+    // picture on where the parse met it: a link or bold around an icon keeps
+    // its link and marks, a styled `<aside>` or `<center>` its own, and the
+    // cells, boxes and items in it stay what they are. Not a container or a
+    // `<p>`, which are never buffered whole (`readsWhole`).
     //
     // Nor a Word list item. A picture bullet sits in the marker span, which
     // the item's text skips, so it is the item's marker and no image; taken
@@ -6634,13 +7729,8 @@ function visitBlocksInner(
       continue;
     }
 
-    if (
-      containsImage(element) &&
-      !DISPLAY_BLOCK_TAGS.has(tag) &&
-      !containsBlockLevel(element) &&
-      !holdsDisplayBlock(element)
-    ) {
-      splitAroundImages(element);
+    if (containsImage(element) && readsWhole(tag) && !containsBlockLevel(element)) {
+      buffer.push(element);
       continue;
     }
 
@@ -6670,9 +7760,10 @@ function visitBlocksInner(
       continue;
     }
 
+    // A styled one hands its marks on to what it holds (`pushesInward`).
     if (CONTAINER_TAGS.has(tag)) {
       flushInline();
-      visitBlocks(doc, element, depth, out, exclude);
+      visitBlocks(doc, contentsOf(doc, element), depth, out, exclude);
       continue;
     }
 
@@ -6713,7 +7804,12 @@ function visitBlocksInner(
  * fetches anything or runs anything, whatever attributes it carries.
  *
  * Derived from `doc` rather than the global `document`, so a parse mounted in
- * another realm stays in that realm.
+ * another realm stays in that realm -- and not taken from the nodes read
+ * (`ownerDocument`): a template's contents owner is inert in a browser, but
+ * some DOM implementations make it the live document after all. Made once per
+ * read and passed down as `doc`. (A copy, made by `cloneNode`, stays in its
+ * source's document: the template's, or this one once it has been adopted
+ * here.)
  */
 function inertDocument(doc: Document): Document {
   return doc.implementation.createHTMLDocument('');
@@ -7331,6 +8427,8 @@ export function parseRichTextFromHtml(doc: Document, html: string): RichText {
   template.innerHTML = html;
 
   return readingMath(() => {
+    // Past the template, the formulas' replacements are the only elements
+    // this read makes.
     canonicalizeMath(inert, template.content, html);
     return parseRichText(template.content);
   });

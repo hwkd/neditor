@@ -18,6 +18,7 @@ export const SKIP_TAGS: ReadonlySet<string> = new Set([
   'TITLE',
   'META',
   'LINK',
+  'BASE',
   'OBJECT',
   'IFRAME',
   'SVG',

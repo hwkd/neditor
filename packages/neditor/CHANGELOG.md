@@ -169,6 +169,19 @@ that changes what you store or what other applications receive is listed first.
 
 ### Fixed
 
+- **Security** -- HTML paste and drop (also on earlier versions): an event
+  handler on pasted or dropped markup could run, in every engine, and so could
+  one in HTML a host passed to `blocksFromHtml` -- an image's, picture's or
+  media element's `onload`, `onerror` or `onloadstart`, a `<details open>`'s
+  `ontoggle`, and others. The markup is parsed in an inert template, but the
+  reader copies what it reads into wrappers of its own -- a run cut at its
+  pictures, an inline wrapper's or a container's formatting pushed into the
+  blocks it holds (`<b><p>x</p><img src=… onerror></b>`) -- and it made those
+  wrappers in the live document, which adopted the copies: their images and
+  media were fetched at paste time, and their handlers ran whether the load
+  succeeded or failed. Past that template, everything the reader builds is
+  now made in a document with no browsing context, where nothing loads.
+  Nothing pasted reached the document model either way.
 - A `Tab` that cannot indent, pressed with blocks selected, left the block
   selected behind a visible caret, so the next key replaced the block.
 - Dragging, by its handle, the block holding the caret left that caret live, so
@@ -258,7 +271,9 @@ that changes what you store or what other applications receive is listed first.
   list moved above it. An image counts as a block on its own, inside a link
   (GitHub's markup) or inside a paragraph (a loose list); one anywhere in the
   item's text -- beside words, in a wrapper, beside a task's checkbox -- is
-  handed on as a child image rather than dropped with the text it sat in. An
+  handed on as a child image rather than dropped with the text it sat in,
+  among the item's blocks where the browser draws it (the text itself is
+  read ahead of them; on `main`, one after a nested list went above it). An
   item whose blocks come before any text of its own takes its first paragraph
   that holds text as its text, so it keeps its place and number. They are now the item's children, in order; the item
   itself, its to-do box and its number stay, and bare text after one of them
@@ -300,26 +315,27 @@ that changes what you store or what other applications receive is listed first.
   `<center>` (HTML email centres its lines with it), `<address>`, `<aside>`,
   `<form>` -- no longer runs into the text beside it. Text in a link or a
   bold, italic or similar wrapper that also holds an image (an icon in a
-  link) keeps its link and formatting; it was read bare (on `main` too). One
-  that also holds a block this reader has no name for, such as `<center>`, is
-  still read bare, as on `main`, so that block keeps its lines. An image in a
+  link) keeps its link and formatting; it was read bare. So
+  does one that also holds a block this reader has no name for, such as
+  `<center>` in an email signature, and that block still keeps its lines. An image in a
   heading, a quote or a table cell -- a README's logo, a quoted screenshot, an
   email's banner -- is handed on as an image block after it rather than
-  dropped (on `main` too), and an image the reader cannot use (Outlook's
+  dropped -- in a quote, among its lists where it stands --
+  and an image the reader cannot use (Outlook's
   `cid:`, Word's `file:`) no longer splits the sentence around it in two. A
   heading or table holding nothing but an image is that image. A `<figure>`
   is read as an image only when, its own caption aside, it holds one image and
   no text; any other -- a WordPress table block, a gallery, a bookmark card --
-  is read block by block, where everything but its first image was lost (on
-  `main` too). An image in a figure's or a table's caption -- a Wikipedia
+  is read block by block, where everything but its first image was lost (also
+  on earlier versions). An image in a figure's or a table's caption -- a Wikipedia
   thumbnail's flag icon -- is handed on after it rather than dropped. A
   caption written before the picture no longer lends the figure its own
   image, which lost the picture and doubled the caption's; a second
-  `<figcaption>` is content rather than dropped (on `main` too).
+  `<figcaption>` is content rather than dropped.
   An `<img>` with no usable `src` is read from its own `srcset` or its
   `<picture>`'s `<source>`s, largest candidate first, so a Medium article's
   pictures -- every one written without a `src` -- are no longer dropped on
-  paste (on `main` too). A relative `srcset` candidate is passed over: a
+  paste. A relative `srcset` candidate is passed over: a
   browser resolves `src` when it copies but not `srcset`, and the reader
   has no base URL to resolve one against.
 - HTML clipboard (also on earlier versions): an inline `display` is read.
@@ -336,7 +352,7 @@ that changes what you store or what other applications receive is listed first.
   one, KaTeX every superscript) and only two stacked one on the other,
   each drawing text, are words apart (a fraction's parts); two table cells
   side by side are too (MediaWiki's contents: `10 Algebraic Proof`, joined
-  on `main`); a link or other formatting around a
+  on earlier versions); a link or other formatting around a
   container reaches each item. Inside a code block a `<div>` per line and a
   `<br>` now start lines too (a trailing `<br>` is the line's filler), an
   element declared inline stays in its line (Stripe's linked parameters), a
@@ -347,3 +363,36 @@ that changes what you store or what other applications receive is listed first.
   email laid out in nested tables keeps its content; a list inside a wrapper
   in a list item is read as the item's text instead of being dropped; a line
   break followed only by a no-break space is kept.
+- HTML clipboard (also on earlier versions): text split around a picture is
+  read as it is without the picture -- in one pass, the picture marked where
+  it stands -- so a styled element the reader takes as formatting
+  (`<aside>`, `<center>`, `<address>`, a `<figcaption>`) keeps its bold,
+  italic or link, a block inside it keeps its lines (`before<center>q<img>z
+  </center>after` reads `before`/`q`, the picture, `z`/`after`, as the same
+  text reads without it), and cells, rows, flex items, parts stacked in an
+  inline box and comments between them stay as they are. It was read bare
+  as soon as a picture was there, losing the marks, and on `main` its cells
+  and flex items ran together.
+- HTML clipboard (also on earlier versions): the bold, italic, underline or
+  strikethrough a styled `<header>`, `<footer>`, `<nav>`, `<main>` or `<dl>`
+  states now applies to what it holds. It was read plain unless the
+  container also held both an image and a block. It applies weakly: an
+  element inside that turns it off -- a paragraph, item, cell or
+  span with `font-weight: 400`, as Chromium writes a Tailwind header's
+  tagline -- wins, and so does a tag inside; a `text-decoration: none` below
+  takes a decoration off, as it does everywhere in this reader. A chain of
+  these nested a thousand deep reads in linear time; it was quadratic, and
+  ran the heap out.
+- HTML clipboard (also on earlier versions): a style the reader cannot
+  resolve -- `inherit`, `unset`, `revert`, a `var()` with no fallback -- inside
+  a mark keeps the mark (`<b><span style="font-weight: inherit">` is bold, as
+  the browser draws it), `revert` on a mark's own tag keeps the tag's mark
+  (the user agent's value: `<b style="font-weight: revert">` is bold), and
+  `font-style: oblique <angle>` is italic. A weight or style written as a
+  custom property is read as its fallback, which is what a browser draws for
+  one the paste does not define: GitHub's `<strong>`
+  (`font-weight: var(--base-text-weight-semibold, 600)`) reads bold. A
+  decoration is read from its line keywords alone: a custom property named
+  after one (`line-through var(--underline-color)`) no longer reads as an
+  underline, and a keyword written in capitals counts in a DOM that keeps
+  them.
