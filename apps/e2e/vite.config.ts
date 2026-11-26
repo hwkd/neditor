@@ -15,7 +15,10 @@ export default defineConfig({
       : {},
   },
   server: {
-    port: 4390,
+    // E2E_PORT moves the harness off its default, for a machine where another
+    // checkout's harness already holds it -- `reuseExistingServer` would
+    // otherwise test that checkout's code.
+    port: Number(process.env.E2E_PORT ?? 4390),
     strictPort: true,
   },
   build: {

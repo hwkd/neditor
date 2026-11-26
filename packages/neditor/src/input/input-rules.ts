@@ -33,6 +33,8 @@ export const INPUT_RULES: readonly InputRule[] = [
   // Markdown reader: ```` ``` ```` typed in front of `` npm install``` `` is
   // the opening of a code span, not of a code block.
   { pattern: /^```$/, type: 'code', restOfLine: /^[^`\n]*(?:\n|$)/ },
+  // The fence a display equation is written between, as a code block's is.
+  { pattern: /^\$\$$/, type: 'math' },
   // `***` waits for a space: fired on the third star it took the opening of
   // `***bold italic***` and made a divider of it. `---` has no such reading.
   { pattern: /^(?:---|\*\*\* )$/, type: 'divider' },

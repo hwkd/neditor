@@ -1261,8 +1261,10 @@ describe('an escaped character in a link destination is that character', () => {
     expect(href('[x](https://a.test/?q=a\\b)')).toBe('https://a.test/?q=a\\b');
   });
 
-  test('in prose the escape set is unchanged', () => {
-    expect(richToPlainText(parseInlineMarkdown('cost \\$5'))).toBe('cost \\$5');
+  // `$` opens a formula, so `\$` is a literal dollar in prose, as the writer
+  // escapes one (the README's Math section).
+  test('in prose an escaped dollar is a dollar', () => {
+    expect(richToPlainText(parseInlineMarkdown('cost \\$5'))).toBe('cost $5');
   });
 });
 

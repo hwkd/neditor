@@ -37,6 +37,7 @@ const COMMAND_ORDER: readonly { readonly type: BlockType; readonly icon: string 
   { type: 'todo', icon: '☐' },
   { type: 'quote', icon: '❝' },
   { type: 'code', icon: '</>' },
+  { type: 'math', icon: '∑' },
   { type: 'callout', icon: '\u{1F4A1}' },
   { type: 'toggle', icon: '\u25B8' },
   { type: 'image', icon: '\u{1F5BC}' },

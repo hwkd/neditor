@@ -69,6 +69,7 @@ describe('slash menu commands', () => {
       'To-do list',
       'Quote',
       'Code',
+      'Equation',
       'Callout',
       'Toggle list',
       'Image',

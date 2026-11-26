@@ -2,6 +2,8 @@ import type { Block, BlockType } from '../model/document.ts';
 import { DEFAULT_CALLOUT_ICON, computeListNumbers, createBlock } from '../model/document.ts';
 import type { Mark, RichText, TextRun } from '../model/rich-text.ts';
 import {
+  MATH_ATOM,
+  isMathRun,
   isRichEmpty,
   normalizeRuns,
   richDelete,
@@ -12,6 +14,15 @@ import type { TableRows } from '../model/table.ts';
 import { normalizeTableRows } from '../model/table.ts';
 import { normalizeControlCharacters } from '../input/line-breaks.ts';
 import { sanitizeImageUrl, sanitizeUrl } from '../util/url.ts';
+import type { MathRenderer } from './math.ts';
+import {
+  MATH_ATTR,
+  MATH_BLOCK_ATTR,
+  canonicalizeMath,
+  drawMath,
+  isUnannotatedKatexMathml,
+  mathSourceOf,
+} from './math.ts';
 
 /**
  * The bridge between runs and the DOM.
@@ -235,10 +246,63 @@ function inLink(element: Element): boolean {
 /* Render                                                                      */
 /* -------------------------------------------------------------------------- */
 
-function renderRun(doc: Document, run: TextRun, breaks: boolean): Node {
+/** How {@link renderRichText} draws the parts of content that are not text. */
+export interface RenderOptions {
+  /**
+   * Draw for the live editor rather than for the clipboard: a formula becomes
+   * an uneditable atom drawn by `renderMath`, where the clipboard gets its TeX.
+   */
+  readonly editing?: boolean;
+  /** Draws a formula's TeX; without one the TeX itself is shown. */
+  readonly renderMath?: MathRenderer;
+  /**
+   * Write each line break as a `<br>` rather than a newline, for HTML that
+   * leaves this editor: its own view draws a newline under `pre-wrap`, but
+   * any other application collapses one in a paragraph to a space.
+   */
+  readonly breaks?: boolean;
+}
+
+/**
+ * An inline formula.
+ *
+ * In the editor it is an atom: `contenteditable="false"`, so the browser moves
+ * the caret over it whole and deletes it whole, and it occupies one character
+ * of offset (`view/selection.ts` counts it so) however much the renderer drew.
+ * Typing is read back with `parseRichText`, which takes the TeX from the
+ * attribute and never looks inside -- so the renderer's markup is never
+ * mistaken for text the user typed.
+ *
+ * On the clipboard it is the TeX between dollars, which is what another
+ * application can show, with the attribute this reader takes it back from.
+ */
+function renderMathRun(doc: Document, tex: string, options: RenderOptions): Node {
+  const span = doc.createElement('span');
+  span.setAttribute(MATH_ATTR, tex);
+
+  if (!options.editing) {
+    span.textContent = `$${tex}$`;
+    return span;
+  }
+
+  span.className = 'neditor-math';
+  span.contentEditable = 'false';
+
+  if (!drawMath(span, tex, false, options.renderMath)) {
+    span.dataset.neditorMathSource = '';
+  }
+
+  return span;
+}
+
+function renderRun(doc: Document, run: TextRun, options: RenderOptions = {}): Node {
+  if (isMathRun(run)) {
+    return renderMathRun(doc, run.math ?? '', options);
+  }
+
   let node: Node = doc.createTextNode(run.text);
 
-  if (breaks && run.text.includes('\n')) {
+  if (options.breaks && run.text.includes('\n')) {
     const lines = doc.createDocumentFragment();
 
     for (const [index, line] of run.text.split('\n').entries()) {
@@ -286,21 +350,19 @@ function renderRun(doc: Document, run: TextRun, breaks: boolean): Node {
  * Empty content yields an empty fragment rather than an empty text node, so the
  * `:empty` placeholder rule still matches.
  *
- * `breaks` writes each line break as a `<br>` rather than a newline, for HTML
- * that leaves this editor: its own view draws a newline under `pre-wrap`, but
- * any other application collapses one in a paragraph to a space.
+ * `options.breaks` writes each line break as a `<br>` (`RenderOptions`).
  */
 export function renderRichText(
   doc: Document,
   content: readonly TextRun[],
-  breaks = false,
+  options: RenderOptions = {},
 ): DocumentFragment {
   const fragment = doc.createDocumentFragment();
   let last: TextRun | undefined;
 
   for (const run of content) {
     if (run.text.length > 0) {
-      fragment.append(renderRun(doc, run, breaks));
+      fragment.append(renderRun(doc, run, options));
       last = run;
     }
   }
@@ -926,7 +988,23 @@ function walk(
     const element = child as Element;
     const tag = tagNameOf(element);
 
-    if (SKIP_TAGS.has(tag)) {
+    // A formula is its TeX. Whatever draws it -- the editor's renderer, KaTeX
+    // on the page it was copied from -- is never read: that subtree holds the
+    // formula twice over (MathML for assistive technology, HTML for the eye)
+    // and none of it is text anyone typed. A display equation met inside a
+    // line is read as a formula in that line.
+    const math = mathSourceOf(element);
+
+    if (math) {
+      if (math.tex.length > 0) {
+        out.push({ text: MATH_ATOM, math: math.tex });
+        solidTexts += 1;
+      }
+
+      continue;
+    }
+
+    if (SKIP_TAGS.has(tag) || isUnannotatedKatexMathml(element)) {
       continue;
     }
 
@@ -1135,6 +1213,8 @@ const BLOCK_TAGS_OUT: Readonly<Record<BlockType, string>> = {
   todo: 'li',
   quote: 'blockquote',
   code: 'pre',
+  // Carries its TeX in an attribute; see `blocksToHtml`.
+  math: 'div',
   // A callout is a blockquote elsewhere; the attribute is what makes it exact.
   callout: 'blockquote',
   toggle: 'details',
@@ -1176,7 +1256,7 @@ function tableSections(doc: Document, rows: TableRows): HTMLElement[] {
     for (const cell of cells) {
       const container = doc.createElement(tag);
       container.style.whiteSpace = 'pre-wrap';
-      container.append(renderRichText(doc, cell, true));
+      container.append(renderRichText(doc, cell, { breaks: true }));
       tr.append(container);
     }
 
@@ -1234,7 +1314,7 @@ export function blocksToHtml(doc: Document, blocks: readonly Block[]): string {
    */
   const textInto = (element: HTMLElement, content: RichText): void => {
     element.style.whiteSpace = 'pre-wrap';
-    element.append(renderRichText(doc, content, true));
+    element.append(renderRichText(doc, content, { breaks: true }));
   };
 
   /** Open lists, innermost last. */
@@ -1279,6 +1359,18 @@ export function blocksToHtml(doc: Document, blocks: readonly Block[]): string {
 
       if (block.type === 'table') {
         element.append(...tableSections(doc, block.rows ?? []));
+        host.append(element);
+        continue;
+      }
+
+      // The TeX, exactly, in the attribute the reader takes it from; and
+      // between `$$` as the text, which is what an application that knows
+      // nothing of this editor can show -- and what a Markdown-minded one
+      // will render.
+      if (block.type === 'math') {
+        const tex = richToPlainText(block.content);
+        element.setAttribute(MATH_BLOCK_ATTR, tex);
+        element.textContent = `$$${tex}$$`;
         host.append(element);
         continue;
       }
@@ -1369,7 +1461,7 @@ export function blocksToHtml(doc: Document, blocks: readonly Block[]): string {
     }
 
     item.style.whiteSpace = 'pre-wrap';
-    const text = renderRichText(doc, block.content, true);
+    const text = renderRichText(doc, block.content, { breaks: true });
 
     // Text that is only whitespace reads as the HTML's own formatting, and an
     // item with nothing else in it but a nested list is read as a holder for
@@ -5665,6 +5757,16 @@ function visitBlocksInner(
       continue;
     }
 
+    // `canonicalizeMath` has already put every display equation that stands
+    // on its own -- ours, KaTeX's, MathML's -- into this one spelling.
+    if (element.hasAttribute(MATH_BLOCK_ATTR)) {
+      flushInline();
+      out.push(
+        createBlock('math', element.getAttribute(MATH_BLOCK_ATTR) ?? '', depthOf(element, depth)),
+      );
+      continue;
+    }
+
     const heading = HEADING_TYPES[tag];
 
     if (heading) {
@@ -5933,9 +6035,12 @@ function dropSelectionEdges(fragment: DocumentFragment): void {
     (node as Element).classList.contains('Apple-interchange-newline');
   // Remembered, since the walk down an edge asks it again at every level.
   const empty = new Map<Node, boolean>();
+  // An equation's TeX is in its attribute, so an empty one is still a block
+  // the reader selected, whatever it draws once its spelling is canonical.
   const isEmptyBlock = (node: Node): boolean =>
     node.nodeType === ELEMENT_NODE &&
     EDGE_BLOCK_TAGS.has((node as Element).localName) &&
+    !(node as Element).hasAttribute(MATH_BLOCK_ATTR) &&
     declaredWhiteSpace(node as Element) === null &&
     drawsNothing(node, empty);
   const edgeChild = (parent: Node, from: 'start' | 'end'): Node | null => {
@@ -6261,6 +6366,7 @@ export function blocksFromHtml(
   const inert = inertDocument(doc);
   const template = inert.createElement('template');
   template.innerHTML = html;
+  canonicalizeMath(doc, template.content, html);
 
   const out: Block[] = [];
   // Reset rather than trust the last run: an exception thrown out of a walk
@@ -6377,6 +6483,7 @@ export function parseRichTextFromHtml(doc: Document, html: string): RichText {
   // An inert document's template, as in `blocksFromHtml`.
   const template = inertDocument(doc).createElement('template');
   template.innerHTML = html;
+  canonicalizeMath(doc, template.content, html);
 
   return parseRichText(template.content);
 }
