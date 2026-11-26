@@ -448,3 +448,88 @@ describe('the selection never holds a block the reader cannot see', () => {
     expect(texts(editor)).toEqual(['toggle', 'child', 'last']);
   });
 });
+
+/**
+ * Round 10 of the math audit (not a math defect). Removing blocks above a
+ * collapsed toggle can pull the toggle shallower, and the depth re-clamp used
+ * to look only at the block immediately above: the toggle's hidden child came
+ * up one level with it, but the toggle's *sibling* after that run stayed where
+ * it was -- now one level deeper than the toggle, so inside it. The block
+ * vanished under a collapsed toggle it had never been part of, and the reader
+ * had no way to tell where it went.
+ */
+describe('a re-clamp never hides a block under a collapsed toggle', () => {
+  const visibleText = (editor: NEditor): string[] => hosts(editor).map((h) => h.textContent ?? '');
+
+  /** `parent > toggle (collapsed) > hidden`, then `sibling` beside the toggle. */
+  function underParent(): Block[] {
+    return [
+      block({ content: [{ text: 'root' }] }),
+      block({ depth: 1, content: [{ text: 'parent' }] }),
+      block({ depth: 2, type: 'toggle', collapsed: true, content: [{ text: 'toggle' }] }),
+      block({ depth: 3, content: [{ text: 'hidden' }] }),
+      block({ depth: 2, content: [{ text: 'sibling' }] }),
+    ];
+  }
+
+  /** The same shape one level down, under a `branch > leaf` pair to select. */
+  function underBranch(): Block[] {
+    return [
+      block({ content: [{ text: 'root' }] }),
+      block({ depth: 1, content: [{ text: 'branch' }] }),
+      block({ depth: 2, content: [{ text: 'leaf' }] }),
+      block({ depth: 3, type: 'toggle', collapsed: true, content: [{ text: 'toggle' }] }),
+      block({ depth: 4, content: [{ text: 'hidden' }] }),
+      block({ depth: 3, content: [{ text: 'sibling' }] }),
+    ];
+  }
+
+  test('deleting the parent keeps the sibling beside the toggle', () => {
+    const editor = mount(underParent());
+    editor.selectBlocks([idFor(editor, 'parent')]);
+
+    press(editor.element, 'Backspace');
+
+    expect(texts(editor)).toEqual(['root', 'toggle', 'hidden', 'sibling']);
+    expect(depths(editor)).toEqual([0, 1, 2, 1]);
+    expect(visibleText(editor)).toEqual(['root', 'toggle', 'sibling']);
+  });
+
+  test('pasting fewer, shallower blocks over the selection keeps it too', () => {
+    const editor = mount(underBranch());
+    editor.selectBlocks([idFor(editor, 'branch'), idFor(editor, 'leaf')]);
+
+    const data = new DataTransfer();
+    data.setData('text/plain', 'pasted');
+    editor.element.dispatchEvent(
+      new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }),
+    );
+
+    expect(texts(editor)).toEqual(['root', 'pasted', 'toggle', 'hidden', 'sibling']);
+    expect(depths(editor)).toEqual([0, 1, 2, 3, 2]);
+    expect(visibleText(editor)).toEqual(['root', 'pasted', 'toggle', 'sibling']);
+  });
+
+  test('typing over the selection keeps it too', () => {
+    const editor = mount(underBranch());
+    editor.selectBlocks([idFor(editor, 'branch'), idFor(editor, 'leaf')]);
+
+    press(editor.element, 'x');
+
+    expect(texts(editor)).toEqual(['root', 'x', 'toggle', 'hidden', 'sibling']);
+    expect(depths(editor)).toEqual([0, 1, 2, 3, 2]);
+    expect(visibleText(editor)).toEqual(['root', 'x', 'toggle', 'sibling']);
+  });
+
+  test('undo brings the original shape back in one step', () => {
+    const editor = mount(underParent());
+    editor.selectBlocks([idFor(editor, 'parent')]);
+    press(editor.element, 'Backspace');
+
+    editor.undo();
+
+    expect(texts(editor)).toEqual(['root', 'parent', 'toggle', 'hidden', 'sibling']);
+    expect(depths(editor)).toEqual([0, 1, 2, 3, 2]);
+    expect(editor.canUndo).toBe(false);
+  });
+});
