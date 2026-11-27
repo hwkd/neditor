@@ -124,14 +124,15 @@ that changes what you store or what other applications receive is listed first.
   `<figure data-neditor-image>` instead of a broken `<img src="">`.
 - **Touch.** A finger dragged across blocks no longer selects them (the browser
   scrolls); long press is the touch way into block selection.
-- **Stored depths (`normalizeDocument`, `normalizeDepths`).** A depth below
-  zero, or one that is not a number, is read as the root: a `NaN` depth made
-  every block after it nest one level further, and `-2` then `-1` loaded as a
-  parent and its child. A depth past the 32-level limit is no longer cut to 32
-  before the tree is read, so `[0, 35, 40]` loads as `[0, 1, 2]` -- a
-  collapsed toggle stored that deep keeps what it hides -- where it loaded as
-  `[0, 1, 1]`, and showed its child. Documents the editor wrote load
-  unchanged.
+- **Stored depths (`normalizeDocument`).** A depth past the 32-level limit is
+  no longer cut to 32 before the tree is read, so `[0, 35, 40]` loads as
+  `[0, 1, 2]` -- a collapsed toggle stored that deep keeps what it hides --
+  where it loaded as `[0, 1, 1]`, and showed its child. Documents the editor
+  wrote load unchanged.
+- **`normalizeDepths`**, called directly, reads a depth that is not a positive
+  number as the root, as `normalizeDocument` already did: a `NaN` depth made
+  every block after it nest one level further, `-2` then `-1` came back a
+  parent and its child, and numeric strings were compared as text.
 - **Clipboard: a block copy keeps its nesting** when a later block is shallower
   than the first (`sliceDocument`, so the `text/html` and `text/plain` of a
   block copy): copying `A(2) B(3) C(1) D(2)` wrote D beside C instead of
@@ -195,19 +196,23 @@ that changes what you store or what other applications receive is listed first.
   belonged to the moved block. A selection spanning depths is measured from its
   shallowest block, and going up it goes back to the first block at that depth
   or above. Moving past a shallower block is still one step, which is how a
-  block leaves a list.
+  block leaves a list. A block whose parent sat in a gap of the selection stays
+  with that parent, and the end of the selection that moves is brought into
+  view.
 - **A duplicate goes after the original's children** (`duplicateBlocks`, and
   `Cmd`/`Ctrl`+`D`), which stay the original's: it went between the block and
   its children, which went to the copy. Copies keep their own nesting from the
   selection's shallowest depth, so a list item duplicated with the heading or
   toggle after it is no longer given to that block.
-- **`Tab` over a block selection indents every selected block that can**, under
-  the first: when the first could not move, nothing did. `indentBlocks` clamps
-  each block against the one above it as already moved, hands back a block it
-  cannot move as the same object, with its children where they were (the first
-  item of a nested list came back level with its child), and leaves a selected
-  block put when it, or a selected block nested under it, would pass the
-  32-level limit.
+- **`Tab` over a block selection indents every selected block that can**: when
+  the first could not move, nothing did; now the rest go under it.
+  `indentBlocks` clamps each block against the one above it as already moved,
+  hands back a block it cannot move as the same object, with its children where
+  they were (the first item of a nested list came back level with its child),
+  and leaves a selected block put when it, or a block nested under it through
+  selected blocks, would pass the 32-level limit. A collapsed toggle's hidden
+  children count as selected with it, so a selected parent no longer indents
+  away from such a toggle just under the limit.
 
 ### Fixed
 

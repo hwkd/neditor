@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import type { Block } from './index.ts';
 import { blockText, createEditor, withHiddenDescendants } from './index.ts';
@@ -51,6 +51,10 @@ function mount(blocks: Block[], options: Record<string, unknown> = {}): NEditor 
 const hosts = (editor: NEditor): HTMLElement[] => [
   ...editor.element.querySelectorAll<HTMLElement>('.neditor-block__content'),
 ];
+
+/** The rendered host showing `text`: a reader can only press keys in a block on screen. */
+const hostOf = (editor: NEditor, text: string): HTMLElement =>
+  hosts(editor).find((h) => h.textContent === text)!;
 
 const texts = (editor: NEditor): string[] => editor.getDocument().blocks.map(blockText);
 
@@ -536,8 +540,6 @@ describe('a re-clamp never hides a block under a collapsed toggle', () => {
 });
 
 describe("moving a block past a sibling takes it past the sibling's children", () => {
-  const hostOf = (editor: NEditor, text: string): HTMLElement =>
-    hosts(editor).find((h) => h.textContent === text)!;
   const collapsed = (editor: NEditor, text: string): boolean | undefined =>
     editor.getDocument().blocks.find((b) => blockText(b) === text)?.collapsed;
 
@@ -605,10 +607,6 @@ describe("moving a block past a sibling takes it past the sibling's children", (
 });
 
 describe("moves and duplicates are measured from the selection's root", () => {
-  const visibleText = (editor: NEditor): string[] => hosts(editor).map((h) => h.textContent ?? '');
-  const hostOf = (editor: NEditor, text: string): HTMLElement =>
-    hosts(editor).find((h) => h.textContent === text)!;
-
   test('a selection ending on a header steps over the next section whole', () => {
     const editor = mount([
       block({ content: [{ text: 'A' }] }),
@@ -641,7 +639,7 @@ describe("moves and duplicates are measured from the selection's root", () => {
     expect(depths(editor)).toEqual([0, 1, 1]);
   });
 
-  test('a parent moving down passes its own first child one slot at a time', () => {
+  test('a parent moving down passes its first child and keeps its second', () => {
     const editor = mount([
       block({ type: 'toggle', content: [{ text: 'A' }] }),
       block({ depth: 1, content: [{ text: 'a1' }] }),
@@ -653,7 +651,7 @@ describe("moves and duplicates are measured from the selection's root", () => {
     press(hostOf(editor, 'A'), 'ArrowDown', { metaKey: true, shiftKey: true });
 
     expect(texts(editor)).toEqual(['a1', 'A', 'a2', 'B']);
-    expect(visibleText(editor)).toEqual(['a1', 'A', 'a2', 'B']);
+    expect(depths(editor)).toEqual([0, 0, 1, 0]);
   });
 
   test('duplicating an item and the header after it does not hand the copy to the header', () => {
@@ -673,7 +671,9 @@ describe("moves and duplicates are measured from the selection's root", () => {
     expect(blocks.map(blockText)).toEqual(['A', 'a1', 'a2', 'B', 'b1', 'a2', 'B', 'b1', 'Z']);
     expect(blocks.map((b) => b.depth)).toEqual([0, 1, 1, 0, 1, 0, 0, 1, 0]);
     expect(blocks[3]?.collapsed).toBe(true);
-    expect(editor.getSelectedBlocks()).toHaveLength(2);
+    // The copies are what is selected, the copied toggle still folded.
+    expect(blocks[6]?.collapsed).toBe(true);
+    expect(editor.getSelectedBlocks()).toEqual([blocks[5]!.id, blocks[6]!.id]);
   });
 });
 
@@ -775,6 +775,9 @@ describe('Tab indents every selected block that can', () => {
 
     press(editor.element, 'Tab');
 
+    // b cannot go under a, which already holds it; c goes under b. d, c's
+    // child, was not selected and keeps its depth, so it is now c's sibling
+    // -- as Tab on c alone leaves it: a visible child moves only when selected.
     expect(depths(editor)).toEqual([0, 1, 2, 2, 1]);
   });
 });
@@ -837,6 +840,108 @@ describe('a Tab that moves nothing is no edit', () => {
     expect(press(editor.element, 'Tab')).toBe(false);
     expect(depths(editor)).toEqual([0, 1]);
     expect(changes()).toBe(0);
+    expect(editor.canUndo).toBe(false);
+  });
+});
+
+describe('a move with a gap in its selection takes no block from its parent', () => {
+  test('down: a block whose parent sat in the gap stays with that parent', () => {
+    const editor = mount([
+      block({ content: [{ text: 'a' }] }),
+      block({ content: [{ text: 'b' }] }),
+      block({ depth: 1, content: [{ text: 'c' }] }),
+      block({ depth: 1, content: [{ text: 'd' }] }),
+      block({ depth: 1, content: [{ text: 'e' }] }),
+    ]);
+    editor.selectBlocks([idFor(editor, 'a'), idFor(editor, 'c')]);
+
+    press(editor.element, 'ArrowDown', { metaKey: true, shiftKey: true });
+
+    // d and e were b's children and still are: a and c land after them.
+    expect(texts(editor)).toEqual(['b', 'd', 'e', 'a', 'c']);
+    expect(depths(editor)).toEqual([0, 1, 1, 0, 1]);
+  });
+});
+
+describe('a block-selection move brings the end it moves into view', () => {
+  function revealed(run: () => void): string[] {
+    const shown: string[] = [];
+    const spy = vi
+      .spyOn(HTMLElement.prototype, 'scrollIntoView')
+      .mockImplementation(function (this: HTMLElement) {
+        const id = this.closest('[data-block-id]')?.getAttribute('data-block-id');
+
+        if (id) {
+          shown.push(id);
+        }
+      });
+
+    try {
+      run();
+    } finally {
+      spy.mockRestore();
+    }
+
+    return shown;
+  }
+
+  // One step can pass a whole section now, so the selection can land well
+  // past the window's edge; happy-dom has no layout, so what is pinned is
+  // which block is asked to come into view, last.
+  const doc = (): Block[] => [
+    block({ content: [{ text: 'P' }] }),
+    block({ content: [{ text: 'Q' }] }),
+    block({ type: 'toggle', content: [{ text: 'T' }] }),
+    ...Array.from({ length: 5 }, (_, i) => block({ depth: 1, content: [{ text: `t${i}` }] })),
+  ];
+
+  test('down: the last selected block', () => {
+    const editor = mount(doc());
+    editor.selectBlocks([idFor(editor, 'P'), idFor(editor, 'Q')]);
+
+    const shown = revealed(() =>
+      press(editor.element, 'ArrowDown', { metaKey: true, shiftKey: true }),
+    );
+
+    expect(texts(editor).slice(-2)).toEqual(['P', 'Q']);
+    expect(shown.at(-1)).toBe(idFor(editor, 'Q'));
+  });
+
+  test('up: the first selected block', () => {
+    const editor = mount([...doc().slice(2), ...doc().slice(0, 2)]);
+    editor.selectBlocks([idFor(editor, 'P'), idFor(editor, 'Q')]);
+
+    const shown = revealed(() =>
+      press(editor.element, 'ArrowUp', { metaKey: true, shiftKey: true }),
+    );
+
+    expect(texts(editor).slice(0, 2)).toEqual(['P', 'Q']);
+    expect(shown.at(-1)).toBe(idFor(editor, 'P'));
+  });
+});
+
+describe('Tab at the depth ceiling leaves a selected parent with its selected child', () => {
+  test('a parent and its collapsed toggle child stay put when the toggle cannot indent', () => {
+    // c30 lets R indent under it, but R carries T, and T carries the hidden
+    // h past MAX_DEPTH: none of them may move.
+    const editor = mount([
+      ...Array.from({ length: MAX_DEPTH - 1 }, (_, i) =>
+        block({ depth: i, content: [{ text: `c${i}` }] }),
+      ),
+      block({ depth: MAX_DEPTH - 2, content: [{ text: 'R' }] }),
+      block({
+        type: 'toggle',
+        collapsed: true,
+        depth: MAX_DEPTH - 1,
+        content: [{ text: 'T' }],
+      }),
+      block({ depth: MAX_DEPTH, content: [{ text: 'h' }] }),
+    ]);
+    const before = depths(editor);
+    editor.selectBlocks([idFor(editor, 'R'), idFor(editor, 'T')]);
+
+    expect(press(editor.element, 'Tab')).toBe(false);
+    expect(depths(editor)).toEqual(before);
     expect(editor.canUndo).toBe(false);
   });
 });

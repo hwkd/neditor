@@ -1769,16 +1769,19 @@ const MARK_SHORTCUTS: Readonly<Record<string, Mark>> = {
  * The ids an indent moves: each visible anchor with whatever it hides, minus
  * any anchor the indent cannot move.
  *
- * `indentBlocks` clamps each block on its own -- at depth 0, and at one level
- * below its predecessor. An anchor that cannot move would still hand its
- * hidden children over to move alone: Shift+Tab on a collapsed toggle at depth
- * 0 pulled them out of it, and Tab on one with nothing to nest under turned
- * its answers into a staircase, one press at a time, inside a fold nobody
- * could see -- each press swallowed, so the key that leaves the editor did
- * not. Whether an anchor can move is asked of the clamp itself, by indenting
- * the anchors alone, and then of its hidden children: they shift with it, so
- * at the depth ceiling an anchor that could go one deeper still stays when
- * they could not. Children the reader selected still move on their own.
+ * `indentBlocks` clamps each block on its own -- at depth 0, and one level
+ * below the block above it as already moved -- and keeps a selected block put
+ * when it, or a block nested under it through selected blocks, would pass
+ * MAX_DEPTH. An anchor that cannot move would still hand its hidden children
+ * over to move alone: Shift+Tab on a collapsed toggle at depth 0 pulled them
+ * out of it, and Tab on one with nothing to nest under turned its answers into
+ * a staircase, one press at a time, inside a fold nobody could see -- each
+ * press swallowed, so the key that leaves the editor did not. Whether an
+ * anchor can move is asked of the clamp itself, with each anchor's hidden
+ * children selected along with it, as they are at the edit: at the ceiling a
+ * fold that cannot go one deeper then keeps its toggle, and the selected
+ * blocks the toggle is nested under, where they are. Children the reader
+ * selected still move on their own.
  */
 function indentTargets(
   blocks: readonly Block[],
@@ -1786,22 +1789,9 @@ function indentTargets(
   delta: number,
 ): Set<string> {
   const ids = new Set(anchors);
-  const probe = indentBlocks(blocks, ids, delta);
+  const probe = indentBlocks(blocks, withHiddenDescendants(blocks, ids), delta);
   const movable = blocks
     .filter((block, index) => ids.has(block.id) && probe[index]?.depth !== block.depth)
-    .filter((block) => {
-      // At the depth ceiling an anchor can move where its hidden children
-      // cannot: they would be clamped beside it, out of the fold.
-      const shift = (findBlock(probe, block.id)?.depth ?? block.depth) - block.depth;
-      const hidden = withHiddenDescendants(blocks, [block.id]);
-
-      return blocks.every(
-        (other) =>
-          other.id === block.id ||
-          !hidden.has(other.id) ||
-          (other.depth + shift >= 0 && other.depth + shift <= MAX_DEPTH),
-      );
-    })
     .map((block) => block.id);
 
   return withHiddenDescendants(blocks, movable);
@@ -5626,11 +5616,11 @@ export class NEditor {
       return;
     }
 
-    // The copies go after the last selected block, in document order. With a
-    // gap in the selection, a copied collapsed toggle lands in front of the
-    // last block's later siblings, which fold into it -- and in front of the
-    // copies that follow it, which are what the user asked to see. The copy of
-    // every block the reader selected must be on screen.
+    // The copies go after everything nested under the selection, in document
+    // order, so nothing after them folds into a copied collapsed toggle; but
+    // one can still lie in front of the copies that follow it, which are what
+    // the user asked to see. The copy of every block the reader selected must
+    // be on screen.
     const sources = this.#blocks.filter((block) => edit.has(block.id));
     const shown = result.ids.filter((_, index) => this.#selected.has(sources[index]?.id ?? ''));
 
@@ -5704,16 +5694,22 @@ export class NEditor {
     // Only a move that happened: against the edge of the document `#commit`
     // keeps the array it had, and nothing moved to be announced.
     if (this.#blocks !== before) {
+      // One step can pass a whole section, so the end that moves is brought
+      // into view, as Shift+arrow brings the end it grows: left alone, the
+      // selection landed past the window and the next key acted out of sight.
+      const ids = this.#orderedSelection();
+      const end = direction === -1 ? ids[0] : ids.at(-1);
+      this.#reveal(end === undefined ? null : this.#renderer.getView(end)?.root);
       this.#announce(direction === -1 ? this.#labels.blocksMovedUp : this.#labels.blocksMovedDown);
     }
   }
 
   /**
-   * Moves blocks one visible slot.
-   *
-   * One slot as the reader sees it: what moves carries the children it hides,
-   * and it steps clear over a collapsed toggle rather than into the gap between
-   * that toggle and its own children, where the next depth clamp adopts it.
+   * Moves blocks past the next visible block, as `moveVisibleBlocks` measures
+   * it: what moves carries the children it hides, and it steps clear over a
+   * block and what is nested under it -- a collapsed toggle included -- rather
+   * than into the gap between that block and its own children, where the next
+   * depth clamp adopts them.
    */
   #moveVisible(ids: ReadonlySet<string>, direction: 1 | -1): void {
     // A move against the edge of the document comes back unchanged, and `#commit`

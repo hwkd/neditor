@@ -86,6 +86,19 @@ describe('normalizeDepths', () => {
     expect(depths(normalizeDepths(blocks))).toEqual([0, 0]);
   });
 
+  test('a depth that is not a number is the root, even a numeric string', () => {
+    // Compared as text, "10" sorts before "9", and both came back nested under a;
+    // a host's stored JSON can carry either.
+    const { blocks } = build(['a', 0], ['b', 0], ['c', 0]);
+    const loose = [
+      blocks[0]!,
+      { ...blocks[1]!, depth: '9' as unknown as number },
+      { ...blocks[2]!, depth: '10' as unknown as number },
+    ];
+
+    expect(depths(normalizeDepths(loose))).toEqual([0, 0, 0]);
+  });
+
   test('a NaN depth is the root, and does not swallow what follows it', () => {
     const { blocks } = build(['a', 0], ['b', Number.NaN], ['c', 0]);
 

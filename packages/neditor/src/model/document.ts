@@ -427,13 +427,23 @@ export function moveVisibleBlocks(
     while (landingAt > 0 && visible[landingAt]!.depth > depth) {
       landingAt -= 1;
     }
-  } else if (visible[to + 1]!.depth >= depth) {
-    // The block below goes past with everything nested under it. That covers
-    // an unselected child of a selected block too: one slot past it is the gap
-    // before its own children, and they went to the mover.
-    const over = visible[to + 1]!.depth;
+  } else {
+    // The block below goes past with everything nested under it: past every
+    // block deeper than the selection whose parent stays behind. That covers
+    // an unselected child of a selected block too -- one slot past it is the
+    // gap before its own children, and they went to the mover -- and a block
+    // whose parent sat in a gap of the selection, which landing before it
+    // took from that parent. A child of a moving block is where the walk
+    // stops: it goes on belonging to that block. Below a block shallower
+    // than the selection, the first block is no deeper than the selection,
+    // so the walk takes nothing, and that block is one slot.
+    const parents = parentIndexes(visible);
 
-    while (visible[landingAt] && visible[landingAt]!.depth > over) {
+    while (
+      visible[landingAt] &&
+      visible[landingAt]!.depth > depth &&
+      !moving.has(visible[parents[landingAt]!]?.id ?? '')
+    ) {
       landingAt += 1;
     }
   }
@@ -441,6 +451,22 @@ export function moveVisibleBlocks(
   const landing = visible[landingAt];
 
   return moveBlocks(blocks, moving, landing ? findBlockIndex(blocks, landing.id) : blocks.length);
+}
+
+/** Each block's parent position in `blocks`: the nearest shallower block above it, or -1. */
+function parentIndexes(blocks: readonly Block[]): number[] {
+  const open: number[] = [];
+
+  return blocks.map((block, at) => {
+    while (open.length > 0 && blocks[open.at(-1)!]!.depth >= block.depth) {
+      open.pop();
+    }
+
+    const parent = open.at(-1) ?? -1;
+    open.push(at);
+
+    return parent;
+  });
 }
 
 /** Plain-text projection of a block, for measuring and for input rules. */
@@ -933,10 +959,10 @@ export function normalizeDepths(blocks: readonly Block[]): Block[] {
 
   return blocks.map((block) => {
     // Below zero is the root. Read as given, -2 then -1 made the second a
-    // child of the first; and `> 0` also sends NaN to the root, where compared
-    // as given it was deeper than nothing and shallower than nothing, and
-    // every block after it nested one level further.
-    const given = block.depth > 0 ? block.depth : 0;
+    // child of the first; NaN, compared as given, was deeper than nothing and
+    // shallower than nothing, and every block after it nested one level
+    // further; and a numeric string, from a host's JSON, compared as text.
+    const given = typeof block.depth === 'number' && block.depth > 0 ? block.depth : 0;
 
     while (givenDepths.length > 0 && givenDepths.at(-1)! >= given) {
       givenDepths.pop();
@@ -1087,8 +1113,8 @@ export function duplicateBlocks(
  * Each selected block moves by `delta` as far as it legally can -- at depth 0,
  * and one level below the block above it *as already moved* -- the clamp
  * `indentBlock` applies to one. A block that cannot move keeps its depth, and
- * is handed back as the same object, which `sameBlocks` relies on; so is
- * everything after it. Shifted blindly and re-clamped afterwards, the first
+ * is handed back as the same object, which `sameBlocks` relies on, with its
+ * children where they were. Shifted blindly and re-clamped afterwards, the first
  * item of a nested list reached its own child's depth, the tree-keeping
  * re-clamp read the two as siblings, and the child came out from under it;
  * and a run whose first block could not move indented nothing, since each
@@ -1098,10 +1124,11 @@ export function duplicateBlocks(
  * absorbed by the clamp for one block and not the next. The editor's
  * `indentTargets` asks this same clamp which blocks would move.
  *
- * A selected block also stays put when indenting it would take it, or a
- * selected block nested under it, past MAX_DEPTH: the re-clamp would put the
- * deeper one at its parent's depth, so a collapsed toggle at 31 went to 32 and
- * its hidden child landed beside it, in view, leaving the toggle empty.
+ * A selected block also stays put when indenting it by `delta` would take it,
+ * or a block nested under it through selected blocks, past MAX_DEPTH -- even
+ * where a smaller step would fit: the re-clamp would put the deeper one at its
+ * parent's depth, so a collapsed toggle at 31 went to 32 and its hidden child
+ * landed beside it, in view, leaving the toggle empty.
  */
 export function indentBlocks(
   blocks: readonly Block[],

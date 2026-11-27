@@ -784,33 +784,38 @@ block's text, and a second `⌘A` takes every block.
 
 With blocks selected:
 
-| Key                            | Action                                    |
-| ------------------------------ | ----------------------------------------- |
-| `↑` / `↓`                      | Move the selection.³                      |
-| `Shift` + `↑`/`↓`              | Extend it.                                |
-| `⌘`/`Ctrl` + `Shift` + `↑`/`↓` | Move the blocks, as one contiguous group. |
-| `Tab` / `Shift` + `Tab`        | Indent / outdent each one.²               |
-| `Backspace` / `Delete`         | Delete them.                              |
-| `⌘`/`Ctrl` + `D`               | Duplicate them.                           |
-| `⌘`/`Ctrl` + `C` / `X`         | Copy or cut, as Markdown and HTML.        |
-| Any character                  | Replace them with a paragraph holding it. |
-| `Enter`                        | Drop back into the text of the last one.¹ |
-| `Escape`                       | Leave the editor.                         |
+| Key                            | Action                                     |
+| ------------------------------ | ------------------------------------------ |
+| `↑` / `↓`                      | Move the selection.³                       |
+| `Shift` + `↑`/`↓`              | Extend it.                                 |
+| `⌘`/`Ctrl` + `Shift` + `↑`/`↓` | Move the blocks, as one contiguous group.⁴ |
+| `Tab` / `Shift` + `Tab`        | Indent / outdent each one.²                |
+| `Backspace` / `Delete`         | Delete them.                               |
+| `⌘`/`Ctrl` + `D`               | Duplicate them, after what they hold.      |
+| `⌘`/`Ctrl` + `C` / `X`         | Copy or cut, as Markdown and HTML.         |
+| Any character                  | Replace them with a paragraph holding it.  |
+| `Enter`                        | Drop back into the text of the last one.¹  |
+| `Escape`                       | Leave the editor.                          |
 
 ¹ The last one that has text: a divider has no caret to take, so `Enter` walks
 back through the selection and, if none of it can hold one, keeps the selection
 — unless that is a divider ending the document, when `Enter` opens a paragraph
 after it.
 
-² Each block is shifted one level on its own and then re-clamped, so the
-selection's shape is not preserved: a block already at the root stays there
-while its selected children come out to meet it, and none goes more than one
-level below the block above it. When nothing can move, `Tab` is not swallowed: the caret goes back into the
+² Each block moves one level on its own, as far as it can: never more than one
+level below the block above it as that block now stands, nor past the depth
+limit. So the selection's shape is not preserved: a block already at the root
+stays there while its selected children come out to meet it, and when the
+first block cannot indent, the rest indent under it. When nothing can move, `Tab` is not swallowed: the caret goes back into the
 last selected block (the first, for `Shift`+`Tab`) and focus moves on from
 there, exactly as it would from the text of that block.
 
 ³ `↓` on a divider that ends the document opens a paragraph after it: it is the
 keyboard's only way below one.
+
+⁴ A step passes the next block together with everything nested under it,
+unless that block is shallower than the selection: then it is one step, which
+is how a block moves out of a list.
 
 Undoing an edit made on a block selection brings the selection back with the
 blocks; deleting one lands the caret on the nearest block that can hold it (the
