@@ -360,7 +360,8 @@ export function withHiddenDescendants(
 }
 
 /**
- * Moves a selection one *visible* slot up or down.
+ * Moves a selection past the next *visible* block up or down -- past that
+ * block's visible children too, when it is not shallower than the selection.
  *
  * The step is measured in visible blocks rather than array entries, because
  * those are two different orders. A collapsed toggle occupies one slot however
@@ -371,8 +372,9 @@ export function withHiddenDescendants(
  * children it hides, where the next depth clamp adopts it.
  *
  * A selection with gaps in it moves as one contiguous group, the way
- * {@link moveBlocks} lands one: the step is taken from its first or last block,
- * and the blocks that sat in its gaps are left behind.
+ * {@link moveBlocks} lands one: the step is taken from its first or last block
+ * (and its depth from its shallowest), and the blocks that sat in its gaps are
+ * left behind.
  */
 export function moveVisibleBlocks(
   blocks: readonly Block[],
@@ -404,9 +406,67 @@ export function moveVisibleBlocks(
   // The landing gap, in full-document coordinates. Going up that is the slot
   // the block above occupies; going down it is the slot two below, which is the
   // first position past the stepped-over block *and* everything it hides.
-  const landing = direction === -1 ? visible[from - 1] : visible[to + 2];
+  //
+  // A block passed at the selection's depth or deeper is stepped over whole:
+  // its visible children too, as it already was with the hidden ones. One slot
+  // past a block with children is the gap between it and them, and whatever
+  // lands there adopts them: the children changed parent for a move that never
+  // touched them. A block shallower than the selection -- a parent above, the
+  // next section below -- is still one slot, which is how a block moves into
+  // and out of a list; its children are no deeper than the mover, so none can
+  // be adopted. The selection's depth is its shallowest block's: a selection
+  // that starts inside a list and ends on a section header steps over the next
+  // section whole, the way that header alone would.
+  const depth = selected.reduce((low, block) => Math.min(low, block.depth), Infinity);
+  let landingAt = direction === -1 ? from - 1 : to + 2;
+
+  if (direction === -1) {
+    // The block above may be the last of a sibling's children: go back to the
+    // first block above at the selection's depth or shallower -- that sibling,
+    // or a parent, which is one slot as it is.
+    while (landingAt > 0 && visible[landingAt]!.depth > depth) {
+      landingAt -= 1;
+    }
+  } else {
+    // The block below goes past with everything nested under it: past every
+    // block deeper than the selection whose parent stays behind. That covers
+    // an unselected child of a selected block too -- one slot past it is the
+    // gap before its own children, and they went to the mover -- and a block
+    // whose parent sat in a gap of the selection, which landing before it
+    // took from that parent. A child of a moving block is where the walk
+    // stops: it goes on belonging to that block. Below a block shallower
+    // than the selection, the first block is no deeper than the selection,
+    // so the walk takes nothing, and that block is one slot.
+    const parents = parentIndexes(visible);
+
+    while (
+      visible[landingAt] &&
+      visible[landingAt]!.depth > depth &&
+      !moving.has(visible[parents[landingAt]!]?.id ?? '')
+    ) {
+      landingAt += 1;
+    }
+  }
+
+  const landing = visible[landingAt];
 
   return moveBlocks(blocks, moving, landing ? findBlockIndex(blocks, landing.id) : blocks.length);
+}
+
+/** Each block's parent position in `blocks`: the nearest shallower block above it, or -1. */
+function parentIndexes(blocks: readonly Block[]): number[] {
+  const open: number[] = [];
+
+  return blocks.map((block, at) => {
+    while (open.length > 0 && blocks[open.at(-1)!]!.depth >= block.depth) {
+      open.pop();
+    }
+
+    const parent = open.at(-1) ?? -1;
+    open.push(at);
+
+    return parent;
+  });
 }
 
 /** Plain-text projection of a block, for measuring and for input rules. */
@@ -565,9 +625,11 @@ export function normalizeDocument(doc: Partial<NEditorDocument> | undefined): NE
         id: uniqueId(block.id, seen),
         type,
         content: isVoidType(type) ? [] : normalizeContent(block.content, block.text),
-        depth: Number.isFinite(block.depth)
-          ? Math.min(MAX_DEPTH, Math.max(0, Math.trunc(block.depth as number)))
-          : 0,
+        // Not capped at MAX_DEPTH here: `normalizeDepths` caps its output, and
+        // capping the input first merged distinct stored depths, so `[0, 35,
+        // 40]` lost its parent and child to two siblings -- a collapsed toggle
+        // stored past the ceiling showed what it hides.
+        depth: Number.isFinite(block.depth) ? Math.max(0, Math.trunc(block.depth as number)) : 0,
       };
 
       // A code block is literal text in both serializers: `toMarkdown` writes a
@@ -871,8 +933,12 @@ export function computeListNumbers(blocks: readonly Block[]): Map<string, number
  * this after any structural change restores the invariant.
  *
  * It repairs depths without changing the tree they describe. A block's parent
- * is the nearest block above it that is shallower, and that is the same block
- * before and after: each block lands one level below its parent's *new* depth.
+ * is the nearest block above it that is shallower, and below the ceiling that
+ * is the same block before and after: each block lands one level below its
+ * parent's *new* depth. At the ceiling a deeper chain is flattened onto it,
+ * and those blocks become siblings -- unavoidable, since MAX_DEPTH is as deep
+ * as anything may go. A depth below zero, or one that is not a number, is
+ * read as the root.
  * Clamping against the predecessor alone did not keep that. Delete the parent
  * of `toggle (2) > hidden (3)` followed by `sibling (2)` and the toggle and its
  * child came up a level while the sibling stayed at 2 -- now deeper than the
@@ -885,19 +951,26 @@ export function computeListNumbers(blocks: readonly Block[]): Map<string, number
  * load alone is not a limit, it is a document that changes shape when reloaded.
  */
 export function normalizeDepths(blocks: readonly Block[]): Block[] {
-  // The open ancestors of the current block: their depths as given, and the
-  // depths they were given here. Both strictly increase from the bottom.
+  // The open ancestors of the current block: their depths as given, which
+  // strictly increase from the bottom, and the depths they were given here,
+  // which do too until the ceiling holds several at MAX_DEPTH.
   const givenDepths: number[] = [];
   const newDepths: number[] = [];
 
   return blocks.map((block) => {
-    while (givenDepths.length > 0 && givenDepths.at(-1)! >= block.depth) {
+    // Below zero is the root. Read as given, -2 then -1 made the second a
+    // child of the first; NaN, compared as given, was deeper than nothing and
+    // shallower than nothing, and every block after it nested one level
+    // further; and a numeric string, from a host's JSON, compared as text.
+    const given = typeof block.depth === 'number' && block.depth > 0 ? block.depth : 0;
+
+    while (givenDepths.length > 0 && givenDepths.at(-1)! >= given) {
       givenDepths.pop();
       newDepths.pop();
     }
 
-    const depth = Math.max(0, Math.min((newDepths.at(-1) ?? -1) + 1, MAX_DEPTH));
-    givenDepths.push(block.depth);
+    const depth = Math.min((newDepths.at(-1) ?? -1) + 1, MAX_DEPTH);
+    givenDepths.push(given);
     newDepths.push(depth);
 
     return depth === block.depth ? block : { ...block, depth };
@@ -983,7 +1056,16 @@ export function moveBlocks(
   return normalizeDepths([...rest.slice(0, at), ...moving, ...rest.slice(at)]);
 }
 
-/** Copies blocks, with fresh ids, directly below the lowest one selected. */
+/**
+ * Copies blocks, with fresh ids, below the lowest one selected and everything
+ * nested under the selection.
+ *
+ * Directly below it put the copies between a parent and its children, and the
+ * children went to the copy: duplicating an expanded toggle left the original
+ * empty. A collapsed toggle's hidden run is selected along with it, so what
+ * this protects is the visible children of a selected block that were not
+ * selected themselves.
+ */
 export function duplicateBlocks(
   blocks: readonly Block[],
   ids: ReadonlySet<string>,
@@ -994,12 +1076,33 @@ export function duplicateBlocks(
     return { blocks: [...blocks], ids: [] };
   }
 
-  const copies = selected.map((block) => ({ ...cloneBlock(block), id: createBlockId() }));
+  const floor = selected.reduce((low, block) => Math.min(low, block.depth), Infinity);
+
+  // Re-rooted at the selection's shallowest depth, keeping their own tree: a
+  // selection that starts deeper than it ends -- a list item and the section
+  // header after it -- put its first copy at the item's depth right after the
+  // header's run, where the header took it as a child.
+  const copies = normalizeDepths(
+    selected.map((block) => ({
+      ...cloneBlock(block),
+      id: createBlockId(),
+      depth: block.depth - floor,
+    })),
+  ).map((block) => ({ ...block, depth: block.depth + floor }));
 
   const lastIndex = blocks.reduce((last, block, index) => (ids.has(block.id) ? index : last), 0);
+  // Past every block deeper than the shallowest copy, so nothing after the
+  // copies can be adopted by them. The last selected block's own subtree is
+  // not enough: select a parent and its first child, and the second child,
+  // just after them, went to the copy of the parent.
+  let end = lastIndex;
+
+  while (end + 1 < blocks.length && blocks[end + 1]!.depth > floor) {
+    end += 1;
+  }
 
   // Not `splice(..., ...copies)`, whose arguments the engine limits.
-  const next = [...blocks.slice(0, lastIndex + 1), ...copies, ...blocks.slice(lastIndex + 1)];
+  const next = [...blocks.slice(0, end + 1), ...copies, ...blocks.slice(end + 1)];
 
   return { blocks: normalizeDepths(next), ids: copies.map((block) => block.id) };
 }
@@ -1007,38 +1110,96 @@ export function duplicateBlocks(
 /**
  * Indents or outdents several blocks, each one on its own.
  *
- * Every selected block moves by `delta`, clamped at depth 0, and then
- * `normalizeDepths` pulls any block more than one level below its predecessor
- * back up. So the selection's relative shape is *not* preserved: outdenting a
- * parent already at the root together with its child flattens the two, and an
- * indent can be absorbed by the clamp for one block and not the next. The
- * editor's `indentTargets` asks this same clamp which blocks would move.
+ * Each selected block moves by `delta` as far as it legally can -- at depth 0,
+ * and one level below the block above it *as already moved* -- the clamp
+ * `indentBlock` applies to one. A block that cannot move keeps its depth, and
+ * is handed back as the same object, which `sameBlocks` relies on, with its
+ * children where they were. Shifted blindly and re-clamped afterwards, the first
+ * item of a nested list reached its own child's depth, the tree-keeping
+ * re-clamp read the two as siblings, and the child came out from under it;
+ * and a run whose first block could not move indented nothing, since each
+ * block after it was clamped back against the unmoved one before it. So the
+ * selection's relative shape is *not* preserved: outdenting a parent already
+ * at the root together with its child flattens the two, and an indent can be
+ * absorbed by the clamp for one block and not the next. The editor's
+ * `indentTargets` asks this same clamp which blocks would move.
+ *
+ * A selected block also stays put when indenting it by `delta` would take it,
+ * or a block nested under it through selected blocks, past MAX_DEPTH -- even
+ * where a smaller step would fit: the re-clamp would put the deeper one at its
+ * parent's depth, so a collapsed toggle at 31 went to 32 and its hidden child
+ * landed beside it, in view, leaving the toggle empty.
  */
 export function indentBlocks(
   blocks: readonly Block[],
   ids: ReadonlySet<string>,
   delta: number,
 ): Block[] {
-  const shifted = blocks.map((block) =>
-    ids.has(block.id) ? { ...block, depth: Math.max(0, block.depth + delta) } : block,
-  );
+  const pinned = delta > 0 ? pinnedAtCeiling(blocks, ids, delta) : new Set<number>();
+  let previous = -1;
+
+  const shifted = blocks.map((block, index) => {
+    const depth =
+      ids.has(block.id) && !pinned.has(index)
+        ? Math.max(0, Math.min(block.depth + delta, previous + 1))
+        : block.depth;
+    previous = depth;
+
+    return depth === block.depth ? block : { ...block, depth };
+  });
 
   return normalizeDepths(shifted);
+}
+
+/**
+ * Positions of selected blocks that may not indent by `delta`: each one that
+ * would pass MAX_DEPTH, and every selected ancestor it is nested under through
+ * an unbroken chain of selected blocks -- the ones that would carry it.
+ */
+function pinnedAtCeiling(
+  blocks: readonly Block[],
+  ids: ReadonlySet<string>,
+  delta: number,
+): Set<number> {
+  const pinned = new Set<number>();
+  const ancestors: number[] = [];
+
+  for (let at = 0; at < blocks.length; at += 1) {
+    const block = blocks[at]!;
+
+    while (ancestors.length > 0 && blocks[ancestors.at(-1)!]!.depth >= block.depth) {
+      ancestors.pop();
+    }
+
+    if (ids.has(block.id) && block.depth + delta > MAX_DEPTH) {
+      pinned.add(at);
+
+      for (let up = ancestors.length - 1; up >= 0; up -= 1) {
+        const index = ancestors[up]!;
+
+        if (!ids.has(blocks[index]!.id)) {
+          break;
+        }
+
+        pinned.add(index);
+      }
+    }
+
+    ancestors.push(at);
+  }
+
+  return pinned;
 }
 
 /** A document holding only the given blocks, for the clipboard. */
 export function sliceDocument(blocks: readonly Block[], ids: ReadonlySet<string>): NEditorDocument {
   const selected = blocks.filter((block) => ids.has(block.id));
-  const base = selected[0]?.depth ?? 0;
 
-  // Re-root the copy so pasting it elsewhere does not carry absolute depths.
-  // Clamped: a selection starting deeper than a later block would otherwise
-  // yield a negative depth, and toMarkdown repeats an indent string by it.
-  return {
-    blocks: normalizeDepths(
-      selected.map((block) => ({ ...cloneBlock(block), depth: Math.max(0, block.depth - base) })),
-    ),
-  };
+  // Re-rooted so pasting it elsewhere does not carry absolute depths. The
+  // re-clamp does it by tree: subtracting the first block's depth flattened
+  // any later, shallower block's children onto it -- copying `A(2) B(3) C(1)
+  // D(2)` lost D from under C, which matters when C is a collapsed toggle.
+  return { blocks: normalizeDepths(selected.map(cloneBlock)) };
 }
 
 /* -------------------------------------------------------------------------- */
