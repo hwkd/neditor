@@ -541,8 +541,9 @@ describe('typing a line and pasting it give the same result', () => {
     '**a _b**_',
     '<u>a *b</u> c*',
     '[x](https://a.test/_y_)',
+    '[t](https://a.test/?q=`x`)',
+    '[t](<https://a.test/?q=`x`>) and `c`',
     'a `](` b',
-    'see [a](<b and *y*',
     'a<strong>b </strong>c',
     '<em> i</em> and <s>x </s>',
     'a<code> c </code>b',
@@ -648,5 +649,206 @@ describe('typing a line and pasting it give the same result', () => {
 
     expect(editor.getDocument().blocks[0]!.content).toEqual(content);
     expect(parseInlineMarkdown(line)).toEqual(content);
+  });
+
+  // The README's first documented difference. An angled destination admits a
+  // space, so a space no longer ends one: typing cannot know the `>)` is not
+  // coming and holds the italic off, while a paste can see that it never does.
+  test('an angled destination that never closes holds marks off only while typing', async () => {
+    const { parseInlineMarkdown } = await import('./index.ts');
+    const editor = mount([block({})]);
+    const line = 'see [a](<b and *y*';
+
+    typeCharByChar(hosts(editor)[0]!, line);
+
+    expect(editor.getDocument().blocks[0]!.content).toEqual([{ text: line }]);
+    expect(parseInlineMarkdown(line)).toEqual([
+      { text: 'see [a](<b and ' },
+      { text: 'y', marks: ['italic'] },
+    ]);
+  });
+});
+
+describe('control characters do not reach the model', () => {
+  /**
+   * R2-EDIT-6: the editor's own clipboard flavour is untrusted when another
+   * page wrote it, and its runs went through `normalizeDocument`, which let a
+   * NUL through -- the placeholder the inline rules project an escaped
+   * character to. Every C0 control but TAB and LF is dropped there, from run
+   * text, table cells and an image's alt text alike.
+   */
+  test('a NUL in a pasted application/x-neditor fragment', () => {
+    const editor = mount([block({ id: 'dst', content: [{ text: 'x' }] })]);
+    const data = new DataTransfer();
+    data.setData('text/html', '<b>innocent</b>');
+    data.setData(
+      'application/x-neditor',
+      JSON.stringify({
+        blocks: [{ type: 'paragraph', depth: 0, content: [{ text: 'a\u0000b\u0007c\td\re' }] }],
+      }),
+    );
+    editor.focusRange('dst', 1, 1);
+    const event = new ClipboardEvent('paste', {
+      clipboardData: data,
+      bubbles: true,
+      cancelable: true,
+    });
+    hosts(editor)[0]!.dispatchEvent(event);
+
+    expect(editor.getDocument().blocks.map((b) => b.content)).toEqual([[{ text: 'xabc\td\ne' }]]);
+  });
+
+  test('a stored document: runs, legacy text, cells and alt', async () => {
+    const { normalizeDocument } = await import('./index.ts');
+    const doc = normalizeDocument({
+      blocks: [
+        { id: 'p', type: 'paragraph', depth: 0, content: [{ text: '\u0000a\u001f' }] },
+        { id: 'l', type: 'paragraph', depth: 0, text: 'b\u0001' } as unknown as Block,
+        {
+          id: 't',
+          type: 'table',
+          depth: 0,
+          content: [],
+          rows: [[[{ text: 'c\u0000' }], [{ text: 'd' }]]],
+        },
+        {
+          id: 'i',
+          type: 'image',
+          depth: 0,
+          content: [{ text: 'cap\u0000' }],
+          src: '',
+          alt: 'e\u0000',
+        },
+      ],
+    });
+    const [p, l, t, i] = doc.blocks;
+
+    expect(p!.content).toEqual([{ text: 'a' }]);
+    expect(l!.content).toEqual([{ text: 'b' }]);
+    expect(t!.type === 'table' && t!.rows?.[0]?.[0]).toEqual([{ text: 'c' }]);
+    expect(i!.content).toEqual([{ text: 'cap' }]);
+    expect(i!.type === 'image' && i!.alt).toBe('e');
+  });
+
+  /**
+   * R3-FMT-9: only the stored document and our own flavour were cleaned, so a
+   * control character pasted as plain text or HTML reached the model,
+   * `getDocument()` and `toMarkdown`, and vanished only on reload -- saved was
+   * not loaded. DEL and C1 were kept everywhere, a vertical tab or form feed
+   * that means a line break was deleted, and a callout's icon kept its NUL.
+   */
+  const paste = (editor: NEditor, flavours: Record<string, string>, id = 'dst'): void => {
+    const data = new DataTransfer();
+
+    for (const [type, value] of Object.entries(flavours)) {
+      data.setData(type, value);
+    }
+
+    editor.focusRange(id, 0, 0);
+    hosts(editor)[0]!.dispatchEvent(
+      new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }),
+    );
+  };
+
+  test("the auditor's plain text, from a textarea", async () => {
+    const { toMarkdown } = await import('./index.ts');
+    const editor = mount([block({ id: 'dst' })]);
+
+    paste(editor, { 'text/plain': 'a\u0001b\u0007c\u001bd\te\u000bf **x\u0000y**' });
+
+    const blocks = editor.getDocument().blocks;
+
+    expect(blocks.map((b) => b.content)).toEqual([
+      [{ text: 'abcd\te' }],
+      [{ text: 'f ' }, { text: 'xy', marks: ['bold'] }],
+    ]);
+    expect(
+      toMarkdown(editor.getDocument())
+        .split('')
+        .filter((char) => char < ' ' && char !== '\n' && char !== '\t'),
+    ).toEqual([]);
+  });
+
+  test("the auditor's HTML, from a page", () => {
+    const editor = mount([block({ id: 'dst' })]);
+
+    paste(editor, {
+      'text/html': '<p>x&#1;y&#7;z&#27;w <b>b&#11;old</b></p><p>two</p>',
+      'text/plain': 'xyzw bold\n\ntwo',
+    });
+
+    expect(editor.getDocument().blocks.map((b) => b.content)).toEqual([
+      [{ text: 'xyzw ' }, { text: 'b\nold', marks: ['bold'] }],
+      [{ text: 'two' }],
+    ]);
+  });
+
+  test('into a code block, as plain text', () => {
+    const editor = mount([block({ id: 'dst', type: 'code' })]);
+
+    paste(editor, { 'text/plain': 'a\u0000b\u007fc\u0085d\u000ce' });
+
+    expect(editor.getDocument().blocks[0]!.content).toEqual([{ text: 'abcd\ne' }]);
+  });
+
+  test('DEL and C1 go, a vertical tab and a form feed are line breaks', async () => {
+    const { blocksFromHtml, blocksFromMarkdown, normalizeDocument } = await import('./index.ts');
+
+    expect(blocksFromMarkdown('a\u007fb\u0085c\u009fd').map(blockText)).toEqual(['abcd']);
+    expect(blocksFromMarkdown('line1\u000bline2').map(blockText)).toEqual(['line1', 'line2']);
+    expect(blocksFromHtml(document, '<pre>a\u000bb\u000cc\u0080</pre>').map(blockText)).toEqual([
+      'a\nb\nc',
+    ]);
+    expect(
+      normalizeDocument({
+        blocks: [
+          {
+            id: 'p',
+            type: 'paragraph',
+            depth: 0,
+            content: [{ text: 'a\u000bb\u000cc\u007f\u0090' }],
+          },
+        ],
+      }).blocks[0]!.content,
+    ).toEqual([{ text: 'a\nb\nc' }]);
+  });
+
+  test("a callout's icon", async () => {
+    const { normalizeDocument } = await import('./index.ts');
+    const [callout, empty] = normalizeDocument({
+      blocks: [
+        { id: 'c', type: 'callout', depth: 0, content: [], icon: 'x\u0000' },
+        { id: 'd', type: 'callout', depth: 0, content: [], icon: '\u0000' },
+      ],
+    }).blocks;
+
+    expect(callout!.icon).toBe('x');
+    expect(empty!.icon).toBe('💡');
+  });
+
+  test('a CR LF spelled as references at a block edge is one line break', async () => {
+    // R4-FMT-6b: each reference was decoded on its own, so the CR became a
+    // line break and the LF a second one. The same characters typed are one.
+    const { blocksFromMarkdown } = await import('./index.ts');
+
+    expect(blocksFromMarkdown('x&#13;&#10;').map(blockText)).toEqual(['x\n']);
+    expect(blocksFromMarkdown('x&#xD;&#xa;').map(blockText)).toEqual(['x\n']);
+    expect(blocksFromMarkdown('&#13;&#10;x').map(blockText)).toEqual(['\nx']);
+    // A lone CR is still a line break, and a CR before anything else too.
+    expect(blocksFromMarkdown('x&#13;').map(blockText)).toEqual(['x\n']);
+    expect(blocksFromMarkdown('x&#13;&#13;&#10;').map(blockText)).toEqual(['x\n\n']);
+  });
+
+  test('a vertical tab or form feed that ends a block adds no line', async () => {
+    // R4-FMT-6c: one at the end read as a trailing soft break, which a
+    // source newline there never is.
+    const { blocksFromHtml } = await import('./index.ts');
+
+    expect(
+      blocksFromHtml(
+        document,
+        '<p>x&#11;</p><p>y&#12;</p><p style="white-space: pre-wrap;">z&#11;</p><p>a&#11;b</p>',
+      ).map(blockText),
+    ).toEqual(['x', 'y', 'z', 'a\nb']);
   });
 });

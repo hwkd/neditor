@@ -45,9 +45,22 @@ export class Emitter<Events extends object> {
       try {
         (listener as (value: Events[K]) => void)(payload);
       } catch (error) {
-        this.#onError(error);
+        // The handler is the host's code too. One that throws must not escape
+        // from here either, or the edit unwinds after the document changed
+        // and the events that follow it never fire.
+        try {
+          this.#onError(error);
+        } catch (handlerError) {
+          // eslint-disable-next-line no-console
+          console.error('[neditor] onError threw', handlerError, 'while handling', error);
+        }
       }
     }
+  }
+
+  /** Whether anything listens for `event` -- so a costly payload can be skipped. */
+  has<K extends keyof Events>(event: K): boolean {
+    return (this.#listeners.get(event)?.size ?? 0) > 0;
   }
 
   clear(): void {

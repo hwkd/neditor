@@ -1,7 +1,8 @@
 import type { NEditorLabels } from '../labels.ts';
 import { firstGrapheme } from '../util/grapheme.ts';
 import type { PortalTheme } from './portal.ts';
-import { createPortal, positionPortal } from './portal.ts';
+import type { AnchorPin } from './portal.ts';
+import { createPortal, holdsFocus, positionPortal } from './portal.ts';
 
 /**
  * The callout icon picker.
@@ -49,6 +50,7 @@ export class IconPicker {
   readonly #hooks: IconPickerHooks;
 
   #open = false;
+  #pin: AnchorPin | null = null;
 
   constructor(doc: Document, hooks: IconPickerHooks, labels: NEditorLabels) {
     this.#hooks = hooks;
@@ -114,7 +116,8 @@ export class IconPicker {
     this.#element.dataset.neditorTheme = theme;
   }
 
-  open(anchor: DOMRect, current: string): void {
+  open(anchor: DOMRect, current: string, pin: AnchorPin | null = null): void {
+    this.#pin = pin;
     this.#element.hidden = false;
     this.#open = true;
     this.#input.value = current;
@@ -130,7 +133,29 @@ export class IconPicker {
     }
 
     this.#open = false;
+    this.#pin = null;
     this.#element.hidden = true;
+  }
+
+  /** True while the user is in the dialog: its input, a swatch, a button. */
+  get hasFocus(): boolean {
+    return this.#open && holdsFocus(this.#element);
+  }
+
+  /**
+   * Places the dialog against wherever its anchor has moved to. False when it
+   * was opened without a pin or the anchor has left the page, so there is
+   * nothing left to place it against.
+   */
+  reposition(): boolean {
+    const anchor = this.#open ? this.#pin?.() : null;
+
+    if (!anchor) {
+      return false;
+    }
+
+    positionPortal(this.#element, anchor, { prefer: 'below' });
+    return true;
   }
 
   contains(node: Node | null): boolean {

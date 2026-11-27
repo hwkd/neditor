@@ -302,6 +302,94 @@ describe('one armed-formatting keystroke is one history entry', () => {
     expect(editor.canUndo).toBe(false);
   });
 
+  // R11-KEY-6, p9's literal case: "Hello world" with the caret after "Hello",
+  // ⌘B armed there, a peer's `setDocument` editing the *other* block, and
+  // "XY" typed. The reset dropped every armed mark, and "XY" came out plain.
+  // What the mark belongs to -- its block by id, that block's text, the caret
+  // in its focused host at its offset -- all survived, so it survives too.
+  const helloOther = (): NEditor =>
+    mount([
+      block({ id: 'z', content: [{ text: 'Hello world' }] }),
+      block({ id: 'q', content: [{ text: 'Other' }] }),
+    ]);
+  const armed = (editor: NEditor): readonly string[] => editor.getSelectionState()?.marks ?? [];
+  const peerEdits = (editor: NEditor, id: string, text: string): void => {
+    const doc = editor.getDocument();
+    doc.blocks = doc.blocks.map((b) => (b.id === id ? { ...b, content: [{ text }] } : b));
+    editor.setDocument(doc, { silent: true });
+  };
+
+  test('a peer editing another block keeps a ⌘B armed at the caret', () => {
+    const editor = helloOther();
+    caretTo(hosts(editor)[0]!, 5);
+    press(hosts(editor)[0]!, 'b', { ctrlKey: true, metaKey: true });
+    expect(armed(editor)).toEqual(['bold']);
+
+    peerEdits(editor, 'q', 'Other (peer)');
+
+    expect(armed(editor)).toEqual(['bold']);
+    type(hosts(editor)[0]!, 'X');
+    expect(editor.getDocument().blocks[0]?.content).toEqual([
+      { text: 'Hello' },
+      { text: 'X', marks: ['bold'] },
+      { text: ' world' },
+    ]);
+  });
+
+  // Everything else it belongs to going is still the end of it. happy-dom
+  // loses the caret whenever the block's text is redrawn, so the text test
+  // itself -- a rewrite that leaves the caret at its offset -- is pinned in a
+  // browser (api.spec.ts, AP10).
+  test('a peer editing or renaming the armed block drops it', () => {
+    const editor = helloOther();
+    const arm = (): void => {
+      caretTo(hosts(editor)[0]!, 5);
+      editor.toggleMark('bold');
+      expect(armed(editor)).toContain('bold');
+    };
+
+    arm();
+    peerEdits(editor, 'z', 'Hello world!');
+    expect(armed(editor)).toEqual([]);
+
+    arm();
+    const doc = editor.getDocument();
+    doc.blocks[0] = { ...doc.blocks[0]!, id: 'renamed' };
+    editor.setDocument(doc, { silent: true });
+    expect(armed(editor)).toEqual([]);
+  });
+
+  // A cell is its own host: another cell's edit keeps it, its own drops it.
+  test('in a table cell, by the cell: another cell edited keeps it, its own drops it', () => {
+    const editor = mount([
+      block({
+        id: 't',
+        type: 'table',
+        rows: [
+          [[{ text: 'A' }], [{ text: 'B' }]],
+          [[{ text: 'C' }], [{ text: 'D' }]],
+        ],
+      }),
+    ]);
+    const cellAt = (at: string): HTMLElement =>
+      editor.element.querySelector<HTMLElement>(`[data-cell="${at}"]`)!;
+    const peer = (row: number, column: number, text: string): void => {
+      const doc = editor.getDocument();
+      const rows = doc.blocks[0]!.rows!.map((r) => r.map((c) => c));
+      rows[row]![column] = [{ text }];
+      doc.blocks[0] = { ...doc.blocks[0]!, rows };
+      editor.setDocument(doc, { silent: true });
+    };
+
+    caretTo(cellAt('1:1'), 1);
+    editor.toggleMark('italic');
+    peer(0, 0, 'A (peer)');
+    expect(editor.getSelectionState()?.marks).toEqual(['italic']);
+
+    peer(1, 1, 'D (peer)');
+    expect(editor.getSelectionState()?.marks ?? []).toEqual([]);
+  });
+
   test('an armed insert in a table cell is one entry too', () => {
     const editor = mount([
       block({

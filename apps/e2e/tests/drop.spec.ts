@@ -1,6 +1,7 @@
 import type { Locator } from '@playwright/test';
 import { expect, MOD, test } from '../helpers/test.ts';
 import type { EditorPage } from '../helpers/editor.ts';
+import { afterFailedLoads, READER_COPIES, recordArrivingHtml } from '../helpers/hostile.ts';
 
 /** A real native drag from the harness's foreign source onto a text offset. */
 async function dropAt(
@@ -71,6 +72,33 @@ test.describe('12 · drop', () => {
       await assertClean(editor);
       await editor.setDocument(await editor.doc());
       await assertClean(editor);
+    });
+  }
+
+  // A drop reaches the reader with no clipboard to clean it first, so here
+  // every engine runs a copy's handler if the reader builds in the live page.
+  for (const [index, [html, text]] of READER_COPIES.entries()) {
+    test(`D1b.${index + 1} no copy the reader makes of dropped markup runs its handlers: ${html}`, async ({
+      editor,
+      page,
+      consoleErrors,
+    }) => {
+      test.info().annotations.push({
+        type: 'allow-console-errors',
+        description: 'failed image loads, by design',
+      });
+      await editor.load({ doc: 'paragraphs' });
+      const arrived = await recordArrivingHtml(page);
+      await dropAt(editor, 'p2', 5, { html, text: 'PLAIN' });
+      // This markup arrived, handler and all: a test the drop never reached
+      // proves nothing.
+      expect(await arrived()).toEqual([expect.stringContaining('onerror=')]);
+      const dropped = (await editor.texts()).join('');
+      expect(dropped).toContain(text);
+      expect(dropped).not.toContain('PLAIN');
+      await afterFailedLoads(page);
+      expect(await page.evaluate(() => (window as { __pwned?: number }).__pwned)).toBeUndefined();
+      expect(consoleErrors.filter((error) => !/failed to load resource/i.test(error))).toEqual([]);
     });
   }
 

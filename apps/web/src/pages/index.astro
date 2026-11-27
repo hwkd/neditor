@@ -26,22 +26,55 @@ import Layout from '../layouts/Layout.astro';
     <div class="workbench">
       <div class="editor-column">
         <div class="editor-actions">
-          <button type="button" data-action="undo" disabled>Undo</button>
-          <button type="button" data-action="redo" disabled>Redo</button>
+          <!-- autocomplete="off": Firefox otherwise restores a button's
+               disabled state across a reload, from before the history it
+               described was gone. -->
+          <button type="button" data-action="undo" autocomplete="off" disabled>Undo</button>
+          <button type="button" data-action="redo" autocomplete="off" disabled>Redo</button>
           <span class="editor-actions__hint">⌘Z / ⌘⇧Z</span>
         </div>
         <div id="editor" class="editor-surface"></div>
       </div>
 
       <aside class="inspector">
-        <div class="inspector__tabs" role="tablist">
-          <button type="button" role="tab" data-panel="markdown" aria-selected="true">
+        <div class="inspector__tabs" role="tablist" aria-label="Document output">
+          <button
+            type="button"
+            role="tab"
+            id="tab-markdown"
+            data-panel="markdown"
+            aria-selected="true"
+            aria-controls="panel-markdown"
+          >
             Markdown
           </button>
-          <button type="button" role="tab" data-panel="json" aria-selected="false">JSON</button>
+          <button
+            type="button"
+            role="tab"
+            id="tab-json"
+            data-panel="json"
+            aria-selected="false"
+            aria-controls="panel-json"
+            tabindex="-1"
+          >
+            JSON
+          </button>
         </div>
-        <pre class="inspector__output" data-output="markdown"></pre>
-        <pre class="inspector__output" data-output="json" hidden></pre>
+        <pre
+          class="inspector__output"
+          id="panel-markdown"
+          role="tabpanel"
+          aria-labelledby="tab-markdown"
+          tabindex="0"
+          data-output="markdown"></pre>
+        <pre
+          class="inspector__output"
+          id="panel-json"
+          role="tabpanel"
+          aria-labelledby="tab-json"
+          tabindex="0"
+          data-output="json"
+          hidden></pre>
       </aside>
     </div>
   </main>
@@ -51,6 +84,16 @@ import Layout from '../layouts/Layout.astro';
   import { createEditor, type NEditorDocument } from '@neditor/core';
   import katex from 'katex';
   import 'katex/dist/katex.min.css';
+
+  // The editor uses Ctrl off Apple platforms; the copy says so too.
+  const mac = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+  const SHORTCUT_K = mac ? 'Cmd+K' : 'Ctrl+K';
+
+  if (!mac) {
+    for (const node of document.querySelectorAll<HTMLElement>('kbd, .editor-actions__hint')) {
+      node.textContent = (node.textContent ?? '').replace(/⌘/g, 'Ctrl+').replace(/⇧/g, 'Shift+');
+    }
+  }
 
   const seed: NEditorDocument = {
     blocks: [
@@ -67,7 +110,7 @@ import Layout from '../layouts/Layout.astro';
           { text: 'This page runs ' },
           { text: '@neditor/core', marks: ['code'] },
           { text: ', the reusable package in this monorepo. Select any text to format it, or press ' },
-          { text: 'Cmd+K', marks: ['bold'] },
+          { text: SHORTCUT_K, marks: ['bold'] },
           { text: ' to add a ' },
           { text: 'link', link: 'https://developer.mozilla.org/en-US/docs/Web/API/Selection' },
           { text: '.' },
@@ -237,9 +280,10 @@ import Layout from '../layouts/Layout.astro';
       autofocus: false,
       // The package bundles no typesetter; the page brings its own. KaTeX's
       // defaults keep \href and friends off, which matters: the TeX comes from
-      // the document, and the HTML it returns is drawn as it stands.
+      // the document, and the HTML it returns is drawn as it stands. Throwing
+      // is how the editor learns the TeX is invalid, and says so in words.
       renderMath: (tex, { displayMode }) =>
-        katex.renderToString(tex, { displayMode, throwOnError: false }),
+        katex.renderToString(tex, { displayMode, throwOnError: true }),
       onChange: (doc) => {
         if (markdownOut) {
           markdownOut.textContent = editor.getMarkdown();
@@ -271,12 +315,24 @@ import Layout from '../layouts/Layout.astro';
       button?.addEventListener('mousedown', (event) => {
         event.preventDefault();
       });
-      button?.addEventListener('click', () => {
+      button?.addEventListener('click', (event) => {
         run();
+
+        // undo() moves focus into the editor to restore the caret. Pressed
+        // from the keyboard (a click with no pointer: detail 0), the user
+        // expects to press again, so focus comes back to the button -- unless
+        // that press emptied the history and disabled it, where focus() does
+        // nothing and the next Space typed into the document, wiping Redo.
+        // The other button is the one that can act then.
+        if (event.detail === 0) {
+          const other = button === undoButton ? redoButton : undoButton;
+
+          (button.disabled && other && !other.disabled ? other : button).focus();
+        }
       });
     }
 
-    editor.on('history', ({ canUndo, canRedo }) => {
+    const syncHistory = ({ canUndo, canRedo }: { canUndo: boolean; canRedo: boolean }): void => {
       if (undoButton) {
         undoButton.disabled = !canUndo;
       }
@@ -284,18 +340,49 @@ import Layout from '../layouts/Layout.astro';
       if (redoButton) {
         redoButton.disabled = !canRedo;
       }
-    });
+    };
 
-    for (const tab of document.querySelectorAll<HTMLButtonElement>('[role="tab"]')) {
+    // From the editor at startup as well, not only from the markup: the state
+    // a browser restores on reload is not the editor's.
+    syncHistory({ canUndo: editor.canUndo, canRedo: editor.canRedo });
+    editor.on('history', syncHistory);
+
+    // The tabs pattern: one tab stop for the group, arrows and Home/End move
+    // between tabs, and the selected tab's panel is shown.
+    const tabs = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+    const select = (tab: HTMLButtonElement): void => {
+      for (const other of tabs) {
+        const selected = other === tab;
+        other.setAttribute('aria-selected', String(selected));
+        other.tabIndex = selected ? 0 : -1;
+      }
+
+      for (const panel of document.querySelectorAll<HTMLElement>('[data-output]')) {
+        panel.hidden = panel.dataset.output !== tab.dataset.panel;
+      }
+    };
+
+    for (const tab of tabs) {
       tab.addEventListener('click', () => {
-        const target = tab.dataset.panel;
+        select(tab);
+      });
+      tab.addEventListener('keydown', (event) => {
+        const index = tabs.indexOf(tab);
+        const next =
+          event.key === 'ArrowRight'
+            ? tabs[(index + 1) % tabs.length]
+            : event.key === 'ArrowLeft'
+              ? tabs[(index - 1 + tabs.length) % tabs.length]
+              : event.key === 'Home'
+                ? tabs[0]
+                : event.key === 'End'
+                  ? tabs[tabs.length - 1]
+                  : undefined;
 
-        for (const other of document.querySelectorAll<HTMLButtonElement>('[role="tab"]')) {
-          other.setAttribute('aria-selected', String(other === tab));
-        }
-
-        for (const panel of document.querySelectorAll<HTMLElement>('[data-output]')) {
-          panel.hidden = panel.dataset.output !== target;
+        if (next) {
+          event.preventDefault();
+          select(next);
+          next.focus();
         }
       });
     }
@@ -436,6 +523,12 @@ import Layout from '../layouts/Layout.astro';
     background: var(--page-bg);
     color: var(--page-fg);
     box-shadow: 0 1px 2px rgb(0 0 0 / 0.06);
+  }
+
+  /* Inside the inspector's overflow: hidden, an outside ring is clipped away. */
+  .inspector__output:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: -2px;
   }
 
   .inspector__output {

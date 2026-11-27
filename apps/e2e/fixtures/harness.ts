@@ -12,7 +12,7 @@ import katex from 'katex';
 import 'katex/dist/katex.min.css';
 import { DOCS } from './docs.ts';
 
-type Mount = 'plain' | 'shadow' | 'iframe' | 'dialog' | 'two';
+type Mount = 'plain' | 'shadow' | 'closed' | 'nested' | 'iframe' | 'dialog' | 'two';
 
 interface LoggedEvent {
   editor: number;
@@ -73,7 +73,7 @@ function optionsFromQuery(): Partial<NEditorOptions> {
   // A real typesetter, so the atoms the specs drive hold KaTeX's own markup.
   if (params.get('math') === 'katex') {
     options.renderMath = (tex, { displayMode }) =>
-      katex.renderToString(tex, { displayMode, throwOnError: false });
+      katex.renderToString(tex, { displayMode, throwOnError: true });
   }
 
   return options;
@@ -175,11 +175,25 @@ async function mount(
       break;
     }
 
-    case 'shadow': {
+    case 'shadow':
+    // A closed root: `host.shadowRoot` is null, so nothing outside the editor
+    // can look in (a test reaches its DOM through `editor.element`).
+    case 'closed': {
       const outer = document.createElement('e2e-shadow-host');
       stage.appendChild(outer);
-      const shadow = outer.attachShadow({ mode: 'open' });
+      const shadow = outer.attachShadow({ mode: kind === 'closed' ? 'closed' : 'open' });
       create(makeHost(shadow, 'editor'), overrides, doc);
+      break;
+    }
+
+    // An open root inside a closed one: two shadow boundaries between the
+    // page and the editor, the outer of which names no way in.
+    case 'nested': {
+      const outer = document.createElement('e2e-shadow-host');
+      stage.appendChild(outer);
+      const inner = document.createElement('e2e-shadow-host');
+      outer.attachShadow({ mode: 'closed' }).appendChild(inner);
+      create(makeHost(inner.attachShadow({ mode: 'open' }), 'editor'), overrides, doc);
       break;
     }
 

@@ -187,6 +187,18 @@ describe('input rules', () => {
   test('a bare hash without the space does not fire', () => {
     expect(matchInputRule('#', '#')).toBeNull();
   });
+
+  test.each([
+    ['[] ', false],
+    ['[ ] ', false],
+    ['[x] ', true],
+    ['[X] ', true],
+  ])('%s says whether the to-do starts done', (prefix: string, checked: boolean) => {
+    // The pattern accepted the x and the editor threw it away, so `[x] ` made
+    // an open to-do -- the opposite of what was typed, and of what the same
+    // `[x]` means when it is read back from Markdown.
+    expect(matchInputRule(prefix, prefix)?.checked ?? false).toBe(checked);
+  });
 });
 
 describe('normalizeDocument', () => {
@@ -957,5 +969,175 @@ describe('a span is split only when it is really too long to read back', () => {
     const back = runsAfterRoundTrip(text);
 
     expect(back).toEqual([{ text, marks: ['bold'] }]);
+  });
+});
+
+describe('a label is written on one line', () => {
+  /**
+   * The reader matches an image or a callout marker within a single line, so
+   * an alt text or icon holding a line break was written across two lines and
+   * came back as two junk paragraphs -- `![line1` and `line2](…)` -- with the
+   * image gone. The break becomes a space; the block survives.
+   */
+  test.each(['line1\nline2', 'line1\r\nline2', 'line1\rline2'])('an alt text %j', (alt) => {
+    const image: Block = { ...createBlock('image'), src: 'https://a.test/x.png', alt };
+    const markdown = toMarkdown({ blocks: [image] });
+
+    expect(markdown).toBe('![line1 line2](https://a.test/x.png)');
+    expect(blocksFromMarkdown(markdown)).toMatchObject([
+      { type: 'image', src: 'https://a.test/x.png', alt: 'line1 line2' },
+    ]);
+  });
+
+  test('a callout icon', () => {
+    const callout: Block = { ...createBlock('callout', 'c'), icon: 'x\ny' };
+    const markdown = toMarkdown({ blocks: [callout] });
+
+    expect(markdown).toBe('> [!x y] c');
+    expect(blocksFromMarkdown(markdown)).toMatchObject([{ type: 'callout', icon: 'x y' }]);
+  });
+});
+
+describe('whitespace at the edge of a block is text, not indentation', () => {
+  /**
+   * Bare, the whitespace that opens a block's text is indentation on the line's
+   * own start and the marker's separator after a marker, so it never came back:
+   * `    indented` after a paragraph read as `indented` one level deep. It is
+   * written as numeric references, which the reader decodes at the edges of a
+   * block's text, where the writer puts them. The trailing edge is written the
+   * same way, so a block of nothing but whitespace is still a block.
+   *
+   * Carried over from this branch's own suite through the merge with `main`:
+   * these cases hold under `main`'s writer as they did under ours.
+   */
+  test('the literal scenario', () => {
+    const doc = {
+      blocks: [createBlock('paragraph', 'Intro'), createBlock('paragraph', '    indented')],
+    };
+    const markdown = toMarkdown(doc);
+
+    expect(markdown).toBe('Intro\n\n&#32;&#32;&#32;&#32;indented');
+    expect(blocksFromMarkdown(markdown).map((block) => [block.depth, blockText(block)])).toEqual([
+      [0, 'Intro'],
+      [0, '    indented'],
+    ]);
+  });
+
+  test.each([
+    ['a heading', createBlock('heading1', '  hi'), '# &#32;&#32;hi'],
+    ['a to-do', { ...createBlock('todo', '\tx'), checked: true }, '- [x] &#9;x'],
+    ['text with nothing to protect', createBlock('paragraph', 'a  b'), 'a  b'],
+    // A leading break is a reference too: as the escaped newline it is
+    // elsewhere, the reader joined it onto the next line and trimmed it off.
+    ['text that opens with a line break', createBlock('paragraph', '\nfoo'), '&#10;foo'],
+    ['a break and the spaces after it', createBlock('paragraph', '\n  b'), '&#10;&#32;&#32;b'],
+    ['a block of only a break', createBlock('paragraph', '\n'), '&#10;'],
+    ['a block of only spaces', createBlock('paragraph', '  '), '&#32;&#32;'],
+    ['a heading led by a break', createBlock('heading1', '\nx'), '# &#10;x'],
+    ['a break inside the text is still escaped', createBlock('paragraph', 'a\nb'), 'a\\\nb'],
+  ])('%s', (_name, block, markdown) => {
+    expect(toMarkdown({ blocks: [block] })).toBe(markdown);
+    expect(blockText(blocksFromMarkdown(markdown)[0]!)).toBe(blockText(block));
+  });
+
+  test('a code block keeps its text exactly', () => {
+    // A fence holds its text verbatim, so nothing at its edges is a reference.
+    expect(toMarkdown({ blocks: [createBlock('code', 'x  \n')] })).toBe('```\nx  \n\n```');
+  });
+});
+
+describe('a URL holding a dollar', () => {
+  const para = (content: TextRun[]): Block => ({ ...createBlock('paragraph', ''), content });
+  const atom = (tex: string): TextRun => ({ text: '\uFFFC', math: tex });
+
+  // Audit round 2: `$` was made unsafe in every autolink, so an OData query
+  // went out as `?\$filter=` -- a link with a backslash in it to GFM.
+  test('is an autolink when nothing after it holds a bare dollar', () => {
+    expect(toMarkdown({ blocks: [para([{ text: 'see https://h.test/?$filter=a&$top=2' }])] })).toBe(
+      'see <https://h.test/?$filter=a&$top=2>',
+    );
+    expect(
+      toMarkdown({
+        blocks: [para([atom('y'), { text: ' https://h.test/?$top=2' }])],
+      }),
+    ).toBe('$y$ <https://h.test/?$top=2>');
+    expect(
+      toMarkdown({
+        blocks: [para([{ text: 'https://h.test/?$top=2', marks: ['strikethrough'] }])],
+      }),
+    ).toBe('~~<https://h.test/?$top=2>~~');
+  });
+
+  // The URL's `$` is plain text once the autolink closes, and the reader
+  // pairs it with the next bare `$` in the block: a formula's, or one in a
+  // code span (`<https://a.test/a$b> c$y$` made a formula of `b> c`).
+  test('keeps the escaped spelling when a bare dollar follows it in the block', () => {
+    expect(toMarkdown({ blocks: [para([{ text: 'https://a.test/a$b c' }, atom('y')])] })).toBe(
+      'https://a.test/a\\$b c$y$',
+    );
+    expect(
+      toMarkdown({
+        blocks: [para([{ text: 'https://a.test/a$b ' }, { text: 'c$', marks: ['code'] }])],
+      }),
+    ).toBe('https://a.test/a\\$b `c$`');
+  });
+
+  // Audit of the merge, 15 Nov: a later link destination's `$`, and a later
+  // URL's in the same run, are written bare too, and were not counted --
+  // `<https://a.test/_a$b>\_ [l](https://c.test/$)` read back as a formula
+  // that swallowed the text, and the link was gone.
+  test.each([
+    [
+      'a link after it',
+      [{ text: 'https://a.test/_a$b_ ' }, { text: 'l', link: 'https://c.test/$' }],
+    ],
+    ['a second URL in the same run', [{ text: 'https://a.test/_a$b_ https://c.test/_c$d_' }]],
+    [
+      'a link after a bold one',
+      [
+        { text: 'https://a.test/_a$b_', marks: ['bold'] },
+        { text: ' ' },
+        { text: 'l', link: 'https://c.test/_c$d_' },
+      ],
+    ],
+  ] satisfies Array<[string, TextRun[]]>)(
+    'keeps the escaped spelling before %s',
+    (_name, content) => {
+      const [read] = blocksFromMarkdown(toMarkdown({ blocks: [para(content)] }));
+
+      expect(read?.content).toEqual(
+        normalizeDocument({ blocks: [para(content)] }).blocks[0]?.content,
+      );
+    },
+  );
+
+  // Audit of the merge, round 13: a run long enough to be split is escaped a
+  // piece at a time, and a `$`-holding URL ending one piece paired with one
+  // starting the next -- each piece's own check saw no URL after it.
+  test('keeps the escaped spelling across the pieces of a long marked run', () => {
+    const content: TextRun[] = [
+      {
+        text: `${'w '.repeat(740)}https://a.test/a$b https://c.test/c$d${' w'.repeat(400)}`,
+        marks: ['bold'],
+      },
+    ];
+    const [read] = blocksFromMarkdown(toMarkdown({ blocks: [para(content)] }));
+
+    expect(read?.content).toEqual(content);
+  });
+
+  test('round-trips either way', () => {
+    for (const content of [
+      [{ text: 'see https://h.test/?$filter=a and more' }],
+      [{ text: 'https://a.test/a$b c' }, atom('y')],
+      [{ text: 'https://a.test/a$b ' }, { text: 'c$', marks: ['code'] }],
+      [{ text: 'https://a.test/a$b ' }, { text: 'c$', marks: ['code'] }, { text: 'x$' }],
+    ] satisfies TextRun[][]) {
+      const [read] = blocksFromMarkdown(toMarkdown({ blocks: [para(content)] }));
+
+      expect(read?.content).toEqual(
+        normalizeDocument({ blocks: [para(content)] }).blocks[0]?.content,
+      );
+    }
   });
 });

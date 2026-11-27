@@ -11,6 +11,7 @@ import { describe, expect, test } from 'vitest';
 
 import { normalizeDocument, toMarkdown } from './model/document.ts';
 import type { Block } from './model/document.ts';
+import { DEFAULT_LABELS } from './labels.ts';
 import { NEDITOR_STYLES } from './styles.ts';
 
 const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
@@ -24,9 +25,14 @@ interface Colour {
   readonly a: number;
 }
 
-/** Parses the two forms the stylesheet uses: `rgb(r g b[ / a])` and `#rrggbb`. */
+/** Parses the forms the stylesheet uses: `rgb(r g b[ / a])`, `#rrggbb` and `transparent`. */
 function parseColour(value: string): Colour {
   const text = value.trim();
+
+  if (text === 'transparent') {
+    return { r: 0, g: 0, b: 0, a: 0 };
+  }
+
   const rgb = /^rgb\(\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*(?:\/\s*([\d.]+)\s*)?\)$/.exec(text);
 
   if (rgb) {
@@ -72,6 +78,15 @@ function contrast(foreground: Colour, background: Colour): number {
   ];
 
   return (light + 0.05) / (dark + 0.05);
+}
+
+const WHITE: Colour = { r: 255, g: 255, b: 255, a: 1 };
+
+/** `top` composited over an opaque `ground` -- how a tint is actually seen. */
+function over(top: Colour, ground: Colour): Colour {
+  const mix = (a: number, b: number): number => a * top.a + b * (1 - top.a);
+
+  return { r: mix(top.r, ground.r), g: mix(top.g, ground.g), b: mix(top.b, ground.b), a: 1 };
 }
 
 interface TokenBlock {
@@ -140,6 +155,14 @@ describe('theme tokens', () => {
       expect(contrast(accent, surface), `accent on raised surface — ${selector}`).toBeGreaterThan(
         4.5,
       );
+      // And on the hover tint over it, which is where it is under the pointer
+      // that just pressed it: the light blue held 4.6:1 on white and 4.14:1
+      // there, for 14px bold glyphs that are not large text.
+      const hovered = over(parseColour(tokens['--neditor-hover'] as string), surface);
+      expect(
+        contrast(accent, hovered),
+        `accent on a hovered toolbar button — ${selector}`,
+      ).toBeGreaterThan(4.5);
       // The link editor's Apply label, and the checkmark inside a checked to-do.
       expect(contrast(onAccent, accent), `on-accent on accent — ${selector}`).toBeGreaterThan(4.5);
     }
@@ -173,6 +196,173 @@ describe('theme tokens', () => {
         const ink = parseColour(tokens[token] as string);
 
         expect(contrast(ink, surface), `${token} on ${selector}`).toBeGreaterThan(floor);
+      }
+    }
+  });
+
+  /**
+   * The README promises every text token meets 1.4.3, and the checks above
+   * only measured text against the page. Three pairings drawn on other grounds
+   * fell short in the light theme: the URL error on a popover (4.26:1), a code
+   * block's placeholder on its tint (4.46:1) and inline code inside a callout,
+   * where two tints stack (4.49:1). The light surface is transparent, so it is
+   * measured on the white a host page defaults to.
+   */
+  test('text holds 1.4.3 on the tinted grounds it is drawn on, too', () => {
+    const blocks = blocksDefining(NEDITOR_STYLES, '--neditor-text');
+
+    expect(blocks).toHaveLength(3);
+
+    for (const { selector, tokens } of blocks) {
+      const read = (token: string): Colour => parseColour(tokens[token] as string);
+      const surface = over(read('--neditor-surface'), WHITE);
+      const raised = over(read('--neditor-surface-raised'), surface);
+      const codeBg = over(read('--neditor-code-bg'), surface);
+      const callout = over(read('--neditor-callout-bg'), surface);
+      const codeInCallout = over(read('--neditor-code-bg'), callout);
+
+      for (const [what, ink, ground] of [
+        ['URL error on a popover', read('--neditor-danger'), raised],
+        ['placeholder in a code block', read('--neditor-placeholder'), codeBg],
+        ['placeholder in a callout', read('--neditor-placeholder'), callout],
+        ['inline code', read('--neditor-code-text'), codeBg],
+        ['inline code in a callout', read('--neditor-code-text'), codeInCallout],
+      ] as const) {
+        expect(contrast(over(ink, ground), ground), `${what} — ${selector}`).toBeGreaterThan(4.5);
+      }
+    }
+  });
+
+  /**
+   * A selected block is tinted with `--neditor-selection`, and every tint a
+   * block draws inside itself -- the code block's, the callout's, a header
+   * cell's, inline code's -- then stacks over that instead of over the page.
+   * Non-paragraph placeholders show whenever the block is empty, so they are on
+   * screen in a block selection, and Select All selects everything. Measured
+   * there, the code block's placeholder was 4.27:1 in light and 3.92:1 in dark,
+   * an empty callout's 4.31:1 and inline code in a callout 3.92:1 (axe flagged
+   * that one in all three engines). An equation the renderer refused says so
+   * in danger red on the code tint, and Escape or Select All puts the
+   * selection under that too: 4.22:1 in light and 3.32:1 in dark.
+   *
+   * Each pairing is one a renderer actually draws: a placeholder is never on
+   * inline code, and muted text appears as captions and completed to-dos on the
+   * block ground and as the code block's label on its tint.
+   */
+  test('text holds 1.4.3 inside a selected block, where the tints stack', () => {
+    const blocks = blocksDefining(NEDITOR_STYLES, '--neditor-text');
+
+    expect(blocks).toHaveLength(3);
+
+    for (const { selector, tokens } of blocks) {
+      const read = (token: string): Colour => parseColour(tokens[token] as string);
+      const surface = over(read('--neditor-surface'), WHITE);
+      const selected = over(read('--neditor-selection'), surface);
+      const tint = (token: string, ground: Colour = selected): Colour => over(read(token), ground);
+      const code = tint('--neditor-code-bg');
+      const callout = tint('--neditor-callout-bg');
+      const header = tint('--neditor-table-header-bg');
+
+      for (const [what, token, ground] of [
+        ['text', '--neditor-text', selected],
+        ['text in a code block', '--neditor-text', code],
+        ['text in a callout', '--neditor-text', callout],
+        ['text in a header cell', '--neditor-text', header],
+        ['a caption or completed to-do', '--neditor-text-muted', selected],
+        ['the code block label', '--neditor-text-muted', code],
+        ['the "Add an image" button', '--neditor-text-muted', callout],
+        ['placeholder', '--neditor-placeholder', selected],
+        ['placeholder in a code block', '--neditor-placeholder', code],
+        ['placeholder in a callout', '--neditor-placeholder', callout],
+        ['placeholder in a header cell', '--neditor-placeholder', header],
+        ['inline code', '--neditor-code-text', tint('--neditor-code-bg')],
+        ['inline code in a callout', '--neditor-code-text', tint('--neditor-code-bg', callout)],
+        ['inline code in a header cell', '--neditor-code-text', tint('--neditor-code-bg', header)],
+        ['an equation the renderer refused', '--neditor-danger', code],
+      ] as const) {
+        expect(
+          contrast(over(read(token), ground), ground),
+          `${what}, selected — ${selector}`,
+        ).toBeGreaterThan(4.5);
+      }
+    }
+  });
+
+  /**
+   * 1.4.11 asks 3:1 of whatever marks a component's state or boundary. The
+   * active slash option was marked only by the hover tint (1.11:1), a pressed
+   * format button only by a hue (2.66:1 against an unpressed one), and the
+   * three text inputs were bounded by the divider border (1.17:1).
+   */
+  test('component edges and states clear 1.4.11 in each theme', () => {
+    const tokenOf = (selector: string, property: string): string => {
+      const rule = NEDITOR_STYLES.slice(NEDITOR_STYLES.indexOf(`${selector} {`));
+      const body = rule.slice(0, rule.indexOf('}'));
+      const value = new RegExp(`${property}:[^;]*var\\((--[\\w-]+)\\)`).exec(body);
+
+      expect(value, `${selector} sets no ${property} from a token`).not.toBeNull();
+
+      return value![1] as string;
+    };
+
+    const checks = [
+      ['.neditor-link-editor__input', 'border'],
+      ['.neditor-image-editor__input', 'border'],
+      ['.neditor-icon-picker__input', 'border'],
+      [".neditor-slash-menu__item[data-active='true']", 'outline'],
+      [".neditor-toolbar__button[data-active='true']", 'box-shadow'],
+    ] as const;
+
+    for (const { selector, tokens } of blocksDefining(NEDITOR_STYLES, '--neditor-text')) {
+      const surface = over(parseColour(tokens['--neditor-surface'] as string), WHITE);
+      const raised = over(parseColour(tokens['--neditor-surface-raised'] as string), surface);
+      const hover = over(parseColour(tokens['--neditor-hover'] as string), raised);
+
+      for (const [rule, property] of checks) {
+        const token = tokenOf(rule, property);
+        const ink = parseColour(tokens[token] as string);
+        // The active option is also tinted, so its edge is measured on the tint.
+        const ground = rule.includes('slash-menu') ? hover : raised;
+
+        expect(
+          contrast(over(ink, ground), ground),
+          `${rule} ${property} (${token}) — ${selector}`,
+        ).toBeGreaterThan(3);
+      }
+    }
+  });
+
+  /**
+   * An error is small text: a rejected URL, a TeX the renderer refused. It
+   * sits on the raised surface of a popover, or on the code tint behind an
+   * equation (translucent, so composited onto the theme's own ground). The
+   * light danger red was 4.26:1 on white and 3.6:1 on that tint.
+   */
+  test('error text clears 4.5:1 on every ground it is drawn on, in each theme', () => {
+    const over = (top: Colour, ground: Colour): Colour => ({
+      r: top.r * top.a + ground.r * (1 - top.a),
+      g: top.g * top.a + ground.g * (1 - top.a),
+      b: top.b * top.a + ground.b * (1 - top.a),
+      a: 1,
+    });
+    const white: Colour = { r: 255, g: 255, b: 255, a: 1 };
+
+    for (const { selector, tokens } of blocksDefining(NEDITOR_STYLES, '--neditor-danger')) {
+      const danger = parseColour(tokens['--neditor-danger'] as string);
+      // A transparent surface sits on the host page, assumed white as the light
+      // theme assumes it.
+      const declared = tokens['--neditor-surface'] ?? 'transparent';
+      const ground = declared === 'transparent' ? white : parseColour(declared);
+      const raised = parseColour(tokens['--neditor-surface-raised'] as string);
+      const tint = over(parseColour(tokens['--neditor-code-bg'] as string), ground);
+
+      for (const [name, background] of [
+        ['raised surface', raised],
+        ['code tint', tint],
+      ] as const) {
+        expect(contrast(danger, background), `danger on ${name} — ${selector}`).toBeGreaterThan(
+          4.5,
+        );
       }
     }
   });
@@ -325,7 +515,11 @@ describe('README', () => {
    */
   test('does not claim every visible string is overridable', () => {
     expect(readme).not.toContain('Every string is overridable');
-    expect(readme).toContain('`⤫ row` and `⤫ col`');
+    // From the defaults rather than a literal, so renaming a glyph -- "col"
+    // became "column" for WCAG 2.5.3 -- cannot leave the README quoting the old.
+    expect(readme).toContain(
+      `\`${DEFAULT_LABELS.deleteRowGlyph}\` and \`${DEFAULT_LABELS.deleteColumnGlyph}\``,
+    );
   });
 });
 
@@ -393,16 +587,14 @@ describe("sizes and directions that hold on somebody else's page", () => {
   });
 
   /**
-   * `translateX` is physical, so the RTL mirroring has to be applied against
-   * the editor's own direction. Keyed off a bare `[dir='rtl']` it matched an
-   * LTR editor anywhere inside an RTL page, where `inset-inline-start` had
-   * already resolved to the left -- mirroring something unmirrored and dropping
-   * the drag handle on top of the first characters of every line.
+   * The gutter used to be shifted with a physical `translateX` and mirrored by
+   * selectors guessing the editor's direction from `[dir]` attributes, which
+   * guessed wrong for an LTR editor inside an LTR wrapper inside an RTL page.
+   * It is a logical margin now; `visual-a11y.test.ts` holds the detail. This is
+   * the guard against the guessing coming back.
    */
-  test('the RTL gutter mirroring is scoped to the editor own direction', () => {
-    expect(NEDITOR_STYLES).toContain(".neditor[dir='rtl'] .neditor-gutter");
-    expect(NEDITOR_STYLES).toContain("[dir='rtl'] .neditor:not([dir]) .neditor-gutter");
-    expect(NEDITOR_STYLES).not.toMatch(/\n\[dir='rtl'\] \.neditor-gutter \{/);
+  test('nothing in the stylesheet infers the gutter direction from an attribute', () => {
+    expect(NEDITOR_STYLES).not.toMatch(/\[dir='rtl'\][^{]*\.neditor-gutter/);
   });
 
   /**
@@ -412,6 +604,59 @@ describe("sizes and directions that hold on somebody else's page", () => {
    */
   test('no comment in the stylesheet carries a backtick', () => {
     expect(NEDITOR_STYLES).not.toContain('`');
+  });
+});
+
+describe('rules whose effect happy-dom cannot observe, pinned as written', () => {
+  const rule = (selector: string): string => {
+    const start = NEDITOR_STYLES.indexOf(`${selector} {`);
+
+    expect(start, `${selector} exists`).toBeGreaterThan(-1);
+    return NEDITOR_STYLES.slice(start, NEDITOR_STYLES.indexOf('}', start));
+  };
+
+  /**
+   * UI-9. Generated content is part of the accessible name, so an empty
+   * caption named its figure "Add a caption". The alternative-text form keeps
+   * the placeholder drawn and unread; the plain form stays first because a
+   * declaration an engine rejects is dropped whole. The e2e suite checks the
+   * name itself (images I8); happy-dom computes neither.
+   */
+  test('the placeholder is drawn with empty alternative text, after a plain fallback', () => {
+    expect(rule(".neditor-block__content[contenteditable='true']:empty::before")).toMatch(
+      /content: attr\(data-placeholder\);\s*content: attr\(data-placeholder\) \/ '';/,
+    );
+  });
+
+  /** UI-6: 20em is wider than a 320px screen, and the menu overflowed it. */
+  test('the slash menu is capped at the viewport, like the other popovers', () => {
+    expect(rule('.neditor-slash-menu')).toContain('max-width: calc(100vw - 2rem);');
+  });
+
+  /**
+   * UI-4: with no offset, the absolutely positioned gutter sat at its static
+   * position below the last block until the first hover, adding overflow the
+   * hover then removed. The e2e suite checks the layout (gutter-drag G14).
+   */
+  test('the gutter has an offset before it is first placed', () => {
+    expect(rule('.neditor-gutter')).toMatch(/\n\s*top: 0;/);
+  });
+
+  /**
+   * Round 14, review 4: a range the reader drew in the page across the editor
+   * took in the live region's last announcement ("3 blocks selected"), and
+   * Chromium's Mod+C copied it. The e2e suite checks the range and the copy
+   * (accessibility A3b); happy-dom applies no user-select to a selection.
+   * Not under a drag across blocks: with the blocks' text unselectable then,
+   * the live region is the one place in the editor WebKit's own caret can
+   * go, and without it the caret went to the page after the editor (read-only
+   * RO6n, RO6r).
+   */
+  test('the live region cannot be selected, in WebKit either, except under a drag', () => {
+    expect(rule('.neditor-live-region')).not.toContain('user-select');
+    expect(rule(".neditor:not([data-selecting='true']) .neditor-live-region")).toMatch(
+      /-webkit-user-select: none;\s*user-select: none;/,
+    );
   });
 });
 

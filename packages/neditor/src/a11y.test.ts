@@ -1,9 +1,10 @@
 // @vitest-environment happy-dom
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import type { Block } from './index.ts';
 import { NEDITOR_STYLES, createEditor } from './index.ts';
 import type { NEditor } from './editor.ts';
+import { DEFAULT_LABELS } from './labels.ts';
 
 /**
  * Accessibility regressions.
@@ -195,6 +196,81 @@ describe('keyboard reachability', () => {
     expect(editor.getDocument().blocks[0]?.rows).toHaveLength(2);
   });
 
+  /**
+   * R4-PTR-2. A range in a cell draws the format toolbar, and the format
+   * toolbar keeps the table toolbar hidden: F10 focused a hidden button, so
+   * focus stayed in the cell and the key was swallowed -- with a Shift+arrow
+   * range (Chromium), and in WebKit after every Tab, whose whole-cell
+   * selection does the same. F10 draws the table toolbar for its own cell.
+   */
+  for (const how of ['a Shift+arrow range', 'the whole cell Tab selects'] as const) {
+    test(`F10 reaches the table toolbar with ${how} in the cell`, ({ onTestFinished }) => {
+      // happy-dom lays nothing out, and the format toolbar is drawn only for a
+      // range with a box.
+      const rect = vi
+        .spyOn(Range.prototype, 'getBoundingClientRect')
+        .mockReturnValue(new DOMRect(40, 40, 30, 16));
+      onTestFinished(() => {
+        rect.mockRestore();
+      });
+      const editor = mount([
+        block({ type: 'table', rows: [[[{ text: 'Alpha' }], [{ text: 'Bravo' }]]] }),
+      ]);
+      const first = editor.element.querySelector<HTMLElement>('[data-cell="0:0"]')!;
+      const second = editor.element.querySelector<HTMLElement>('[data-cell="0:1"]')!;
+      const format = document.querySelector<HTMLElement>('.neditor-toolbar')!;
+      const table = document.querySelector<HTMLElement>('.neditor-table-toolbar')!;
+
+      let tabbed = true;
+
+      if (how === 'a Shift+arrow range') {
+        second.focus();
+        getSelection()?.setBaseAndExtent(second.firstChild!, 3, second.firstChild!, 5);
+      } else {
+        first.focus();
+        getSelection()?.collapse(first.firstChild, 5);
+        document.dispatchEvent(new Event('selectionchange'));
+        tabbed = press(first, 'Tab');
+      }
+      expect(tabbed).toBe(true);
+      expect(document.activeElement).toBe(second);
+      document.dispatchEvent(new Event('selectionchange'));
+      expect(format.hidden, 'the range draws the format toolbar').toBe(false);
+      expect(table.hidden, 'which keeps the table toolbar hidden').toBe(true);
+
+      expect(press(second, 'F10')).toBe(true);
+
+      expect(table.hidden).toBe(false);
+      expect(format.hidden).toBe(true);
+      expect(table.contains(document.activeElement)).toBe(true);
+
+      // A selectionchange that arrives after F10 -- Chromium keeps the range
+      // in the cell, and under load the one for a Tab's selection comes late
+      // -- draws no format toolbar over the one being operated.
+      document.dispatchEvent(new Event('selectionchange'));
+      expect(format.hidden).toBe(true);
+      expect(table.hidden).toBe(false);
+
+      // And it acts on the cell F10 came from.
+      (document.activeElement as HTMLElement).click();
+      expect(editor.getDocument().blocks[0]?.rows).toHaveLength(2);
+    });
+  }
+
+  test('F10 that cannot reach the toolbar leaves the key alone', () => {
+    const editor = mount([block({ type: 'table', rows: [[[{ text: 'A' }]]] })]);
+    const cell = editor.element.querySelector<HTMLElement>('[data-cell="0:0"]')!;
+    const table = document.querySelector<HTMLElement>('.neditor-table-toolbar')!;
+    cell.focus();
+    // A host stylesheet, or an engine, that will not let its buttons focus.
+    for (const button of table.querySelectorAll('button')) {
+      button.focus = () => {};
+    }
+
+    expect(press(cell, 'F10')).toBe(false);
+    expect(document.activeElement).toBe(cell);
+  });
+
   test('arrows rove within the toolbar and Escape returns to the cell', () => {
     const editor = mount([block({ type: 'table', rows: [[[{ text: 'A' }]]] })]);
     const cell = editor.element.querySelector<HTMLElement>('[data-cell="0:0"]')!;
@@ -210,6 +286,61 @@ describe('keyboard reachability', () => {
 
     expect((document.activeElement as HTMLElement)?.dataset.cell).toBe('0:0');
   });
+
+  /*
+   * R5-PTR-3. The F10 case asked no modifier, so Shift+F10 -- the keyboard's
+   * context menu -- and Ctrl, Alt or Meta with it all focused the table
+   * toolbar and swallowed the key. Only F10 itself is the toolbar's.
+   */
+  for (const modifier of ['shiftKey', 'ctrlKey', 'altKey', 'metaKey'] as const) {
+    test(`${modifier.replace('Key', '')}+F10 in a cell is left alone`, () => {
+      const editor = mount([block({ type: 'table', rows: [[[{ text: 'alpha bravo' }]]] })]);
+      const cell = editor.element.querySelector<HTMLElement>('[data-cell="0:0"]')!;
+      const table = document.querySelector<HTMLElement>('.neditor-table-toolbar')!;
+      cell.focus();
+      getSelection()?.collapse(cell.firstChild, 3);
+
+      expect(press(cell, 'F10', { [modifier]: true })).toBe(false);
+      expect(document.activeElement).toBe(cell);
+      expect(table.contains(document.activeElement)).toBe(false);
+    });
+  }
+
+  /*
+   * R5-PTR-4. Escape from the toolbar put the caret at the cell's end, so a
+   * caret at 3, a range 6-11 or a backward one were all lost on the way back.
+   * The probe's three selections, in a cell reading "alpha bravo charlie".
+   */
+  for (const [how, anchor, focus] of [
+    ['a caret at 3', 3, 3],
+    ['a range 6-11', 6, 11],
+    ['a backward range 11-6', 11, 6],
+  ] as const) {
+    test(`Escape from the table toolbar puts back ${how}`, () => {
+      const editor = mount([
+        block({ type: 'table', rows: [[[{ text: 'x' }], [{ text: 'alpha bravo charlie' }]]] }),
+      ]);
+      const cell = editor.element.querySelector<HTMLElement>('[data-cell="0:1"]')!;
+      cell.focus();
+      getSelection()?.setBaseAndExtent(cell.firstChild!, anchor, cell.firstChild!, focus);
+      document.dispatchEvent(new Event('selectionchange'));
+
+      expect(press(cell, 'F10')).toBe(true);
+      // WebKit drops the cell's selection when a toolbar button takes focus;
+      // what comes back cannot be read from it.
+      getSelection()?.removeAllRanges();
+      press(document.activeElement as HTMLElement, 'Escape');
+
+      expect(document.activeElement).toBe(cell);
+      const selection = getSelection()!;
+      expect(cell.contains(selection.anchorNode)).toBe(true);
+      expect([selection.anchorOffset, selection.focusOffset]).toEqual([anchor, focus]);
+      expect(editor.getSelectionState()).toMatchObject({
+        cell: { row: 0, column: 1 },
+        range: { start: Math.min(anchor, focus), end: Math.max(anchor, focus) },
+      });
+    });
+  }
 
   test('the table toolbar survives toolbar:false', () => {
     const editor = mount([block({ type: 'table', rows: [[[{ text: 'A' }]]] })], {
@@ -391,13 +522,16 @@ describe('selection is not signalled by colour alone', () => {
     expect(NEDITOR_STYLES).toContain(':focus-visible');
   });
 
-  test('the forced-colors opt-out stops at the selected block', () => {
+  test('the forced-colors opt-out reaches the descendants with system colours', () => {
     // forced-color-adjust is inherited, so opting the block out took its whole
     // subtree with it: the bullet of a selected list and the text of a selected
     // completed to-do kept their author colour on the system Highlight, at
-    // roughly 1.2:1. Descendants have to be handed back to the system palette.
+    // roughly 1.2:1. Handing them back with `auto` was worse in Chromium, whose
+    // backplate then painted Canvas behind HighlightText -- white on white. The
+    // descendants opt out as well and are given system colours explicitly;
+    // visual-a11y.test.ts holds the detail.
     expect(NEDITOR_STYLES).toMatch(
-      /\.neditor-block\[data-selected='true'\] \*\s*\{\s*forced-color-adjust: auto;/,
+      /\.neditor-block\[data-selected='true'\] \*,[^{]*\{\s*forced-color-adjust: none;\s*color: HighlightText;/,
     );
   });
 });
@@ -786,9 +920,73 @@ describe('a rejected URL is signalled by more than a colour', () => {
     editor.openLinkEditor();
 
     expect(input.getAttribute('aria-invalid')).toBeNull();
-    expect(document.getElementById(input.getAttribute('aria-describedby') ?? '')?.hidden).toBe(
-      true,
-    );
+    // No description at all, rather than one pointing at a hidden message:
+    // description computation follows a reference into a hidden node.
+    expect(input.hasAttribute('aria-describedby')).toBe(false);
+  });
+
+  test('typing a correction clears the rejection, in the link and the image editor', () => {
+    // UI-8: the message and aria-invalid stood while the corrected URL was
+    // typed, so every keystroke of the fix was announced as invalid.
+    const { input } = openLink();
+
+    input.value = 'not a url';
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(input.getAttribute('aria-invalid')).toBe('true');
+    const message = document.getElementById(input.getAttribute('aria-describedby') ?? '')!;
+
+    input.value = 'https://example.com';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(input.getAttribute('aria-invalid')).toBeNull();
+    expect(input.hasAttribute('aria-describedby')).toBe(false);
+    expect(message.hidden).toBe(true);
+
+    const editor = mount([block({ id: 'img', type: 'image', src: 'https://a.test/x.png' })]);
+    editor.element.querySelector<HTMLElement>('.neditor-image__trigger')!.click();
+    const dialogs = document.querySelectorAll('.neditor-image-editor');
+    const src = dialogs[dialogs.length - 1]!.querySelector<HTMLInputElement>('input')!;
+
+    src.value = 'javascript:alert(1)';
+    src.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(src.getAttribute('aria-invalid')).toBe('true');
+
+    src.value = 'https://a.test/y.png';
+    src.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(src.getAttribute('aria-invalid')).toBeNull();
+    expect(src.hasAttribute('aria-describedby')).toBe(false);
+  });
+
+  test('a field that was never rejected has no description to read', () => {
+    const { input } = openLink();
+
+    expect(input.hasAttribute('aria-describedby')).toBe(false);
+  });
+
+  test('the image popover names its error only while it is shown', () => {
+    const editor = mount([block({ type: 'image' })]);
+    editor.element
+      .querySelector<HTMLElement>('.neditor-image__placeholder')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const popovers = document.querySelectorAll<HTMLElement>('.neditor-image-editor');
+    const src = popovers[popovers.length - 1]!.querySelector<HTMLInputElement>('input')!;
+
+    expect(src.hasAttribute('aria-describedby')).toBe(false);
+
+    src.value = 'javascript:alert(1)';
+    src.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+    const described = document.getElementById(src.getAttribute('aria-describedby') ?? '');
+    expect(src.getAttribute('aria-invalid')).toBe('true');
+    expect(described?.hidden).toBe(false);
+
+    // Reopened, the rejection is gone, and so is the description naming it.
+    src.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    editor.element
+      .querySelector<HTMLElement>('.neditor-image__placeholder')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(src.getAttribute('aria-invalid')).toBeNull();
+    expect(src.hasAttribute('aria-describedby')).toBe(false);
   });
 
   test('forced colours restate the rejection, which they previously dropped', () => {
@@ -796,6 +994,137 @@ describe('a rejected URL is signalled by more than a colour', () => {
       /forced-colors: active[\s\S]*neditor-link-editor__input\[data-invalid='true'\]/,
     );
     expect(NEDITOR_STYLES).toMatch(/forced-colors: active[\s\S]*neditor-link-editor__error/);
+  });
+});
+
+describe('TeX the renderer refused is said aloud when it is applied', () => {
+  /**
+   * The equation popover named its error as the field's description, added
+   * while typing. Enter leaves focus in the field, so a description that
+   * appears there is never read, and there was no live region: applying TeX
+   * the renderer refused said nothing at all. Applying always closes this
+   * dialog (refused TeX is written as source), so an alert inside it would be
+   * hidden in the same tick; it has to be somewhere that outlives the close.
+   */
+  const refusing = (): HTMLInputElement => {
+    const editor = mount([block({ id: 'p', content: [{ text: 'ab' }] })], {
+      renderMath: () => {
+        throw new Error('ParseError');
+      },
+    });
+    editor.focusRange('p', 1, 1);
+    editor.openMathEditor();
+
+    return document.querySelector<HTMLInputElement>('.neditor-math-editor input')!;
+  };
+
+  /** Alerts carrying the refusal, among those a reader could still hear. */
+  const spoken = (): HTMLElement[] =>
+    [...document.querySelectorAll<HTMLElement>('[role="alert"]')].filter(
+      (alert) =>
+        alert.textContent === DEFAULT_LABELS.mathError &&
+        alert.closest('[hidden], [aria-hidden="true"]') === null,
+    );
+
+  const type = (field: HTMLInputElement, tex: string): void => {
+    field.value = tex;
+    field.dispatchEvent(new Event('input'));
+  };
+
+  test('destroying the editor takes the alert with it, wherever the portals live', () => {
+    // It sits beside the dialog, outside it, so tearing the dialog down does
+    // not remove it on its own.
+    for (const shadow of [false, true]) {
+      const host = document.createElement('div');
+      document.body.append(host);
+      const root = shadow ? host.attachShadow({ mode: 'open' }) : document.body;
+      const mountPoint = document.createElement('div');
+      root.append(mountPoint);
+      const editor = createEditor({
+        element: mountPoint,
+        doc: { blocks: [block({ id: 'p', content: [{ text: 'ab' }] })] },
+        renderMath: () => {
+          throw new Error('ParseError');
+        },
+      });
+      // Registered like every other editor here, so a failing assertion
+      // still leaves `afterEach` to destroy it.
+      editors.push(editor);
+      editor.focusRange('p', 1, 1);
+      editor.openMathEditor();
+
+      expect(root.querySelectorAll('.neditor-math-editor ~ [role="alert"]')).toHaveLength(1);
+
+      editor.destroy();
+
+      expect(root.querySelectorAll('[role="alert"].neditor-live-region')).toHaveLength(0);
+      host.remove();
+    }
+  });
+
+  test('Enter on refused TeX fills an alert that survives the dialog closing', () => {
+    const field = refusing();
+    type(field, '\\frac{');
+
+    field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+    expect(document.querySelector<HTMLElement>('.neditor-math-editor')!.hidden).toBe(true);
+    expect(spoken()).toHaveLength(1);
+  });
+
+  test('so does Apply', () => {
+    const field = refusing();
+    type(field, '\\frac{');
+
+    document
+      .querySelector<HTMLButtonElement>('.neditor-math-editor .neditor-link-editor__button')!
+      .click();
+
+    expect(document.querySelector<HTMLElement>('.neditor-math-editor')!.hidden).toBe(true);
+    expect(spoken()).toHaveLength(1);
+  });
+
+  test('not on every keystroke: typing refused TeX announces nothing', () => {
+    const field = refusing();
+
+    type(field, '\\');
+    type(field, '\\fr');
+    type(field, '\\frac{');
+
+    expect(spoken()).toHaveLength(0);
+  });
+
+  test('TeX that drew applies silently, and reopening takes a stale refusal back', () => {
+    const editor = mount([block({ id: 'p', content: [{ text: 'ab' }] })], {
+      renderMath: (tex: string) => {
+        if (tex.includes('{') && !tex.includes('}')) {
+          throw new Error(tex);
+        }
+
+        return tex;
+      },
+    });
+    const field = (): HTMLInputElement =>
+      document.querySelector<HTMLInputElement>('.neditor-math-editor input')!;
+    const enter = (): void => {
+      field().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    };
+
+    editor.focusRange('p', 1, 1);
+    editor.openMathEditor();
+    type(field(), 'x^2');
+    enter();
+    expect(spoken()).toHaveLength(0);
+
+    editor.focusRange('p', 0, 0);
+    editor.openMathEditor();
+    type(field(), '\\frac{');
+    enter();
+    expect(spoken()).toHaveLength(1);
+
+    editor.focusRange('p', 0, 0);
+    editor.openMathEditor();
+    expect(spoken()).toHaveLength(0);
   });
 });
 

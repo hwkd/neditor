@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, expect, test } from 'vitest';
 
-import { asElement, hasInputType, isElement, isNode, isTextNode } from './dom.ts';
+import { asElement, hasInputType, isElement, isNode, isShadowRoot, isTextNode } from './dom.ts';
 
 /**
  * The realm-safety contract.
@@ -60,6 +60,39 @@ describe('isTextNode', () => {
   test('accepts a foreign text node', () => {
     expect(isTextNode(foreignText)).toBe(true);
     expect(isTextNode(foreignElement)).toBe(false);
+  });
+});
+
+describe('isShadowRoot', () => {
+  test('accepts an open root and a closed one, which only `getRootNode` reaches', () => {
+    for (const mode of ['open', 'closed'] as const) {
+      const host = document.createElement('div');
+      const root = host.attachShadow({ mode });
+      const inside = root.appendChild(document.createElement('span'));
+
+      expect(isShadowRoot(inside.getRootNode())).toBe(true);
+      expect(isShadowRoot(root)).toBe(true);
+    }
+  });
+
+  test('accepts a foreign root', () => {
+    const foreign = { nodeType: 11, nodeName: '#document-fragment', host: foreignElement };
+
+    expect(isShadowRoot(foreign)).toBe(true);
+  });
+
+  test('rejects an <a> and an <area>, which have a `host` of their own', () => {
+    expect('host' in document.createElement('a')).toBe(true);
+    expect(isShadowRoot(document.createElement('a'))).toBe(false);
+    expect(isShadowRoot(document.createElement('area'))).toBe(false);
+  });
+
+  test('rejects a document, a plain fragment and an element', () => {
+    expect(isShadowRoot(document)).toBe(false);
+    expect(isShadowRoot(document.createDocumentFragment())).toBe(false);
+    expect(isShadowRoot(document.createElement('div'))).toBe(false);
+    expect(isShadowRoot(foreignElement)).toBe(false);
+    expect(isShadowRoot(null)).toBe(false);
   });
 });
 

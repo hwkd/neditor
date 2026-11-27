@@ -173,4 +173,118 @@ test.describe('13 · history', () => {
     expect(await editor.selection()).toMatchObject({ blockId: 'p2', range: { start: 0, end: 5 } });
     expect((await editor.blockData('p2'))?.content).toEqual([{ text: 'Bravo two' }]);
   });
+
+  test('H9 undoing the gutter + far down the page stays there (STR-4)', async ({
+    editor,
+    page,
+  }) => {
+    await editor.load({ doc: 'long' });
+    await editor.content('p40').scrollIntoViewIfNeeded();
+    await editor.settleScroll();
+    await editor.hoverBlock('p40');
+    await editor.addButton.click();
+    await editor.type('x');
+    const scrolled = await page.evaluate(() => window.scrollY);
+    expect(scrolled, 'precondition: the page is scrolled').toBeGreaterThan(400);
+
+    await page.keyboard.press(`${MOD}+z`);
+    await page.keyboard.press(`${MOD}+z`);
+    expect(await editor.ids()).toHaveLength(60);
+    expect(await editor.selection()).toMatchObject({ blockId: 'p40' });
+    await editor.settle();
+    expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(400);
+  });
+
+  test('H10 Mod+Z with a toggle chevron focused undoes the chevron press (STR-9)', async ({
+    editor,
+    page,
+  }) => {
+    await editor.load({ doc: 'toggle-collapsed' });
+    const chevron = editor.block('tg').locator('.neditor-block__chevron');
+    // The keyboard route to the chevron: Shift+Tab from the toggle's text.
+    await editor.clickAt('tg', 3);
+    await page.keyboard.press('Shift+Tab');
+    await expect(chevron).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(editor.block('child1')).toBeVisible();
+    await expect(chevron).toBeFocused();
+
+    await page.keyboard.press(`${MOD}+z`);
+    expect((await editor.blockData('tg'))?.collapsed).toBe(true);
+    await expect(editor.block('child1')).toBeHidden();
+  });
+
+  test('H11 redo comes back to where the redone edit left the caret (TXT-12)', async ({
+    editor,
+    page,
+  }) => {
+    await editor.load({ doc: 'empty', toolbar: 0 });
+    await editor.clickAt('p1', 0);
+    await editor.type('Hello world');
+    for (let i = 0; i < 5; i += 1) {
+      await page.keyboard.press('Shift+ArrowLeft');
+    }
+    await page.keyboard.press(`${MOD}+b`);
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Enter');
+    await editor.type('Title');
+
+    await page.keyboard.press(`${MOD}+z`); // Title
+    await page.keyboard.press(`${MOD}+z`); // Enter
+    await page.keyboard.press(`${MOD}+z`); // bold
+    await page.keyboard.press(`${MOD}+Shift+z`);
+    expect(await editor.selection()).toMatchObject({ range: { start: 6, end: 11 } });
+    await page.keyboard.press(`${MOD}+Shift+z`);
+    await page.keyboard.press(`${MOD}+Shift+z`);
+    expect(await editor.texts()).toEqual(['Hello world', 'Title']);
+    expect(await editor.selection()).toMatchObject({ range: { start: 5, end: 5 } });
+  });
+
+  test('H12 a backward selection keeps its direction across Mod+B and its undo (TXT-13)', async ({
+    editor,
+    page,
+  }) => {
+    await editor.load({ doc: 'paragraphs', toolbar: 0 });
+    await editor.clickAt('p2', 6);
+    for (let i = 0; i < 3; i += 1) {
+      await page.keyboard.press('Shift+ArrowLeft');
+    }
+    await page.keyboard.press(`${MOD}+b`);
+    await page.keyboard.press('Shift+ArrowLeft');
+    expect((await editor.selection())?.range).toEqual({ start: 2, end: 6 });
+
+    await page.keyboard.press(`${MOD}+z`);
+    expect((await editor.selection())?.range).toEqual({ start: 3, end: 6 });
+    await page.keyboard.press('Shift+ArrowLeft');
+    expect((await editor.selection())?.range).toEqual({ start: 2, end: 6 });
+  });
+
+  /*
+   * R2-NAV-9. The link is applied with focus in its dialog, where a real
+   * browser has no text selection to record, so undo put the caret at 0.
+   * E2E only: happy-dom keeps a selection in an element whatever holds
+   * focus, so a unit test records the right range with the fix removed.
+   */
+  test('H13 undoing a link applied from its dialog selects the linked text again', async ({
+    editor,
+    page,
+  }) => {
+    await editor.load({ doc: 'paragraphs' });
+    await editor.placeCaret('p2', 6, 9);
+    await page.keyboard.press(`${MOD}+k`);
+    await page.keyboard.type('example.com');
+    await page.keyboard.press('Enter');
+    expect((await editor.blockData('p2'))?.content.at(-1)).toMatchObject({ text: 'two' });
+    expect((await editor.blockData('p2'))?.content.at(-1)?.link).toBeTruthy();
+
+    // Somewhere else first, so the caret undo restores is undo's own.
+    await editor.clickAt('p1', 2);
+    await page.keyboard.press(`${MOD}+z`);
+
+    expect((await editor.blockData('p2'))?.content).toEqual([{ text: 'Bravo two' }]);
+    expect(await editor.selection()).toMatchObject({
+      blockId: 'p2',
+      range: { start: 6, end: 9 },
+    });
+  });
 });

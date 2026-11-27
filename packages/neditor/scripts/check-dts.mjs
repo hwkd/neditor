@@ -19,26 +19,35 @@ const tsc = join(root, 'node_modules', 'typescript', 'bin', 'tsc');
 const dir = mkdtempSync(join(tmpdir(), 'neditor-dts-'));
 const LIB_REFERENCE = '/// <reference lib="dom" />';
 
-// Every type the public surface can hand back, named the way a wrapper names
-// it: through the signature, not by importing it directly. Importing directly
-// would have passed even while the emitted declaration was unusable.
+// Every type the public surface can hand back, imported (so it is exported at
+// all) and, where a signature hands it back, also named the way a wrapper
+// names it: through that signature. Importing alone passed while the emitted
+// declaration was unusable -- the interface the signature named was private
+// and emitted as `CellCoords$1` -- and the derived name fails to compile
+// (TS4023) when that happens.
 const CONSUMER = `
-import { NEditor, createEditor } from '@neditor/core';
+import { NEditor, createEditor, renderRichText } from '@neditor/core';
 import type {
   Block, BlockType, CellCoords, NEditorDocument, NEditorLabels, NEditorOptions,
   NEditorTheme, OffsetRange, RichText, SelectionState, SlashCommand,
-  SlashCommandLabel, TableRows, TextRun,
+  SlashCommandLabel, TableRows, TextRun, MathRenderer,
 } from '@neditor/core';
 
 export const cell = (...a: Parameters<NEditor['focusRange']>) => a[3];
 export const doc = (e: NEditor) => e.getDocument();
 export const sel = (e: NEditor) => e.getSelectionState();
 export const mount = (o: NEditorOptions) => createEditor(o);
+// Interfaces reached through a signature only. \`MathRenderer\` is a type
+// alias, which a declaration inlines rather than names, so it can only be
+// pinned by importing it, as above.
+export const drawnWith = (...a: Parameters<NonNullable<NEditorOptions['renderMath']>>) => a[1];
+export const richWith = (...a: Parameters<typeof renderRichText>) => a[2];
 export const named = (
   b: Block, t: BlockType, c: CellCoords, d: NEditorDocument, l: NEditorLabels,
   th: NEditorTheme, o: OffsetRange, r: RichText, s: SelectionState,
   sc: SlashCommand, sl: SlashCommandLabel, tr: TableRows, tx: TextRun,
-) => [b, t, c, d, l, th, o, r, s, sc, sl, tr, tx] as const;
+  mr: MathRenderer,
+) => [b, t, c, d, l, th, o, r, s, sc, sl, tr, tx, mr] as const;
 `;
 
 // The point of the `./model` entry: it names no DOM type, so it must compile
@@ -113,8 +122,13 @@ try {
 
   const emitted = readFileSync(join(dir, 'out', 'index.d.ts'), 'utf8');
 
-  if (!emitted.includes('CellCoords')) {
-    throw new Error('declaration emitted, but the consumer could not name CellCoords');
+  // Whole words, and only names no import above supplies (`CellCoords` is
+  // imported, and pinned by the compile itself): each is in the declaration
+  // because a signature reached it.
+  for (const name of ['MathRenderOptions', 'RenderOptions']) {
+    if (!new RegExp(`\\b${name}\\b`).test(emitted)) {
+      throw new Error(`declaration emitted, but the consumer could not name ${name}`);
+    }
   }
 
   console.warn('dts: a consumer can name every public type and emit declarations');

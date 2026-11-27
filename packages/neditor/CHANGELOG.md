@@ -15,11 +15,32 @@ that changes what you store or what other applications receive is listed first.
   TeX is shown as source. See the README's Math section for the serialization
   and its limits.
 
+  New exports: `MATH_ATOM`, `isMathRun`, `richMath`, `richToSourceText`,
+  `isLiteralType`, and the types `MathRenderer`, `MathRenderOptions` and
+  `RenderOptions`; a new method, `openMathEditor()`; a **∑** button on the
+  selection toolbar.
+
 ### Changed output
 
+- **Stored Markdown: `$…$` now reads as a formula.** Earlier versions wrote
+  `$` bare, so text saved by them that fits the inline rule -- `$x$`, or
+  `a $b c$ d` -- loads as a formula and is saved that way. A price range
+  (`$5-$10`) does not: a closing `$` followed by a digit closes nothing.
 - **Markdown: a `$` in text is written `\$`**, because `$…$` is now a
-  formula; and `\$` is read as a literal `$` (before, the backslash was kept).
-  Inside a backtick code span `$` is still written bare.
+  formula -- in `toMarkdown` and so in the `text/plain` of every block copy,
+  which other applications receive. `\$` is read as a literal `$` (before,
+  the backslash was kept). Inside a backtick code span `$` is still written
+  bare. A digit right after a formula is written as a numeric reference
+  (`$x$&#50;`).
+- **HTML (`blocksToHtml`, and the `text/html` of a copy):** a formula is
+  `<span data-neditor-math="TeX">$TeX$</span>`, an equation
+  `<div data-neditor-math-block="TeX">$$TeX$$</div>`. Copying a text range
+  that holds a formula now writes this too, instead of the browser's copy of
+  what the renderer drew.
+- **`--neditor-danger`** is `rgb(174 44 39)` in the light theme, darkened from
+  `rgb(212 76 71)`, and `rgb(255 165 158)` in the dark one, lightened from
+  `rgb(255 115 105)`, so error text clears 4.5:1 on white, on the code tint
+  behind an equation, and on that tint inside a selected block.
 
 - **Markdown (`toMarkdown`, and the `text/plain` of a block copy).**
   - Whitespace and newlines at the edge of a block's text are written as
@@ -58,7 +79,8 @@ that changes what you store or what other applications receive is listed first.
     in whatever this writer put against it: an escape's backslash
     (`https://a.test/\~x`), a line break's, the `&#32;` of a trailing space.
     GFM's trailing punctuation stays outside the autolink. A URL holding `*`, a
-    backtick, a bracket or `~~` (or `~` in struck text) keeps the escaped
+    backtick, a bracket or `~~` (or `~` in struck text, or a `$` when a
+    formula or a code span holding `$` follows it in the block) keeps the escaped
     spelling, as does a `www.` URL, where a `_` between two letters or digits
     is written bare; GFM readers still link those with the backslashes in.
     CommonMark readers render the autolink as a link where they showed text.
@@ -103,8 +125,95 @@ that changes what you store or what other applications receive is listed first.
 - **Touch.** A finger dragged across blocks no longer selects them (the browser
   scrolls); long press is the touch way into block selection.
 
+### Changed types
+
+- `BlockType` has a new member, `'math'`: an exhaustive `switch` over block
+  types needs a case for it.
+- `NEditorLabels` has new required keys (`inlineMath`, `mathTex`,
+  `mathPlaceholder`, `mathError`, `mathBlockLabel`), and `slashCommands` and
+  `placeholders` gain a `math` entry. A partial object passed as `labels` is
+  filled in by `resolveLabels`, so only a complete `NEditorLabels` written out
+  by hand needs them.
+- `TextRun` has a new optional field, `math`. `renderRichText` and
+  `richToMarkdown` take a new, optional, last argument.
+
+### Changed behaviour
+
+- **Code blocks are literal, like equations.** The selection toolbar is not
+  offered in one, `toggleMark` and `openLinkEditor` do nothing there and
+  `setLink` returns `false`: marks and links in a code block were dropped
+  when the document was saved.
+- **A pasted code block or equation stands as a block of its own.** Pasted
+  into a paragraph, its text was merged into the paragraph's.
+- **Pasted at the very start of a block with text, several blocks -- or one
+  that cannot merge, a table, an image, a divider, a code block or an
+  equation -- go in front of it** and leave it itself: its type, id, check,
+  icon and children. A last pasted block of prose at the paste's top level
+  joins its text to the start of the block. The block was split at the caret
+  instead and its text rebuilt as a new block: a heading lost its level, a
+  checked to-do its check, both their ids, and a toggle or callout its
+  children, which passed to another block. The same holds for an empty block
+  with blocks nested under it, a list item or a to-do with sub-items, and for
+  a table or another block that cannot merge pasted into an empty toggle or
+  callout at the deepest level. Otherwise an empty toggle or callout takes
+  the paste, as typed there: its first line of prose becomes the block's text
+  and the rest, a table too, nests under it -- or, at the deepest level,
+  follows it, as Enter there does.
+- **Pasted blocks keep their own shape, from the depth of the block they land
+  in** -- at the caret, at the start of a block, into an empty one or over
+  selected blocks -- and lines pasted into a toggle's or a callout's own text
+  become its children, as Enter makes them, opening a collapsed one. A paste
+  that started nested (`<ul><ul><li>`, a drag begun in a sub-item) went in as
+  a child of the block before it, inside a collapsed toggle there where
+  nobody saw it, and one pasted mid-text into a collapsed toggle hid the
+  reader's own text after the caret. A collapsed toggle a paste brings (a
+  closed `<details>`) opens when the reader's own blocks, or the text after
+  the caret, would otherwise end up hidden under it.
+- **A block a paste replaces keeps none of its old type's fields**, and
+  neither a block with children under it nor a toggle or callout is ever
+  replaced, even with no text: pasted into an empty to-do that has sub-items,
+  a table goes in front of it, and into an empty toggle, under it. A table
+  that replaced an empty to-do kept `checked`, and one that replaced an empty
+  toggle kept `collapsed` and took its children. A replaced block keeps its id
+  and depth.
+
 ### Fixed
 
+- **Security** -- HTML paste and drop (also on earlier versions): an event
+  handler on pasted or dropped markup could run, in every engine, and so could
+  one in HTML a host passed to `blocksFromHtml` -- an image's, picture's or
+  media element's `onload`, `onerror` or `onloadstart`, a `<details open>`'s
+  `ontoggle`, and others. The markup is parsed in an inert template, but the
+  reader copies what it reads into wrappers of its own -- a run cut at its
+  pictures, an inline wrapper's or a container's formatting pushed into the
+  blocks it holds (`<b><p>x</p><img src=… onerror></b>`) -- and it made those
+  wrappers in the live document, which adopted the copies: their images and
+  media were fetched at paste time, and their handlers ran whether the load
+  succeeded or failed. Past that template, everything the reader builds is
+  now made in a document with no browsing context, where nothing loads.
+  Nothing pasted reached the document model either way.
+- A link longer than the inline rules reach (about 2,000 characters, as a
+  signed or tracking URL can be) came back from `toMarkdown` as its Markdown
+  text, and with characters missing from its URL: `_x_` in it read as
+  italic. The writer now escapes `*`, `_`, `~` and `$` in such a destination,
+  so the text survives; the link itself still cannot (HTML keeps it). A link
+  whose URL leaves (about) no room for any label is also no longer split at
+  its label's spaces, which wrote its URL once a word and came back as all of
+  those spellings; with a little room, a long label still can be (see the
+  README's Inline Markdown limits).
+- Applying TeX the renderer refused, from the equation popover, said
+  nothing to a screen reader: the popover closed with the error only ever
+  named as the field's description. A live region now announces it.
+- A formula whose TeX held a `](` or an autolink opener (`$[0,1](x$)`, an
+  interval in parentheses; `$a<http://b$`) closed nothing, typed or pasted,
+  so the writer's own Markdown came back as text. Only a link whose `[`, or
+  an autolink whose `<`, came before the formula's `$` holds it now.
+- Pasted Markdown with a link whose label is a formula alone
+  (`[$x$](https://a.test/)`) lost its brackets and URL, keeping only the
+  formula. It is now left as written, the formula inside it.
+- A paste that changed nothing -- `## `, `- ` or `> ` as plain text, each an
+  empty block, pasted mid-paragraph -- still recorded an undo step and fired
+  `change`.
 - A `Tab` that cannot indent, pressed with blocks selected, left the block
   selected behind a visible caret, so the next key replaced the block.
 - Dragging, by its handle, the block holding the caret left that caret live, so
@@ -167,7 +276,10 @@ that changes what you store or what other applications receive is listed first.
   (`mailto:team@example.com?subject=Feedback%20(v2)`) was read back, and typed,
   as a link to `https://%3Cmailto:…`. A link or image destination that opens
   with `<` is only ever the angle form, and a closed one whose URL is refused
-  is text, with no link made out of a `[…](` inside it.
+  is not a link; a `[…](` inside it that runs past its `>` is no link either
+  (within the inline rules' reach of about 2,000 characters). A link written
+  whole inside its URL is still read as one (see the README's nested-link
+  limit).
 - A carriage return in a block's text, a table cell or a caption (pasted HTML
   can carry one as `&#13;`) was written raw. Every reader takes it for a line
   break, so the block came back split, and a table came back as paragraphs. It
@@ -194,7 +306,9 @@ that changes what you store or what other applications receive is listed first.
   list moved above it. An image counts as a block on its own, inside a link
   (GitHub's markup) or inside a paragraph (a loose list); one anywhere in the
   item's text -- beside words, in a wrapper, beside a task's checkbox -- is
-  handed on as a child image rather than dropped with the text it sat in. An
+  handed on as a child image rather than dropped with the text it sat in,
+  among the item's blocks where the browser draws it (the text itself is
+  read ahead of them; on `main`, one after a nested list went above it). An
   item whose blocks come before any text of its own takes its first paragraph
   that holds text as its text, so it keeps its place and number. They are now the item's children, in order; the item
   itself, its to-do box and its number stay, and bare text after one of them
@@ -236,26 +350,27 @@ that changes what you store or what other applications receive is listed first.
   `<center>` (HTML email centres its lines with it), `<address>`, `<aside>`,
   `<form>` -- no longer runs into the text beside it. Text in a link or a
   bold, italic or similar wrapper that also holds an image (an icon in a
-  link) keeps its link and formatting; it was read bare (on `main` too). One
-  that also holds a block this reader has no name for, such as `<center>`, is
-  still read bare, as on `main`, so that block keeps its lines. An image in a
+  link) keeps its link and formatting; it was read bare. So
+  does one that also holds a block this reader has no name for, such as
+  `<center>` in an email signature, and that block still keeps its lines. An image in a
   heading, a quote or a table cell -- a README's logo, a quoted screenshot, an
   email's banner -- is handed on as an image block after it rather than
-  dropped (on `main` too), and an image the reader cannot use (Outlook's
+  dropped -- in a quote, among its lists where it stands --
+  and an image the reader cannot use (Outlook's
   `cid:`, Word's `file:`) no longer splits the sentence around it in two. A
   heading or table holding nothing but an image is that image. A `<figure>`
   is read as an image only when, its own caption aside, it holds one image and
   no text; any other -- a WordPress table block, a gallery, a bookmark card --
-  is read block by block, where everything but its first image was lost (on
-  `main` too). An image in a figure's or a table's caption -- a Wikipedia
+  is read block by block, where everything but its first image was lost (also
+  on earlier versions). An image in a figure's or a table's caption -- a Wikipedia
   thumbnail's flag icon -- is handed on after it rather than dropped. A
   caption written before the picture no longer lends the figure its own
   image, which lost the picture and doubled the caption's; a second
-  `<figcaption>` is content rather than dropped (on `main` too).
+  `<figcaption>` is content rather than dropped.
   An `<img>` with no usable `src` is read from its own `srcset` or its
   `<picture>`'s `<source>`s, largest candidate first, so a Medium article's
   pictures -- every one written without a `src` -- are no longer dropped on
-  paste (on `main` too). A relative `srcset` candidate is passed over: a
+  paste. A relative `srcset` candidate is passed over: a
   browser resolves `src` when it copies but not `srcset`, and the reader
   has no base URL to resolve one against.
 - HTML clipboard (also on earlier versions): an inline `display` is read.
@@ -272,7 +387,7 @@ that changes what you store or what other applications receive is listed first.
   one, KaTeX every superscript) and only two stacked one on the other,
   each drawing text, are words apart (a fraction's parts); two table cells
   side by side are too (MediaWiki's contents: `10 Algebraic Proof`, joined
-  on `main`); a link or other formatting around a
+  on earlier versions); a link or other formatting around a
   container reaches each item. Inside a code block a `<div>` per line and a
   `<br>` now start lines too (a trailing `<br>` is the line's filler), an
   element declared inline stays in its line (Stripe's linked parameters), a
@@ -283,3 +398,36 @@ that changes what you store or what other applications receive is listed first.
   email laid out in nested tables keeps its content; a list inside a wrapper
   in a list item is read as the item's text instead of being dropped; a line
   break followed only by a no-break space is kept.
+- HTML clipboard (also on earlier versions): text split around a picture is
+  read as it is without the picture -- in one pass, the picture marked where
+  it stands -- so a styled element the reader takes as formatting
+  (`<aside>`, `<center>`, `<address>`, a `<figcaption>`) keeps its bold,
+  italic or link, a block inside it keeps its lines (`before<center>q<img>z
+  </center>after` reads `before`/`q`, the picture, `z`/`after`, as the same
+  text reads without it), and cells, rows, flex items, parts stacked in an
+  inline box and comments between them stay as they are. It was read bare
+  as soon as a picture was there, losing the marks, and on `main` its cells
+  and flex items ran together.
+- HTML clipboard (also on earlier versions): the bold, italic, underline or
+  strikethrough a styled `<header>`, `<footer>`, `<nav>`, `<main>` or `<dl>`
+  states now applies to what it holds. It was read plain unless the
+  container also held both an image and a block. It applies weakly: an
+  element inside that turns it off -- a paragraph, item, cell or
+  span with `font-weight: 400`, as Chromium writes a Tailwind header's
+  tagline -- wins, and so does a tag inside; a `text-decoration: none` below
+  takes a decoration off, as it does everywhere in this reader. A chain of
+  these nested a thousand deep reads in linear time; it was quadratic, and
+  ran the heap out.
+- HTML clipboard (also on earlier versions): a style the reader cannot
+  resolve -- `inherit`, `unset`, `revert`, a `var()` with no fallback -- inside
+  a mark keeps the mark (`<b><span style="font-weight: inherit">` is bold, as
+  the browser draws it), `revert` on a mark's own tag keeps the tag's mark
+  (the user agent's value: `<b style="font-weight: revert">` is bold), and
+  `font-style: oblique <angle>` is italic. A weight or style written as a
+  custom property is read as its fallback, which is what a browser draws for
+  one the paste does not define: GitHub's `<strong>`
+  (`font-weight: var(--base-text-weight-semibold, 600)`) reads bold. A
+  decoration is read from its line keywords alone: a custom property named
+  after one (`line-through var(--underline-color)`) no longer reads as an
+  underline, and a keyword written in capitals counts in a DOM that keeps
+  them.

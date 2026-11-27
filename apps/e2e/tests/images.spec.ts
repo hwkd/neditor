@@ -15,7 +15,7 @@ test.describe('15 · images', () => {
     await page.keyboard.press('Enter');
     const dialog = editor.portal('image-editor');
     await expect(dialog).toBeVisible();
-    const url = dialog.getByRole('textbox', { name: 'Link URL' });
+    const url = dialog.getByRole('textbox', { name: 'Image URL' });
     await expect(url).toBeFocused();
     await url.fill('/sample.png');
     await dialog.getByRole('textbox', { name: 'Alt text' }).fill('A sample');
@@ -39,7 +39,7 @@ test.describe('15 · images', () => {
       await editor.load({ doc: 'image-empty' });
       await editor.clickControl(editor.block('img').locator('.neditor-image__placeholder'));
       const dialog = editor.portal('image-editor');
-      const url = dialog.getByRole('textbox', { name: 'Link URL' });
+      const url = dialog.getByRole('textbox', { name: 'Image URL' });
       await url.fill(unsafe);
       await page.keyboard.press('Enter');
       await expect(dialog).toBeVisible();
@@ -53,7 +53,7 @@ test.describe('15 · images', () => {
   test('I2b a base64 PNG data URL is accepted', async ({ editor, page }) => {
     await editor.load({ doc: 'image-empty' });
     await editor.clickControl(editor.block('img').locator('.neditor-image__placeholder'));
-    await editor.portal('image-editor').getByRole('textbox', { name: 'Link URL' }).fill(PNG);
+    await editor.portal('image-editor').getByRole('textbox', { name: 'Image URL' }).fill(PNG);
     await page.keyboard.press('Enter');
     expect((await editor.blockData('img'))?.src).toBe(PNG);
   });
@@ -97,7 +97,7 @@ test.describe('15 · images', () => {
 
     await page.keyboard.press(`${MOD}+z`);
     await editor.clickControl(editor.block('img').locator('.neditor-image__trigger'));
-    await editor.portal('image-editor').getByRole('textbox', { name: 'Link URL' }).fill('');
+    await editor.portal('image-editor').getByRole('textbox', { name: 'Image URL' }).fill('');
     await page.keyboard.press('Enter');
     expect((await editor.blockData('img'))?.type).toBe('paragraph');
   });
@@ -116,10 +116,69 @@ test.describe('15 · images', () => {
     expect((await editor.blockData('img'))?.src).toBe('/sample.png');
   });
 
-  test('I6 read-only disables both image buttons', async ({ editor }) => {
+  test('I6 read-only disables the image trigger and draws no "Add an image" prompt', async ({
+    editor,
+  }) => {
     await editor.load({ doc: 'image', editable: false });
     await expect(editor.block('img').locator('.neditor-image__trigger')).toBeDisabled();
+    // A disabled authoring prompt is still an authoring prompt (AGENTS.md:
+    // "A control is an offer"), so a read-only empty image draws none.
     await editor.load({ doc: 'image-empty', editable: false });
-    await expect(editor.block('img').locator('.neditor-image__placeholder')).toBeDisabled();
+    await expect(editor.block('img').locator('.neditor-image__placeholder')).toHaveCount(0);
+  });
+
+  // e2e only: the defect is WebKit's own Tab order, which skips any button
+  // without an explicit tabindex; happy-dom has no Tab order to ask.
+  test('I7 the image trigger and the "Add an image" button are Tab stops in every engine', async ({
+    editor,
+    page,
+  }) => {
+    // Was A11Y-4: WebKit left the trigger out of the Tab order, so the alt
+    // text could not be corrected from the keyboard there.
+    await editor.load({ doc: 'image' });
+    await editor.caretAtEnd('before');
+    await page.keyboard.press('Tab');
+    await expect(editor.block('img').locator('.neditor-image__trigger')).toBeFocused();
+
+    await editor.load({ doc: 'image-empty' });
+    await editor.caretAtEnd('before');
+    await page.keyboard.press('Tab');
+    await expect(editor.block('img').locator('.neditor-image__placeholder')).toBeFocused();
+
+    // Read-only the trigger is disabled, and the explicit tabindex does not
+    // put it back.
+    await editor.load({ doc: 'image', editable: false });
+    await page.locator('#before').focus();
+    for (let i = 0; i < 4; i += 1) {
+      await page.keyboard.press('Tab');
+      await expect(editor.block('img').locator('.neditor-image__trigger')).not.toBeFocused();
+    }
+  });
+
+  test('I8 an empty caption does not name its figure after the placeholder', async ({ editor }) => {
+    // Was UI-9: the placeholder is generated content, which is part of the
+    // accessible name, so the figure announced itself as "Add a caption".
+    await editor.load({ doc: 'image' });
+    await editor.setDocument({
+      blocks: [
+        {
+          id: 'img',
+          type: 'image',
+          content: [],
+          depth: 0,
+          src: '/sample.png',
+          alt: 'A blue gradient',
+        },
+      ],
+    });
+    const caption = editor.block('img').locator('figcaption');
+    // Still drawn for a sighted author...
+    expect(
+      await caption.evaluate((element) => getComputedStyle(element, '::before').content),
+    ).toContain('Add a caption');
+    // ...and named only by what is really there.
+    const tree = await editor.block('img').ariaSnapshot();
+    expect(tree).not.toContain('Add a caption');
+    expect(tree).toContain('img "A blue gradient"');
   });
 });

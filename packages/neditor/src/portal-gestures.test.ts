@@ -1,9 +1,9 @@
 // @vitest-environment happy-dom
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import type { Block } from './index.ts';
 import { createEditor } from './index.ts';
-import { positionPortal } from './ui/portal.ts';
+import { positionPortal, setAnchorBand } from './ui/portal.ts';
 import type { NEditor } from './editor.ts';
 
 /**
@@ -335,7 +335,7 @@ describe('a popover is dismissed by a pointer that lands outside it', () => {
 });
 
 describe('Escape dismisses only the popover this host opened', () => {
-  test('Escape in another block leaves a popover it never opened', () => {
+  test('Escape in another block acts on that block, not on a popover it never opened', () => {
     const editor = mount([
       block({ id: 'a', content: [{ text: 'abc' }] }),
       block({ id: 'b', content: [{ text: 'def' }] }),
@@ -344,16 +344,18 @@ describe('Escape dismisses only the popover this host opened', () => {
     selectIn(first!, 0, 3);
     editor.openLinkEditor();
 
-    // The caret moves on without a pointer, so nothing has dismissed the
-    // popover: it is stale, and still none of this block's business.
+    // The caret moves on without a pointer. Focus leaving the dialog for
+    // anywhere else is leaving it (UI-2), so it closes -- and closes without
+    // handing the caret back, which is the teleport this test is about.
     editor.focus('b', 0);
+    expect(portal('neditor-link-editor').hidden).toBe(true);
+    expect(document.activeElement).toBe(second);
     press(second!, 'Escape');
 
     // Escape stepped up from the text to the block, exactly as it does with
     // nothing open. Closing the other block's popover would have restored its
     // range instead, teleporting the caret two blocks away.
     expect(editor.getSelectedBlocks()).toEqual(['b']);
-    expect(portal('neditor-link-editor').hidden).toBe(false);
     expect(document.activeElement).not.toBe(first);
   });
 
@@ -370,7 +372,7 @@ describe('Escape dismisses only the popover this host opened', () => {
     expect(editor.getSelectedBlocks()).toEqual([]);
   });
 
-  test('Escape in another cell of the same table leaves that cell alone', () => {
+  test('Escape in another cell of the same table acts on that cell, not on the popover', () => {
     const editor = mount([
       block({
         id: 'grid',
@@ -387,11 +389,13 @@ describe('Escape dismisses only the popover this host opened', () => {
 
     // A cell is its own editing host, so the block id alone does not say whose
     // popover this is: restoring its range would jump the caret to the header.
+    // Focus going to the other cell is leaving the dialog, which closes
+    // without restoring the range it held (UI-2).
     const other = cell(editor, '1:1');
     selectIn(other, 0, 1);
+    expect(portal('neditor-link-editor').hidden).toBe(true);
     press(other, 'Escape');
 
-    expect(portal('neditor-link-editor').hidden).toBe(false);
     expect(editor.getSelectedBlocks()).toEqual(['grid']);
     expect(document.activeElement).not.toBe(cell(editor, '0:0'));
   });
@@ -680,8 +684,14 @@ describe('floating UI answers to the ground it was placed against', () => {
     return portal('neditor-icon-picker');
   };
 
-  test('a scroll anywhere in the page dismisses an open popover', () => {
+  test('a scroll dismisses a dialog the user has left', () => {
     const popover = openIconPicker();
+
+    // Left without going anywhere: focus on nothing, the way the window losing
+    // focus leaves it. Focus arriving somewhere else closes the dialog by
+    // itself (UI-2), so that is no longer a way to leave one open.
+    (document.activeElement as HTMLElement).blur();
+    const elsewhere = document.activeElement;
 
     expect(popover.hidden).toBe(false);
 
@@ -690,14 +700,155 @@ describe('floating UI answers to the ground it was placed against', () => {
     document.body.dispatchEvent(new Event('scroll', { bubbles: false }));
 
     expect(popover.hidden).toBe(true);
+    // A scroll is not the user choosing where to go, so focus stays put rather
+    // than being pulled back into the block the dialog was opened from.
+    expect(document.activeElement).toBe(elsewhere);
   });
 
-  test('so does a resize, which is what an opening keyboard looks like', () => {
+  test('so does a resize', () => {
     const popover = openIconPicker();
+    (document.activeElement as HTMLElement).blur();
 
     expect(popover.hidden).toBe(false);
+    window.dispatchEvent(new Event('resize'));
+
+    expect(popover.hidden).toBe(true);
+  });
+
+  /**
+   * R10-PTR-1. An editor slotted into a web component whose shadow tree holds
+   * the scrolling pane (Ionic's `<ion-content>`): a scroll in that tree is not
+   * composed, so the document never hears it, and the editor listened only on
+   * the shadow roots of its own root node -- which, slotted from the light
+   * DOM, it has none of. The pane is reached through the slot, as the browser
+   * lays it out, and is heard there; and let go of on `destroy`. happy-dom
+   * assigns no slots (`assignedSlot` is undefined), so the assignment a
+   * browser makes is stated on the mount point; the layout half -- the
+   * toolbars and the drag's auto-scroll -- is pinned in e2e (TB5v, F8d, P16b).
+   */
+  const slottedEditor = (): { editor: NEditor; pane: HTMLElement; shadow: ShadowRoot } => {
+    const component = document.createElement('div');
+    const shadow = component.attachShadow({ mode: 'open' });
+    const pane = document.createElement('div');
+    const slot = document.createElement('slot');
+    pane.append(slot);
+    shadow.append(pane);
+    document.body.append(component);
+
+    const host = document.createElement('div');
+    component.append(host);
+    Object.defineProperty(host, 'assignedSlot', { value: slot, configurable: true });
+    const editor = createEditor({
+      element: host,
+      doc: { blocks: [block({ type: 'callout', content: [{ text: 'note' }] })] },
+    });
+    editors.push(editor);
+
+    return { editor, pane, shadow };
+  };
+
+  test('a scroll in the shadow pane an editor is slotted into is heard', () => {
+    const { editor, pane } = slottedEditor();
+    editor.element
+      .querySelector<HTMLElement>('.neditor-block__icon')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const popover = portal('neditor-icon-picker');
+    (document.activeElement as HTMLElement).blur();
+    expect(popover.hidden).toBe(false);
+
+    pane.dispatchEvent(new Event('scroll', { bubbles: false, composed: false }));
+
+    expect(popover.hidden).toBe(true);
+  });
+
+  test('and the listener on that shadow root goes with destroy', () => {
+    const { editor, shadow } = slottedEditor();
+    const remove = vi.spyOn(shadow, 'removeEventListener');
+
+    editor.destroy();
+
+    expect(remove.mock.calls.map(([type]) => type)).toContain('scroll');
+  });
+});
+
+describe('a dialog being typed into moves with the page instead of closing', () => {
+  /**
+   * The dialogs take focus. Dismissing one on a scroll handed focus back to the
+   * block it came from in the middle of a word, so the rest of a URL being
+   * typed into the image editor landed in the caption -- and a following Tab
+   * indented the document. A resize is what an opening software keyboard looks
+   * like on Android, so there a dialog closed the moment its own input was
+   * focused, and none of the three could be used at all. A portal is
+   * `position: fixed` and was placed once, which is why it was dismissed; it
+   * is re-pinned against its anchor instead.
+   */
+  const scroll = (): void => {
+    document.body.dispatchEvent(new Event('scroll', { bubbles: false }));
+  };
+
+  test('the image editor keeps its input and the typing stays in it', () => {
+    const editor = mount([
+      block({
+        id: 'img',
+        type: 'image',
+        src: 'https://e.com/a.png',
+        alt: 'a',
+        content: [{ text: 'cap' }],
+      }),
+    ]);
+    editor.element
+      .querySelector<HTMLElement>('.neditor-image__trigger')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const popover = portal('neditor-image-editor');
+    const input = popover.querySelector<HTMLInputElement>('input')!;
+
+    expect(document.activeElement).toBe(input);
+
+    scroll();
+
+    expect(popover.hidden).toBe(false);
+    expect(document.activeElement, 'focus must not be handed back to the caption').toBe(input);
+    expect(editor.getDocument().blocks[0]!.content).toEqual([{ text: 'cap' }]);
+  });
+
+  test('the link editor survives a resize, which is what a keyboard opening looks like', () => {
+    const editor = mount([block({ content: [{ text: 'abc' }] })]);
+    selectIn(hosts(editor)[0]!, 0, 3);
+    editor.openLinkEditor();
+    const popover = portal('neditor-link-editor');
+    const input = popover.querySelector<HTMLInputElement>('input')!;
 
     window.dispatchEvent(new Event('resize'));
+
+    expect(popover.hidden).toBe(false);
+    expect(document.activeElement).toBe(input);
+  });
+
+  test('the icon picker follows its anchor to where it scrolled', () => {
+    const editor = mount([block({ type: 'callout', content: [{ text: 'note' }] })]);
+    const icon = editor.element.querySelector<HTMLElement>('.neditor-block__icon')!;
+    let top = 300;
+    // happy-dom computes no layout, so the anchor reports where it is by hand.
+    icon.getBoundingClientRect = () => new DOMRect(40, top, 24, 24);
+    icon.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const popover = portal('neditor-icon-picker');
+    const before = Number.parseInt(popover.style.top, 10);
+
+    top = 200;
+    scroll();
+
+    expect(popover.hidden).toBe(false);
+    expect(Number.parseInt(popover.style.top, 10)).toBe(before - 100);
+  });
+
+  test('a dialog whose anchor is gone is dismissed', () => {
+    const editor = mount([block({ type: 'callout', content: [{ text: 'note' }] })]);
+    const icon = editor.element.querySelector<HTMLElement>('.neditor-block__icon')!;
+    icon.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const popover = portal('neditor-icon-picker');
+
+    icon.remove();
+    scroll();
 
     expect(popover.hidden).toBe(true);
   });
@@ -730,6 +881,58 @@ describe('the portal measures the viewport the user can actually see', () => {
     expect(top + 320, 'the menu must not run under the keyboard').toBeLessThanOrEqual(408);
 
     Object.defineProperty(window, 'visualViewport', { value: original, configurable: true });
+    element.remove();
+  });
+
+  /**
+   * R11-PTR-3. In an iframe mount the portal's own viewport is the frame's
+   * window, which reaches past what the page around the frame shows -- a
+   * frame in a scrolling pane, or taller than the page's window. The table
+   * toolbar, preferring to go above a caret near the top of what the pane
+   * showed, found room in the frame's window and was drawn above the pane,
+   * which clips the frame. The editor tells every portal the part that can
+   * be seen (`setAnchorBand`), and the toolbar flips below there.
+   *
+   * R11-RV-PTR-1. The band chooses the side and nothing else. Clamped into a
+   * band smaller than itself, the 320px slash menu with 200px of the frame on
+   * screen was pulled up over its own caret and its top past the frame's,
+   * which clips it: the option Enter applies was out of sight. Where neither
+   * side fits, the side with more of it seen, against the anchor, clamped to
+   * the portal's own viewport only. The rest -- the band itself, measured
+   * through real frames -- is pinned in e2e (TB5za, SL10e).
+   */
+  test("a band narrower than the window chooses the portal's side, and only its side", () => {
+    const element = document.createElement('div');
+    element.style.position = 'fixed';
+    document.body.append(element);
+    let size = 36;
+    element.getBoundingClientRect = () => new DOMRect(0, 0, 200, size);
+    const top = () => Number.parseInt(element.style.top, 10);
+
+    positionPortal(element, new DOMRect(20, 100, 1, 20), { prefer: 'above' });
+    expect(top(), 'the window has room above').toBe(56);
+
+    let band = { top: 90, bottom: 500 };
+    setAnchorBand(element, () => band);
+    positionPortal(element, new DOMRect(20, 100, 1, 20), { prefer: 'above' });
+    expect(top(), 'the band has none above: below').toBe(128);
+
+    // The literal case: a 320px menu, a caret line at 60..80, 200px seen.
+    size = 320;
+    band = { top: 0, bottom: 200 };
+    positionPortal(element, new DOMRect(20, 60, 1, 20), { prefer: 'below' });
+    expect(top(), 'neither side fits: below, which has more, against the caret').toBe(88);
+
+    size = 36;
+    band = { top: 470, bottom: 500 };
+    positionPortal(element, new DOMRect(20, 480, 1, 20), { prefer: 'above' });
+    expect(top(), 'neither side fits: above, which has more, against the anchor').toBe(436);
+
+    size = 320;
+    band = { top: 0, bottom: 100 };
+    positionPortal(element, new DOMRect(20, 90, 1, 10), { prefer: 'above' });
+    expect(top(), "more room above, but it would cross the viewport's top: below").toBe(108);
+
     element.remove();
   });
 });
@@ -876,5 +1079,352 @@ describe('a popover scrolling its own contents is not the ground moving', () => 
     editor.element.dispatchEvent(new Event('scroll', { bubbles: false }));
 
     expect(menu.hidden).toBe(true);
+  });
+
+  test('nor is one from another realm', () => {
+    // Mounted in an iframe, the scrolled element is that realm's, and an
+    // `instanceof Element` check here read every scroll inside the slash menu
+    // as the page moving -- so arrowing past the fold closed it again.
+    const editor = mount([block({ id: 'a', content: [] })]);
+    const host = hosts(editor)[0]!;
+    host.focus();
+    host.textContent = '/';
+    const range = document.createRange();
+    range.setStart(host.firstChild!, 1);
+    range.collapse(true);
+    const selection = getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    host.dispatchEvent(
+      new InputEvent('input', { inputType: 'insertText', data: '/', bubbles: true }),
+    );
+
+    const menu = portal('neditor-slash-menu');
+    const list = menu.querySelector('.neditor-slash-menu__list') ?? menu;
+    const event = new Event('scroll', { bubbles: false });
+    // A real element, presented the way a foreign one arrives: the node
+    // interface, but none of this realm's constructors.
+    Object.defineProperty(event, 'target', {
+      value: { nodeType: 1, nodeName: 'DIV', closest: (s: string) => list.closest(s) },
+      configurable: true,
+    });
+    list.dispatchEvent(event);
+
+    expect(menu.hidden).toBe(false);
+  });
+});
+
+describe('hovering the slash menu does not rebuild it', () => {
+  /**
+   * `mouseenter` on an option re-rendered the whole list. The pointer was then
+   * over a brand-new element, which Chromium and WebKit answer with another
+   * `mouseenter` -- so a pointer resting on the menu rebuilt it several times a
+   * second, forever, and a click never landed: the option under the press was
+   * replaced before the release. Clicking a command did nothing in Chrome or
+   * Safari. happy-dom fires no boundary events for a DOM change, so what is
+   * pinned is the cause: hovering must keep the option elements it hovered.
+   */
+  const openMenu = (): { editor: NEditor; menu: HTMLElement } => {
+    const editor = mount([block({ id: 'a', content: [] })]);
+    const host = hosts(editor)[0]!;
+    host.focus();
+    host.textContent = '/';
+    const range = document.createRange();
+    range.setStart(host.firstChild!, 1);
+    range.collapse(true);
+    const selection = getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    host.dispatchEvent(
+      new InputEvent('input', { inputType: 'insertText', data: '/', bubbles: true }),
+    );
+
+    return { editor, menu: portal('neditor-slash-menu') };
+  };
+  const options = (menu: HTMLElement): HTMLElement[] => [
+    ...menu.querySelectorAll<HTMLElement>('[role="option"]'),
+  ];
+
+  test('entering an option highlights it in place', () => {
+    const { menu } = openMenu();
+    const before = options(menu);
+
+    before[2]!.dispatchEvent(new MouseEvent('mouseenter'));
+    const after = options(menu);
+
+    expect(after[2], 'the hovered option must be the same element').toBe(before[2]);
+    expect(after.map((o) => o.getAttribute('aria-selected'))).toEqual(
+      after.map((_, i) => String(i === 2)),
+    );
+    expect(after.filter((o) => o.dataset.active === 'true')).toEqual([after[2]]);
+  });
+
+  test('the block announces the hovered option', () => {
+    const { editor, menu } = openMenu();
+    const host = hosts(editor)[0]!;
+
+    options(menu)[3]!.dispatchEvent(new MouseEvent('mouseenter'));
+
+    expect(host.getAttribute('aria-activedescendant')).toBe(options(menu)[3]!.id);
+  });
+
+  test('a click after hovering applies the hovered command', () => {
+    const { editor, menu } = openMenu();
+    const target = options(menu)[1]!;
+
+    target.dispatchEvent(new MouseEvent('mouseenter'));
+    // The element the press began on, as a real click requires.
+    target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(editor.getDocument().blocks[0]!.type).toBe('heading1');
+  });
+
+  test('the arrow keys still move the highlight and keep it in view', () => {
+    const { editor, menu } = openMenu();
+    const host = hosts(editor)[0]!;
+
+    host.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+
+    expect(options(menu)[1]!.getAttribute('aria-selected')).toBe('true');
+    expect(host.getAttribute('aria-activedescendant')).toBe(options(menu)[1]!.id);
+  });
+});
+
+describe('a right-click outside every host keeps the range through the browser default', () => {
+  // Chromium selects a word of its own in contextmenu's default action, which
+  // runs after every listener -- with a press on the root's padding, a range
+  // that begins outside the editor, so the next key was lost (R3-PTR-2). The
+  // default is played here by a document listener registered after the
+  // editor's, which is where it runs relative to the editor's own restore.
+  const rightClickRoot = (editor: NEditor, during: () => void) => {
+    const onMenu = () => during();
+    document.addEventListener('contextmenu', onMenu);
+
+    try {
+      editor.element.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 2, pointerId: 1 }),
+      );
+      editor.element.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 2 }),
+      );
+      editor.element.dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }),
+      );
+    } finally {
+      document.removeEventListener('contextmenu', onMenu);
+    }
+  };
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const outside = () => {
+    const div = document.createElement('div');
+    div.className = 'outside';
+    div.textContent = 'page text';
+    document.body.prepend(div);
+    return div;
+  };
+
+  test('a range the default moved outside the editor is put back', async () => {
+    const editor = mount([
+      block({ content: [{ text: 'Alpha one' }] }),
+      block({ content: [{ text: 'Bravo two' }] }),
+    ]);
+    const host = hosts(editor)[1]!;
+    const page = outside();
+    selectIn(host, 0, 5);
+
+    rightClickRoot(editor, () => {
+      getSelection()?.setBaseAndExtent(page.firstChild!, 2, host, 0);
+    });
+    await tick();
+
+    const selection = getSelection()!;
+    expect(selection.anchorNode).toBe(host.firstChild);
+    expect(selection.anchorOffset).toBe(0);
+    expect(selection.focusNode).toBe(host.firstChild);
+    expect(selection.focusOffset).toBe(5);
+  });
+
+  // R4-PTR-1: a page with its own context menu cancels the event and moves
+  // focus into that menu. The deferred restore then pulled focus back into
+  // the editor ~15ms later, and the reader's typing in the page's menu
+  // replaced their range. happy-dom moves no focus on setBaseAndExtent, so
+  // what is pinned is the restore itself: it must not run. The page's menu
+  // also selects something of its own, which a restore would overwrite.
+  for (const cancel of [true, false]) {
+    test(`a page menu that takes focus keeps it (${cancel ? 'cancelled' : 'not cancelled'})`, async () => {
+      const editor = mount([
+        block({ content: [{ text: 'Alpha one' }] }),
+        block({ content: [{ text: 'Bravo two' }] }),
+      ]);
+      const host = hosts(editor)[0]!;
+      selectIn(host, 1, 3);
+      const page = outside();
+      const field = document.createElement('input');
+      document.body.append(field);
+      const onMenu = (event: Event) => {
+        if (cancel) event.preventDefault();
+      };
+      document.addEventListener('contextmenu', onMenu);
+
+      try {
+        rightClickRoot(editor, () => {
+          field.focus();
+          getSelection()?.setBaseAndExtent(page.firstChild!, 0, page.firstChild!, 4);
+        });
+      } finally {
+        document.removeEventListener('contextmenu', onMenu);
+      }
+      // The release, which runs the pending restore when it comes first.
+      document.dispatchEvent(
+        new PointerEvent('pointerup', { bubbles: true, button: 2, pointerId: 1 }),
+      );
+      await tick();
+
+      expect(document.activeElement).toBe(field);
+      expect(getSelection()!.anchorNode).toBe(page.firstChild);
+      expect(getSelection()!.focusOffset).toBe(4);
+    });
+  }
+
+  test('a cancelled menu that leaves focus in the text is not restored over', async () => {
+    const editor = mount([
+      block({ content: [{ text: 'Alpha one' }] }),
+      block({ content: [{ text: 'Bravo two' }] }),
+    ]);
+    const host = hosts(editor)[1]!;
+    selectIn(host, 0, 5);
+    const onMenu = (event: Event) => event.preventDefault();
+    document.addEventListener('contextmenu', onMenu);
+
+    try {
+      // A page menu that selects for itself without moving focus: Chromium's
+      // default never runs for a cancelled event, so there is nothing to undo.
+      rightClickRoot(editor, () => {
+        getSelection()?.setBaseAndExtent(host.firstChild!, 6, host.firstChild!, 9);
+      });
+    } finally {
+      document.removeEventListener('contextmenu', onMenu);
+    }
+    await tick();
+
+    expect(getSelection()!.anchorOffset).toBe(6);
+    expect(getSelection()!.focusOffset).toBe(9);
+  });
+
+  test('a press after the menu wins over the pending restore', async () => {
+    const editor = mount([
+      block({ content: [{ text: 'Alpha one' }] }),
+      block({ content: [{ text: 'Bravo two' }] }),
+    ]);
+    const [first, second] = hosts(editor);
+    selectIn(second!, 0, 5);
+
+    rightClickRoot(editor, () => {
+      // The reader has already moved on before the queued restore runs.
+      document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 }));
+      selectIn(first!, 1, 3);
+    });
+    await tick();
+
+    expect(getSelection()!.anchorNode).toBe(first!.firstChild);
+    expect(getSelection()!.focusOffset).toBe(3);
+  });
+});
+
+describe('the table toolbar is drawn only while its cell holds focus', () => {
+  // Firefox and WebKit leave the caret in the cell when focus goes to a page
+  // field, and Firefox fires selectionchange for that field: the toolbar came
+  // straight back over a table the reader had left (R3-PTR-7).
+  test('focus leaving for a page field hides it, and a later selectionchange does not redraw it', () => {
+    const editor = mount([
+      block({
+        id: 't',
+        type: 'table',
+        rows: [[[{ text: 'a1' }], [{ text: 'a2' }]]],
+      } as Partial<Block>),
+    ]);
+    const toolbar = portal('neditor-table-toolbar');
+    const target = cell(editor, '0:1');
+    selectIn(target, 1, 1);
+    document.dispatchEvent(new Event('selectionchange'));
+    expect(toolbar.hidden).toBe(false);
+
+    const input = document.createElement('input');
+    document.body.append(input);
+    input.focus();
+    target.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: input }));
+    expect(toolbar.hidden).toBe(true);
+
+    // The caret is still in the cell, as those engines leave it.
+    const range = document.createRange();
+    range.setStart(target.firstChild!, 1);
+    getSelection()?.removeAllRanges();
+    getSelection()?.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+    expect(toolbar.hidden).toBe(true);
+
+    // Focus back in the cell draws it again, selection change or not.
+    target.focus();
+    expect(toolbar.hidden).toBe(false);
+  });
+
+  // R4-PTR-4: after F10 focus is in the toolbar, outside the root, so the
+  // root's focusout had already run and nothing heard the reader leave the
+  // toolbar itself. It stayed drawn, and its buttons edited the table the
+  // reader had left and pulled focus back. happy-dom fires no focusout for a
+  // focus move, so each one is dispatched as the engines do.
+  const intoToolbar = () => {
+    const editor = mount([
+      block({
+        id: 't',
+        type: 'table',
+        rows: [[[{ text: 'a1' }], [{ text: 'a2' }]]],
+      } as Partial<Block>),
+    ]);
+    const toolbar = portal('neditor-table-toolbar');
+    const target = cell(editor, '0:1');
+    selectIn(target, 1, 1);
+    document.dispatchEvent(new Event('selectionchange'));
+    press(target, 'F10');
+    const button = document.activeElement as HTMLElement;
+    expect(toolbar.contains(button)).toBe(true);
+
+    return { editor, toolbar, button };
+  };
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  test('focus leaving the toolbar for a page field hides it', () => {
+    const { toolbar, button } = intoToolbar();
+    const input = document.createElement('input');
+    document.body.append(input);
+    input.focus();
+    button.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: input }));
+
+    expect(toolbar.hidden).toBe(true);
+  });
+
+  test('focus going back to the cell keeps it', async () => {
+    const { editor, toolbar, button } = intoToolbar();
+    const target = cell(editor, '0:1');
+    target.focus();
+    button.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: target }));
+    await tick();
+
+    expect(toolbar.hidden).toBe(false);
+  });
+
+  test('Tab past the end of the page hides it; a window switch does not', async () => {
+    // A window switch: the button stays focused within its document.
+    const { toolbar, button } = intoToolbar();
+    button.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+    await tick();
+    expect(toolbar.hidden).toBe(false);
+    expect(document.activeElement).toBe(button);
+
+    // Tab into the browser's own controls: nothing on the page holds focus.
+    button.blur();
+    button.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+    await tick();
+    expect(toolbar.hidden).toBe(true);
   });
 });

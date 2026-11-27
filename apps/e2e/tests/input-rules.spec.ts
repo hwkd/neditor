@@ -12,8 +12,8 @@ const BLOCK_RULES: Array<[prefix: string, type: string, checked?: boolean]> = [
   ['> ', 'quote'],
   ['[] ', 'todo', false],
   ['[ ] ', 'todo', false],
-  // Pinned current behaviour: the rule keeps `checked ?? false`.
-  ['[x] ', 'todo', false],
+  // A checked box, as GitHub task-list syntax means it.
+  ['[x] ', 'todo', true],
   ['```', 'code'],
 ];
 
@@ -50,7 +50,9 @@ test.describe('04 · Markdown input rules', () => {
     await expect(page.locator('[data-block-id="p1"] h1')).toBeVisible();
   });
 
-  for (const trigger of ['---', '***']) {
+  // `***` fires on its trailing space: firing on the third `*` made a
+  // paragraph that opens with ***bold italic*** impossible to type.
+  for (const trigger of ['---', '*** ']) {
     test(`R2 "${trigger}" makes a divider and a paragraph for the caret`, async ({ editor }) => {
       await editor.load({ doc: 'empty' });
       await editor.placeCaret('p1', 0);
@@ -177,5 +179,73 @@ test.describe('04 · Markdown input rules', () => {
     await editor.type('**b**');
     await page.keyboard.press(`${MOD}+z`);
     expect((await editor.blockData('q'))?.content).toEqual([{ text: '**b**' }]);
+  });
+
+  test('R8 a delimiter typed into an inline code run is code, and closes nothing', async ({
+    editor,
+  }) => {
+    // TXT-9: `*` at the end of `a*b` in code italicised the `b` and ate both
+    // asterisks; `*q*` typed inside a code run italicised `q`. Where a typed
+    // character lands -- inside the code element or not -- is the engine's
+    // call, so this drives real keys.
+    await editor.load({ doc: 'paragraphs', toolbar: 0 });
+    await editor.setDocument({
+      blocks: [
+        {
+          id: 'x',
+          type: 'paragraph',
+          depth: 0,
+          content: [{ text: 'x ' }, { text: 'a*b', marks: ['code'] }],
+        },
+      ],
+    });
+    await editor.clickAt('x', 5);
+    await editor.type('*');
+    expect((await editor.blockData('x'))?.content).toEqual([
+      { text: 'x ' },
+      { text: 'a*b*', marks: ['code'] },
+    ]);
+
+    await editor.setDocument({
+      blocks: [
+        {
+          id: 'x',
+          type: 'paragraph',
+          depth: 0,
+          content: [{ text: 'x ' }, { text: 'ab', marks: ['code'] }],
+        },
+      ],
+    });
+    await editor.clickAt('x', 3);
+    await editor.type('*q*');
+    expect((await editor.blockData('x'))?.content).toEqual([
+      { text: 'x ' },
+      { text: 'a*q*b', marks: ['code'] },
+    ]);
+  });
+
+  test('R9 a backtick typed into a code run does not pair with one already in it', async ({
+    editor,
+    page,
+  }) => {
+    // MRG-3, the auditor's literal sequence: the code rule paired the typed
+    // backtick with the one inside ``a`b`` and deleted it.
+    await editor.load({ doc: 'empty' });
+    await editor.content('p1').click();
+    await page.keyboard.type('Use a`b', { delay: 10 });
+    for (let i = 0; i < 3; i += 1) {
+      await page.keyboard.press('Shift+ArrowLeft');
+    }
+    await page.keyboard.press(`${MOD}+e`);
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.type(' and `c` ok', { delay: 10 });
+
+    // Every backtick typed is still there; which of the typed characters the
+    // engine puts in the code run is its own typing style (TXT-11).
+    const content = (await editor.blockData('p1'))!.content;
+    expect(content.map((run) => run.text).join('')).toBe('Use a`b and `c` ok');
+    expect(content).toContainEqual(
+      expect.objectContaining({ text: expect.stringMatching(/^a`b/), marks: ['code'] }),
+    );
   });
 });

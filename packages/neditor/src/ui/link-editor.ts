@@ -1,6 +1,8 @@
 import type { NEditorLabels } from '../labels.ts';
+import { nextId } from '../util/ids.ts';
 import type { PortalTheme } from './portal.ts';
-import { createPortal, positionPortal } from './portal.ts';
+import type { AnchorPin } from './portal.ts';
+import { createPortal, holdsFocus, positionPortal } from './portal.ts';
 
 /**
  * The link popover.
@@ -16,17 +18,20 @@ export interface LinkEditorHooks {
   onCancel(): void;
 }
 
-/** Distinguishes the error-message ids when several dialogs share a page. */
-let errorIds = 0;
-
 export class LinkEditor {
   readonly #element: HTMLElement;
   readonly #input: HTMLInputElement;
+  /** The visible message, and the field's description while it applies. */
   readonly #error: HTMLElement;
+  /** The live region, which speaks a rejection focus would not. */
+  readonly #alert: HTMLElement;
+  /** The rejection's wording, written into the alert each time it fires. */
+  readonly #message: string;
   readonly #removeButton: HTMLButtonElement;
   readonly #hooks: LinkEditorHooks;
 
   #open = false;
+  #pin: AnchorPin | null = null;
 
   constructor(doc: Document, hooks: LinkEditorHooks, labels: NEditorLabels) {
     this.#hooks = hooks;
@@ -46,15 +51,34 @@ export class LinkEditor {
     this.#input.spellcheck = false;
     this.#input.autocomplete = 'off';
     this.#input.setAttribute('aria-label', labels.linkUrl);
+    // A URL is LTR whatever the prose around it is. The portal takes the
+    // editor's direction, and under dir="rtl" the bidi algorithm showed
+    // `https://example.com/docs?` as `?https://example.com/docs`. Only while
+    // the field holds one, though: the placeholder is prose in the reader's
+    // language, and a field forced LTR drew a translated one left-aligned with
+    // its ellipsis on the wrong end. See `#syncDirection`.
+    // A correction in progress is not the rejected value: the message and
+    // `aria-invalid` stood while the user typed the fixed URL, and a reader
+    // heard "invalid" on every character of it.
+    this.#input.addEventListener('input', () => {
+      this.#syncDirection();
+      this.#clearInvalid();
+    });
 
     // Named rather than colour-only, and wired to the input by
-    // `aria-describedby` so it is read out with the field it belongs to.
+    // `aria-describedby` only while it applies -- description computation
+    // follows a reference into a hidden node, so a standing reference read the
+    // error out on every opening. Spoken once per rejection, by whichever of
+    // two routes applies: see `markInvalid`. The visible message is therefore
+    // not itself a live region; the alert beside it is, and is visually hidden.
+    this.#message = labels.invalidUrl;
     this.#error = doc.createElement('p');
     this.#error.className = 'neditor-link-editor__error';
-    this.#error.id = `neditor-link-error-${(errorIds += 1)}`;
-    this.#error.textContent = labels.invalidUrl;
+    this.#error.id = `neditor-link-error-${nextId('link-error')}`;
     this.#error.hidden = true;
-    this.#input.setAttribute('aria-describedby', this.#error.id);
+    this.#alert = doc.createElement('div');
+    this.#alert.className = 'neditor-live-region';
+    this.#alert.setAttribute('role', 'alert');
 
     this.#input.addEventListener('keydown', (event) => {
       // The editor's own key handling must not see these.
@@ -86,7 +110,7 @@ export class LinkEditor {
       this.#hooks.onRemove();
     });
 
-    this.#element.append(this.#input, this.#error, apply, this.#removeButton);
+    this.#element.append(this.#input, this.#error, apply, this.#removeButton, this.#alert);
   }
 
   get element(): HTMLElement {
@@ -101,10 +125,12 @@ export class LinkEditor {
     this.#element.dataset.neditorTheme = theme;
   }
 
-  open(anchor: DOMRect, current: string | null): void {
+  open(anchor: DOMRect, current: string | null, pin: AnchorPin | null = null): void {
+    this.#pin = pin;
     this.#element.hidden = false;
     this.#open = true;
     this.#input.value = current ?? '';
+    this.#syncDirection();
     this.#clearInvalid();
     this.#removeButton.hidden = current === null;
 
@@ -120,23 +146,70 @@ export class LinkEditor {
     }
 
     this.#open = false;
+    this.#pin = null;
     this.#element.hidden = true;
   }
 
   /** Flags the URL as unusable and keeps the popover open for a correction. */
   markInvalid(): void {
+    // Asked before anything moves focus. Enter in the field leaves focus where
+    // it is, so the description added below is never read and the alert has
+    // to speak. From Apply, focus moves into the field, which reads its new
+    // description on arrival -- filling the alert as well, in the same tick,
+    // had the reader say the message twice.
+    const announce = holdsFocus(this.#input);
+
     this.#input.dataset.invalid = 'true';
     this.#input.setAttribute('aria-invalid', 'true');
+    this.#input.setAttribute('aria-describedby', this.#error.id);
     this.#error.hidden = false;
+    this.#error.textContent = this.#message;
+    // Written again on every rejection that needs it: a live region speaks
+    // when its content changes, and a second bad URL in a row would otherwise
+    // leave the same words standing and say nothing.
+    this.#alert.textContent = announce ? this.#message : '';
     this.#input.focus();
     this.#input.select();
+  }
+
+  /**
+   * LTR while there is a URL to lay out, inherited while the placeholder shows.
+   * An empty `dir` is the same as none. Not `unicode-bidi: plaintext`, which
+   * would decide from the text alone: Firefox stops painting the placeholder.
+   */
+  #syncDirection(): void {
+    this.#input.dir = this.#input.value ? 'ltr' : '';
   }
 
   /** So a corrected value stops being announced as the rejected one. */
   #clearInvalid(): void {
     delete this.#input.dataset.invalid;
     this.#input.removeAttribute('aria-invalid');
+    this.#input.removeAttribute('aria-describedby');
     this.#error.hidden = true;
+    this.#error.textContent = '';
+    this.#alert.textContent = '';
+  }
+
+  /** True while the user is in the dialog: its input or one of its buttons. */
+  get hasFocus(): boolean {
+    return this.#open && holdsFocus(this.#element);
+  }
+
+  /**
+   * Places the dialog against wherever its anchor has moved to. False when it
+   * was opened without a pin or the anchor has left the page, so there is
+   * nothing left to place it against.
+   */
+  reposition(): boolean {
+    const anchor = this.#open ? this.#pin?.() : null;
+
+    if (!anchor) {
+      return false;
+    }
+
+    positionPortal(this.#element, anchor, { prefer: 'below' });
+    return true;
   }
 
   /** True when focus is inside the popover, so a blur can be ignored. */

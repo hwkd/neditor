@@ -1,4 +1,5 @@
 import type { Block, BlockType } from '../model/document.ts';
+import { nextId } from '../util/ids.ts';
 import {
   DEFAULT_CALLOUT_ICON,
   computeListNumbers,
@@ -13,6 +14,7 @@ import type { RichText } from '../model/rich-text.ts';
 import { richToPlainText } from '../model/rich-text.ts';
 import type { RenderOptions } from './rich-dom.ts';
 import { renderRichText } from './rich-dom.ts';
+import { readSelection } from './selection.ts';
 import type { MathRenderer } from './math.ts';
 import { drawMath } from './math.ts';
 
@@ -23,7 +25,8 @@ import { drawMath } from './math.ts';
  * renderer reconciles instead: it keeps one DOM element per block id, reuses it
  * across renders, and only writes `textContent` when it actually differs from
  * what the browser already holds. Typing therefore touches the model and the
- * DOM stays exactly as the user left it.
+ * DOM stays exactly as the user left it. A reorder moves the other blocks
+ * around the one the reader is in, never that one (`#positionAround`).
  */
 
 export interface BlockView {
@@ -121,9 +124,6 @@ function contentTagFor(type: BlockType): string {
   }
 }
 
-/** Distinguishes the DOM ids of editors that share a page. */
-let instances = 0;
-
 export class Renderer {
   readonly #root: HTMLElement;
   readonly #hooks: RendererHooks;
@@ -144,7 +144,7 @@ export class Renderer {
   /** The TeX each display equation's preview was last drawn from. */
   readonly #previews = new WeakMap<HTMLElement, string>();
 
-  /** This renderer's slot in `instances`, fixed for its lifetime. */
+  /** Distinguishes this editor's DOM ids from every other editor's on the page. */
   readonly #instance: number;
 
   constructor(
@@ -158,8 +158,7 @@ export class Renderer {
     this.#labels = labels;
     this.#renderMath = options.renderMath;
     this.#richOptions = { editing: true, renderMath: options.renderMath };
-    instances += 1;
-    this.#instance = instances;
+    this.#instance = nextId('renderer');
   }
 
   /**
@@ -206,16 +205,72 @@ export class Renderer {
       // thing the attribute was trying to say.
     }
 
-    // A control that cannot act is not an offer. Both image buttons open a
-    // popover the editor refuses to open while read-only, so left enabled they
-    // are tab stops that answer with nothing.
-    if (view.root.dataset.blockType === 'image') {
+    if (view.type === 'math') {
+      this.#applyMathAccess(view);
+    }
+
+    // A control that cannot act is not an offer. The image trigger and the
+    // callout icon open a popover the editor refuses to open while read-only,
+    // so left enabled they are tab stops that answer with nothing. They keep
+    // drawing the picture and the emoji, which are content; only the control
+    // goes.
+    const type = view.root.dataset.blockType;
+
+    if (type === 'image' || type === 'callout') {
       for (const control of view.root.querySelectorAll<HTMLButtonElement>(
-        '.neditor-image__trigger, .neditor-image__placeholder',
+        '.neditor-image__trigger, .neditor-block__icon',
       )) {
         control.disabled = !this.#editable;
       }
     }
+
+    if (type === 'image') {
+      this.#applyImagePlaceholder(view);
+    }
+  }
+
+  /**
+   * Draws the empty image's "Add an image" button while the editor takes
+   * input, and removes it while it does not.
+   *
+   * Disabling it was not enough: it was still drawn, and still exposed as a
+   * button by that name, which is an authoring prompt in a view that takes no
+   * authoring -- the same reason placeholders are drawn only on hosts that
+   * take typing. A picture is content and stays; this button is nothing but
+   * the offer, so read-only leaves the figure empty instead.
+   */
+  #applyImagePlaceholder(view: BlockView): void {
+    const figure = view.root.querySelector('.neditor-image');
+    const current = figure?.querySelector('.neditor-image__placeholder');
+
+    // Only a figure with no picture offers one; a set image has its trigger.
+    if (!figure || figure.querySelector('.neditor-image__frame')) {
+      return;
+    }
+
+    if (!this.#editable) {
+      current?.remove();
+      return;
+    }
+
+    if (current) {
+      return;
+    }
+
+    const id = view.root.dataset.blockId ?? '';
+    const placeholder = figure.ownerDocument.createElement('button');
+    placeholder.type = 'button';
+    placeholder.className = 'neditor-image__placeholder';
+    // WebKit skips a button with no tabindex; see the image trigger.
+    placeholder.tabIndex = 0;
+    placeholder.textContent = this.#labels.imageAdd;
+    placeholder.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+    });
+    placeholder.addEventListener('click', () => {
+      this.#hooks.onEditImage(id, placeholder);
+    });
+    figure.prepend(placeholder);
   }
 
   /** Every editable host a view owns: its content, or all of a table's cells. */
@@ -293,7 +348,7 @@ export class Renderer {
       }
     }
 
-    blocks.forEach((block, index) => {
+    const order = blocks.map((block) => {
       let view = this.#views.get(block.id);
 
       // A change of shape swaps the elements, so the view is rebuilt.
@@ -305,14 +360,109 @@ export class Renderer {
 
       this.#updateView(view, block, numbers.get(block.id));
 
-      // insertBefore moves an existing node rather than cloning it, so this
-      // both inserts new blocks and reorders moved ones.
+      return view.root;
+    });
+
+    // Positioned only once every view is final, so that the block the reader
+    // is in is known: a view rebuilt above has already taken focus with it.
+    const kept = this.#readersBlock();
+
+    if (kept) {
+      this.#positionAround(order, kept);
+      return;
+    }
+
+    // insertBefore moves an existing node rather than cloning it, so this
+    // both inserts new blocks and reorders moved ones.
+    order.forEach((element, index) => {
       const current = this.#root.children.item(index);
 
-      if (current !== view.root) {
-        this.#root.insertBefore(view.root, current);
+      if (current !== element) {
+        this.#root.insertBefore(element, current);
       }
     });
+  }
+
+  /**
+   * The block element the reader is in, which a reorder must not move.
+   *
+   * First the one holding focus, asked of the mount's own root node -- the
+   * document, or the shadow root an editor drawn in one lives in, where
+   * `document.activeElement` is only the shadow host -- and climbed to the
+   * root's child it sits in, so focus on a control inside a block (the to-do
+   * checkbox, the callout icon, a table cell) names its block. The root itself
+   * (block selection) and the gutter are not blocks and name nothing.
+   *
+   * With no block holding focus, the one the selection is in: a page's own
+   * toolbar button holds focus while it acts on the reader's range (WebKit
+   * leaves focus on `<body>` and types into that range), and a block taken
+   * out and put back loses every range inside it -- pressed while a peer moved
+   * the block, the button bolded nothing.
+   */
+  #readersBlock(): HTMLElement | null {
+    const rootNode = this.#root.getRootNode() as Partial<DocumentOrShadowRoot>;
+    const focused = this.#blockOf(rootNode.activeElement ?? null);
+
+    if (focused) {
+      return focused;
+    }
+
+    const reading = readSelection(this.#root);
+    const block = reading ? this.#blockOf(reading.anchorNode) : null;
+
+    return block && block === this.#blockOf(reading!.focusNode) ? block : null;
+  }
+
+  /** The block view's element `node` is inside, if it is inside one. */
+  #blockOf(node: Node | null): HTMLElement | null {
+    while (node && node.parentNode !== this.#root) {
+      node = node.parentNode;
+    }
+
+    const element = asElement(node) as HTMLElement | null;
+    const id = element?.dataset.blockId;
+
+    return id !== undefined && this.#views.get(id)?.root === element ? element : null;
+  }
+
+  /**
+   * Puts the views in `order` without moving `kept`.
+   *
+   * A node is moved by taking it out and putting it back, and taking out the
+   * element focus is in blurs it in every engine: a peer's `setDocument` that
+   * moved the reader's block up -- or moved a block from above it to below,
+   * which the top-down loop does by moving the reader's block up past it --
+   * left focus on `<body>`, and the next keys typed nothing anywhere
+   * (R13-KEY-2). The same move ends a composition in it and collapses every
+   * range inside it onto the root. Any order can be reached with one element
+   * standing still, so the others are moved around it instead: those before
+   * it are placed from the root's start, exactly as the top-down loop places
+   * them (it never moves `kept`, which is not one of them), and those after it
+   * are each put right after the one before. Where the top-down loop would not
+   * have moved `kept` anyway, both make the same moves. Linear, like it.
+   */
+  #positionAround(order: readonly HTMLElement[], kept: HTMLElement): void {
+    const at = order.indexOf(kept);
+
+    for (let index = 0; index < at; index += 1) {
+      const element = order[index]!;
+      const current = this.#root.children.item(index);
+
+      if (current !== element) {
+        this.#root.insertBefore(element, current);
+      }
+    }
+
+    for (let index = at + 1; index < order.length; index += 1) {
+      const element = order[index]!;
+      // The element after the one before, as `children` counts: a text node
+      // a host left in the mount is not a position.
+      const next = order[index - 1]!.nextElementSibling;
+
+      if (next !== element) {
+        this.#root.insertBefore(element, next);
+      }
+    }
   }
 
   destroy(): void {
@@ -374,7 +524,7 @@ export class Renderer {
       pre.append(content);
       root.append(pre);
     } else if (block.type === 'math') {
-      root.append(this.#createMathBox(doc, content));
+      root.append(this.#createMathBox(doc, content, block.id));
     } else if (block.type === 'callout') {
       // The tint wraps icon and text together, and must not extend into the
       // gutter reservation on the block itself.
@@ -409,11 +559,11 @@ export class Renderer {
    * stylesheet hides the source visually -- never from focus, so arrowing into
    * the block still lands in it and reveals it -- and the preview stands in.
    *
-   * The preview is `aria-hidden`: the TeX in the host is what assistive
-   * technology reads and edits, and reading the picture as well would say
-   * every equation twice.
+   * Assistive technology gets one of the two, never both -- which one is
+   * `#applyMathAccess`'s to say -- and a TeX error is said outside the
+   * picture, where it can be read.
    */
-  #createMathBox(doc: Document, content: HTMLElement): HTMLElement {
+  #createMathBox(doc: Document, content: HTMLElement, blockId: string): HTMLElement {
     const box = doc.createElement('div');
     box.className = 'neditor-math-block';
     box.dataset.neditorMathLabel = this.#labels.mathBlockLabel;
@@ -423,8 +573,47 @@ export class Renderer {
     preview.contentEditable = 'false';
     preview.setAttribute('aria-hidden', 'true');
 
-    box.append(content, preview);
+    const error = doc.createElement('p');
+    error.className = 'neditor-math-block__error';
+    error.id = `${this.#domId(blockId)}-math-error`;
+    error.textContent = this.#labels.mathError;
+    error.hidden = true;
+
+    box.append(content, preview, error);
     return box;
+  }
+
+  /**
+   * Which of an equation's two views assistive technology gets.
+   *
+   * While it can be edited, the TeX: it is the text being edited, and the
+   * picture beside it is `aria-hidden` and out of the tab order -- a wide one
+   * scrolls, and a scroller is a tab stop in Chrome and Firefox, which put
+   * focus on a node announced as nothing. Read-only there is nothing to edit
+   * and the source cannot even take focus to show itself, so when there is a
+   * picture the picture is what is read (a typesetter's MathML, spoken as
+   * maths) and the hidden source is hidden from it too. Without a picture the
+   * source is the only view, and stays exposed.
+   */
+  #applyMathAccess(view: BlockView): void {
+    const box = view.root.querySelector<HTMLElement>('.neditor-math-block');
+    const preview = box?.querySelector<HTMLElement>('.neditor-math-block__preview');
+
+    if (!box || !preview || !view.content) {
+      return;
+    }
+
+    const pictured = !this.#editable && box.dataset.rendered === 'true';
+
+    if (pictured) {
+      preview.removeAttribute('aria-hidden');
+      preview.removeAttribute('tabindex');
+      view.content.setAttribute('aria-hidden', 'true');
+    } else {
+      preview.setAttribute('aria-hidden', 'true');
+      preview.tabIndex = -1;
+      view.content.removeAttribute('aria-hidden');
+    }
   }
 
   /** Redraws a display equation's preview, when its TeX has changed. */
@@ -455,12 +644,23 @@ export class Renderer {
 
     box.dataset.rendered = String(drawn);
 
-    if (!drawn && this.#renderMath && tex.trim().length > 0) {
-      preview.textContent = this.#labels.mathError;
-      box.dataset.error = 'true';
-    } else {
-      delete box.dataset.error;
+    // A renderer that refused the TeX: said beside the source, which names it
+    // as its description, so a screen reader hears it with the field -- inside
+    // the hidden picture it reached nobody.
+    const failed = !drawn && this.#renderMath !== undefined && tex.trim().length > 0;
+    const error = box.querySelector<HTMLElement>('.neditor-math-block__error');
+
+    if (error) {
+      error.hidden = !failed;
     }
+
+    if (failed && error && view.content) {
+      view.content.setAttribute('aria-describedby', error.id);
+    } else {
+      view.content?.removeAttribute('aria-describedby');
+    }
+
+    this.#applyMathAccess(view);
   }
 
   /** An editable host, styled and resolved exactly like a block's own content. */
@@ -501,6 +701,11 @@ export class Renderer {
       const trigger = doc.createElement('button');
       trigger.type = 'button';
       trigger.className = 'neditor-image__trigger';
+      // Explicit, as on the chevron and the callout icon: WebKit leaves a
+      // button out of the Tab order unless it carries a tabindex, so there the
+      // picture's alt text could not be reached from the keyboard at all.
+      // Read-only it is `disabled`, which takes it out again whatever this says.
+      trigger.tabIndex = 0;
       trigger.setAttribute('aria-label', this.#labels.imageEdit);
       trigger.addEventListener('click', () => {
         this.#hooks.onEditImage(block.id, trigger);
@@ -508,21 +713,11 @@ export class Renderer {
       frame.append(trigger);
 
       figure.append(frame);
-    } else {
-      // Without a source there is nothing to show, so offer the way to add one.
-      const placeholder = doc.createElement('button');
-      placeholder.type = 'button';
-      placeholder.className = 'neditor-image__placeholder';
-      placeholder.textContent = this.#labels.imageAdd;
-      placeholder.addEventListener('mousedown', (event) => {
-        event.preventDefault();
-      });
-      placeholder.addEventListener('click', () => {
-        this.#hooks.onEditImage(block.id, placeholder);
-      });
-      figure.append(placeholder);
     }
 
+    // Without a source there is nothing to show, so the figure offers the way
+    // to add one -- but only to someone who can: `#applyEditable` draws and
+    // withdraws that button as the editor's mode changes.
     const caption = this.#createEditable(doc, 'figcaption', this.#labels.placeholders.image ?? '');
     figure.append(caption);
     root.append(figure);

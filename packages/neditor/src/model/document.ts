@@ -2,6 +2,7 @@ import { sanitizeImageUrl } from '../util/url.ts';
 import { createBlockId } from './ids.ts';
 import type { Mark, RichText, TextRun } from './rich-text.ts';
 import { BARE_URL_START, INLINE_SPAN_LIMIT } from '../input/inline-rules.ts';
+import { normalizeControlCharacters } from '../input/line-breaks.ts';
 import type { TableRows } from './table.ts';
 import {
   cloneTableRows,
@@ -13,6 +14,7 @@ import {
 import {
   cloneRichText,
   isMathRun,
+  MATH_ATOM,
   isRichEmpty,
   normalizeRuns,
   richFromPlainText,
@@ -169,13 +171,32 @@ export function contentForType(type: BlockType, content: readonly TextRun[]): Ri
     return normalizeRuns(content);
   }
 
-  const delimiter = type === 'code' ? '$' : '';
+  if (type === 'code') {
+    return normalizeRuns(
+      content.map((run) => (isMathRun(run) ? { text: `$${run.math}$` } : { text: run.text })),
+    );
+  }
 
-  return normalizeRuns(
-    content.map((run) =>
-      isMathRun(run) ? { text: `${delimiter}${run.math}${delimiter}` } : { text: run.text },
-    ),
-  );
+  // Bare TeX runs into its neighbours, and TeX reads a control word up to the
+  // first non-letter: `\alpha` beside `b` would be `\alphab`, one undefined
+  // command. A space ends a control word and is otherwise ignored in math
+  // mode, so one goes between a formula and whatever it touches.
+  let text = '';
+
+  content.forEach((run, index) => {
+    if (!isMathRun(run)) {
+      text += run.text;
+      return;
+    }
+
+    const next = content[index + 1];
+    // One character each side, never a pattern over the text built so far.
+    const before = text.length > 0 && !/\s/.test(text.at(-1) ?? '') ? ' ' : '';
+    const after = next && !/\s/.test(next.text[0] ?? '') ? ' ' : '';
+    text += `${before}${run.math ?? ''}${after}`;
+  });
+
+  return richFromPlainText(text);
 }
 
 export function isContinuingType(type: BlockType): boolean {
@@ -348,6 +369,10 @@ export function withHiddenDescendants(
  * collapsed toggle with its own first child — which then pops out as a
  * top-level block — or drops a neighbour into the gap between a toggle and the
  * children it hides, where the next depth clamp adopts it.
+ *
+ * A selection with gaps in it moves as one contiguous group, the way
+ * {@link moveBlocks} lands one: the step is taken from its first or last block,
+ * and the blocks that sat in its gaps are left behind.
  */
 export function moveVisibleBlocks(
   blocks: readonly Block[],
@@ -456,19 +481,52 @@ export function cloneBlock(block: Block): Block {
 /** Coerces anything that might be block content into canonical runs. */
 function normalizeContent(input: unknown, legacyText: unknown): RichText {
   if (Array.isArray(input)) {
-    return normalizeRuns(input as TextRun[]);
+    return normalizeRuns(withLineBreaks(input as TextRun[]));
   }
 
   // Documents written before rich text stored a plain `text` string.
   if (typeof legacyText === 'string') {
-    return richFromPlainText(legacyText);
+    return richFromPlainText(plainCharacters(legacyText));
   }
 
   if (typeof input === 'string') {
-    return richFromPlainText(input);
+    return richFromPlainText(plainCharacters(input));
   }
 
   return [];
+}
+
+/**
+ * Text with `\r\n` and lone `\r` as `\n`, the model's only line break, and
+ * no control character but the tab (see {@link normalizeControlCharacters}).
+ *
+ * A stored `\r` rendered as a break, was written to Markdown as a hard break
+ * and stepped over by the caret as a character of its own, so a document from
+ * a Windows tool that had kept its line endings did not read back as it was
+ * written. This is the door the stored document and `application/x-neditor`
+ * come through; the plain-text, HTML and Markdown readers apply the same rule
+ * to what they read, so a paste holds nothing a reload would take away.
+ */
+function plainCharacters(text: string): string {
+  return normalizeControlCharacters(text);
+}
+
+/**
+ * Runs whose text has been through {@link plainCharacters}. Anything that is
+ * not a run passes through for `normalizeRuns` to judge.
+ */
+function withLineBreaks(runs: readonly TextRun[]): TextRun[] {
+  return runs.map((run) => {
+    const text = (run as Partial<TextRun> | null)?.text;
+
+    if (typeof text !== 'string') {
+      return run;
+    }
+
+    const clean = plainCharacters(text);
+
+    return clean === text ? run : { ...run, text: clean };
+  });
 }
 
 /**
@@ -530,10 +588,10 @@ export function normalizeDocument(doc: Partial<NEditorDocument> | undefined): NE
       }
 
       if (normalized.type === 'callout') {
-        normalized.icon =
-          typeof block.icon === 'string' && block.icon.length > 0
-            ? block.icon
-            : DEFAULT_CALLOUT_ICON;
+        // Cleaned like any text: a NUL in it went into every Markdown label.
+        const icon = typeof block.icon === 'string' ? plainCharacters(block.icon) : '';
+
+        normalized.icon = icon.length > 0 ? icon : DEFAULT_CALLOUT_ICON;
       }
 
       if (normalized.type === 'toggle') {
@@ -543,11 +601,13 @@ export function normalizeDocument(doc: Partial<NEditorDocument> | undefined): NE
       if (normalized.type === 'image') {
         // An unsafe src is dropped rather than rendered.
         normalized.src = typeof block.src === 'string' ? (sanitizeImageUrl(block.src) ?? '') : '';
-        normalized.alt = typeof block.alt === 'string' ? block.alt : '';
+        normalized.alt = typeof block.alt === 'string' ? plainCharacters(block.alt) : '';
       }
 
       if (normalized.type === 'table') {
-        normalized.rows = normalizeTableRows(block.rows);
+        normalized.rows = normalizeTableRows(block.rows).map((row) =>
+          row.map((cell) => normalizeRuns(withLineBreaks(cell))),
+        );
       }
 
       return normalized;
@@ -589,13 +649,19 @@ export function removeBlock(blocks: readonly Block[], id: string): Block[] {
  * Same own keys, each holding the same value by reference.
  *
  * `sameBlocks` compares blocks by reference, so a block rebuilt with identical
- * contents reads as an edit. That is the deliberate conservative direction for
- * content -- proving deep equality costs more than the spurious history entry
- * -- but the scalar patches below are cheap to check and were the ones users
- * hit: picking the callout icon already set, applying an image dialog with
- * nothing changed, setting the link already there, or converting a block to the
- * type it already is each banked an undo entry and emitted a byte-identical
- * `change` for an autosave listener to write back as a new revision.
+ * contents reads as an edit. The scalar patches below are cheap to check and
+ * were the ones users hit: picking the callout icon already set, applying an
+ * image dialog with nothing changed, or converting a block to the type it
+ * already is each banked an undo entry and emitted a byte-identical `change`
+ * for an autosave listener to write back as a new revision.
+ *
+ * `content` is compared by reference here like every other field, and the
+ * rich-text ops hand back a fresh run array even when nothing changed, so a
+ * content patch is never caught by this test -- re-setting the link already on
+ * a range reaches it as a new array. That case is the editor's to refuse, and
+ * it does, before committing: `#commitResolved` drops content `richEquals`
+ * finds equal to what the host already holds. Deep equality is deliberately
+ * not asked here, where every caller would pay for it.
  */
 function sameFields(a: Block, b: Block): boolean {
   const keys = Object.keys(a);
@@ -804,16 +870,35 @@ export function computeListNumbers(blocks: readonly Block[]): Map<string, number
  * cheap but means a move can leave an orphan indented under nothing. Re-running
  * this after any structural change restores the invariant.
  *
+ * It repairs depths without changing the tree they describe. A block's parent
+ * is the nearest block above it that is shallower, and that is the same block
+ * before and after: each block lands one level below its parent's *new* depth.
+ * Clamping against the predecessor alone did not keep that. Delete the parent
+ * of `toggle (2) > hidden (3)` followed by `sibling (2)` and the toggle and its
+ * child came up a level while the sibling stayed at 2 -- now deeper than the
+ * toggle, so inside it, and hidden outright when the toggle was collapsed. On a
+ * document that already satisfies the invariant this is the identity, and every
+ * block is reused, which `sameBlocks` relies on to see a no-op.
+ *
  * The ceiling belongs here rather than only in `normalizeDocument`, because
  * this is the one function every structural edit ends in: a limit applied on
  * load alone is not a limit, it is a document that changes shape when reloaded.
  */
 export function normalizeDepths(blocks: readonly Block[]): Block[] {
-  let previousDepth = -1;
+  // The open ancestors of the current block: their depths as given, and the
+  // depths they were given here. Both strictly increase from the bottom.
+  const givenDepths: number[] = [];
+  const newDepths: number[] = [];
 
   return blocks.map((block) => {
-    const depth = Math.max(0, Math.min(block.depth, previousDepth + 1, MAX_DEPTH));
-    previousDepth = depth;
+    while (givenDepths.length > 0 && givenDepths.at(-1)! >= block.depth) {
+      givenDepths.pop();
+      newDepths.pop();
+    }
+
+    const depth = Math.max(0, Math.min((newDepths.at(-1) ?? -1) + 1, MAX_DEPTH));
+    givenDepths.push(block.depth);
+    newDepths.push(depth);
 
     return depth === block.depth ? block : { ...block, depth };
   });
@@ -871,6 +956,10 @@ export function removeBlocks(blocks: readonly Block[], ids: ReadonlySet<string>)
  * block, `blocks.length` is below the last — because that is what a drop
  * indicator between two blocks actually identifies. Blocks removed from above
  * the gap shift it, which is what `removedBefore` corrects for.
+ *
+ * The moved blocks land as one contiguous group, in document order, even when
+ * they were not contiguous before: a selection with gaps in it gathers at the
+ * drop, and the blocks that sat in its gaps stay where they were.
  */
 export function moveBlocks(
   blocks: readonly Block[],
@@ -887,9 +976,11 @@ export function moveBlocks(
   const gap = Math.max(0, Math.min(gapIndex, blocks.length));
   const removedBefore = blocks.slice(0, gap).filter((block) => ids.has(block.id)).length;
 
-  rest.splice(gap - removedBefore, 0, ...moving);
+  const at = gap - removedBefore;
 
-  return normalizeDepths(rest);
+  // Not `splice(at, 0, ...moving)`: spread into one call, a selection of a
+  // hundred thousand blocks passed the engine's limit on arguments.
+  return normalizeDepths([...rest.slice(0, at), ...moving, ...rest.slice(at)]);
 }
 
 /** Copies blocks, with fresh ids, directly below the lowest one selected. */
@@ -907,13 +998,22 @@ export function duplicateBlocks(
 
   const lastIndex = blocks.reduce((last, block, index) => (ids.has(block.id) ? index : last), 0);
 
-  const next = [...blocks];
-  next.splice(lastIndex + 1, 0, ...copies);
+  // Not `splice(..., ...copies)`, whose arguments the engine limits.
+  const next = [...blocks.slice(0, lastIndex + 1), ...copies, ...blocks.slice(lastIndex + 1)];
 
   return { blocks: normalizeDepths(next), ids: copies.map((block) => block.id) };
 }
 
-/** Indents or outdents several blocks together, preserving their relative shape. */
+/**
+ * Indents or outdents several blocks, each one on its own.
+ *
+ * Every selected block moves by `delta`, clamped at depth 0, and then
+ * `normalizeDepths` pulls any block more than one level below its predecessor
+ * back up. So the selection's relative shape is *not* preserved: outdenting a
+ * parent already at the root together with its child flattens the two, and an
+ * indent can be absorbed by the clamp for one block and not the next. The
+ * editor's `indentTargets` asks this same clamp which blocks would move.
+ */
 export function indentBlocks(
   blocks: readonly Block[],
   ids: ReadonlySet<string>,
@@ -1095,15 +1195,30 @@ function gfmUrlEnd(text: string, start: number, end: number): number {
  * The reader takes `<https://…>` back as the plain text it holds. A `www.`
  * URL has no autolink spelling and is escaped as before.
  */
-function escapeWithAutolinks(text: string, struck = false): string {
+function escapeWithAutolinks(text: string, struck = false, dollarAfter = false): string {
   if (!/https?:\/\//i.test(text)) {
     return escapeMarkdownText(text);
   }
 
   let written = '';
   let from = 0;
+  const matches = [...text.matchAll(AUTOLINKABLE)];
+  // Whether a URL after each one in this text holds a `$`: an autolink writes
+  // it bare, so it pairs with this one's as a later run's would (see
+  // `RunContext.dollarAfter`). One pass from the end.
+  const laterDollar: boolean[] = [];
 
-  for (const match of text.matchAll(AUTOLINKABLE)) {
+  for (let index = matches.length - 1; index >= 0; index -= 1) {
+    const later = matches[index + 1];
+    laterDollar[index] =
+      later !== undefined &&
+      (laterDollar[index + 1] === true ||
+        text
+          .slice(later.index, gfmUrlEnd(text, later.index, later.index + later[0].length))
+          .includes('$'));
+  }
+
+  for (const [index, match] of matches.entries()) {
     const start = match.index;
     const end = gfmUrlEnd(text, start, start + match[0].length);
 
@@ -1111,11 +1226,16 @@ function escapeWithAutolinks(text: string, struck = false): string {
     // longer than the reader's window is one it cannot close: written as an
     // autolink it came back with its brackets, one more pair every save.
     const unsafe = struck ? UNSAFE_IN_STRUCK_AUTOLINK : UNSAFE_IN_AUTOLINK;
+    const url = text.slice(start, end);
 
+    // A `$` is unsafe only where the reader has a bare `$` after it to pair
+    // with (see `RunContext.dollarAfter`): an OData `?$filter=` written
+    // escaped is a link with a backslash in it to GFM.
     if (
       end - start <= match[0].indexOf('//') + 2 ||
       end - start > INLINE_SPAN_LIMIT - 2 ||
-      unsafe.test(text.slice(start, end))
+      unsafe.test(url) ||
+      ((dollarAfter || laterDollar[index] === true) && url.includes('$'))
     ) {
       continue;
     }
@@ -1365,6 +1485,20 @@ function destinationToMarkdown(url: string): string {
 }
 
 /**
+ * A link's destination with the formula atom percent-encoded.
+ *
+ * The link rule refuses a destination holding the atom, which in its
+ * projection is where a formula closed (`matchInlineRule`), and `sanitizeUrl`
+ * keeps a relative href as it was written: `[x](/a\uFFFC)` came back as that
+ * text. Encoded as `%`-escapes it is the same resource, as `/a b` is
+ * `/a%20b`. Only a link's: an image line is read whole, never by that rule,
+ * and keeps its source as written.
+ */
+function linkDestination(url: string): string {
+  return url.includes(MATH_ATOM) ? url.replaceAll(MATH_ATOM, '%EF%BF%BC') : url;
+}
+
+/**
  * A fence longer than any run of backticks in the code it wraps.
  *
  * Three backticks in the payload would otherwise close the block early, and the
@@ -1412,6 +1546,23 @@ const MARK_DELIMITERS: ReadonlyArray<readonly [Mark, string, string]> = [
 const SAFE_SPAN = Math.floor(INLINE_SPAN_LIMIT * 0.75);
 
 /**
+ * How long a span is as the reader counts it: an escape is one character, as
+ * it is in the projection the inline rules match against.
+ */
+function readLength(markdown: string): number {
+  let escapes = 0;
+
+  for (let at = 0; at < markdown.length - 1; at += 1) {
+    if (markdown.charCodeAt(at) === 92) {
+      escapes += 1;
+      at += 1;
+    }
+  }
+
+  return markdown.length - escapes;
+}
+
+/**
  * Where to cut a span that is too long: the last space or line break at or
  * before `SAFE_SPAN`, or 0 if there is none.
  *
@@ -1437,17 +1588,29 @@ interface RunContext {
   whole?: boolean;
   /** The run is in a table cell, where an unescaped `|` ends the cell. */
   inTable?: boolean;
+  /**
+   * A later run in the block is written with a bare `$` the reader can pair
+   * with: a formula's, one in a code run, one in a link's destination, or one
+   * in a URL that may be written as an autolink. An autolink's text is plain
+   * once it closes, so a `$` in it then opens a formula that swallows the rest
+   * of the URL -- `<https://a.test/a$b> c$y$` read as a formula `b> c`, and
+   * `<https://a.test/_a$b>\_ [l](https://c.test/$)` lost the link to one. A
+   * later URL in the same run is asked of in `escapeWithAutolinks`.
+   */
+  dollarAfter?: boolean;
 }
 
 /**
  * An inline formula as Markdown: `$TeX$`, the TeX exactly as it stands.
  *
- * Nothing inside is escaped. Every reader that knows the syntax -- this one,
- * Pandoc, GitHub, KaTeX's auto-render -- takes the text between the dollars
- * literally, so an escape written here would be a backslash in the TeX, and
- * TeX is full of characters this writer escapes elsewhere (`\`, `_`, `*`,
- * `|`). The reader recovers the TeX from the source between the delimiters for
- * the same reason, not from what its rules made of it.
+ * Nothing inside is escaped: this reader and Pandoc take the text between the
+ * dollars literally, so an escape written here would be a backslash in the
+ * TeX, and TeX is full of characters this writer escapes elsewhere (`\`,
+ * `_`, `*`, `|`). The reader recovers the TeX from the source between the
+ * delimiters for the same reason, not from what its rules made of it. Readers
+ * that run Markdown first and find math afterwards -- GitHub's, or KaTeX's
+ * auto-render over rendered HTML -- may still emphasise inside a formula;
+ * there is no spelling that is literal to every reader.
  *
  * Two shapes cannot be written, and both are invalid TeX: a bare `$` inside
  * the formula, which ends math mode in TeX as it ends the span here, and an
@@ -1516,7 +1679,7 @@ function runToMarkdown(run: TextRun, context: RunContext = {}): string {
   // a URL in it like any other.
   const escaped =
     run.link === undefined
-      ? escapeWithAutolinks(run.text, marks.has('strikethrough'))
+      ? escapeWithAutolinks(run.text, marks.has('strikethrough'), context.dollarAfter === true)
       : escapeMarkdownText(run.text);
 
   if (escaped.length === 0 || (marks.size === 0 && !run.link)) {
@@ -1554,7 +1717,29 @@ function runToMarkdown(run: TextRun, context: RunContext = {}): string {
   }
 
   if (run.link) {
-    core = `[${core}](${destinationToMarkdown(run.link)})`;
+    const destination = destinationToMarkdown(linkDestination(run.link));
+    const linked = `[${core}](${destination})`;
+
+    // A link longer than the reader reaches is never read as one (a known
+    // failure: a URL has no shorter spelling), and nothing then protects its
+    // destination either, so the emphasis and formula rules read straight
+    // through it -- a long signed URL holding `_x_` came back with both
+    // underscores gone. Escaped, the URL survives as its text, and a link the
+    // reader does reach reads the same: it takes the href from the content.
+    core =
+      linked.length > INLINE_SPAN_LIMIT
+        ? `[${core}](${destination.replace(/[*_~$]/g, '\\$&')})`
+        : linked;
+
+    // A destination that leaves the reach no room for even one character of
+    // label beside it, counted as the reader counts, makes every piece of a
+    // split unreadable: cut at its spaces, the link went out once a word with
+    // its URL each time and came back as all of those spellings. Kept whole,
+    // its text comes back once. Only then: wherever a piece could be read,
+    // the split below is what it always was.
+    if (readLength(destination) + 5 > INLINE_SPAN_LIMIT) {
+      return core;
+    }
   }
 
   // And one span per readable length: a span whose opening delimiter the reader
@@ -1573,6 +1758,24 @@ function runToMarkdown(run: TextRun, context: RunContext = {}): string {
   const pieces: string[] = [];
   let rest = run.text;
   let written = core;
+  // Each piece is escaped on its own, so it has to be told what the pieces
+  // after it hold: a `$`-holding URL starting later in the run is written
+  // bare as an autolink and pairs with one this piece writes bare, exactly as
+  // a later run's would (`RunContext.dollarAfter`). Where the last such URL
+  // starts, found once; `consumed` is where `rest` starts in the run.
+  let lastDollarUrl = -1;
+
+  if (run.text.includes('$')) {
+    for (const match of run.text.matchAll(AUTOLINKABLE)) {
+      const end = gfmUrlEnd(run.text, match.index, match.index + match[0].length);
+
+      if (run.text.slice(match.index, end).includes('$')) {
+        lastDollarUrl = match.index;
+      }
+    }
+  }
+
+  let consumed = 0;
 
   for (;;) {
     if (written.length <= INLINE_SPAN_LIMIT) {
@@ -1587,8 +1790,14 @@ function runToMarkdown(run: TextRun, context: RunContext = {}): string {
       break;
     }
 
-    pieces.push(runToMarkdown({ ...run, text: rest.slice(0, at) }, context));
+    pieces.push(
+      runToMarkdown(
+        { ...run, text: rest.slice(0, at) },
+        { ...context, dollarAfter: context.dollarAfter === true || lastDollarUrl >= consumed + at },
+      ),
+    );
     rest = rest.slice(at);
+    consumed += at;
     // Escaping never shortens, so a rest longer than the limit is known to be
     // too long without being written.
     written =
@@ -1713,10 +1922,26 @@ export function richToMarkdown(
   // has to judge -- not the atom character the model holds in its place.
   const edge = (run: TextRun | undefined, side: 'first' | 'last'): string =>
     isMathRun(run) ? '$' : ((side === 'first' ? run?.text[0] : run?.text.at(-1)) ?? '');
+  // Whether a run at or after each index is written with a bare `$`: one
+  // pass from the end, never a search per run.
+  const dollarFrom: boolean[] = [];
+
+  for (let index = content.length - 1; index >= 0; index -= 1) {
+    const run = content[index]!;
+
+    dollarFrom[index] =
+      dollarFrom[index + 1] === true ||
+      isMathRun(run) ||
+      (run.marks?.includes('code') === true && run.text.includes('$')) ||
+      run.link?.includes('$') === true ||
+      (run.text.includes('$') && /https?:\/\//i.test(run.text));
+  }
+
   const contextAt = (index: number): RunContext => ({
     before: edge(content[index - 1], 'last'),
     after: edge(content[index + 1], 'first'),
     inTable: options.inTable === true,
+    dollarAfter: dollarFrom[index + 1] === true,
   });
   // Each run is written once here and looked at twice: as the run after the
   // one being decided, and then as that run itself.
@@ -1762,6 +1987,13 @@ export function richToMarkdown(
 
       if (touching) {
         written = runToMarkdown(run, { ...context, tagged: true });
+      }
+
+      // A digit straight after a formula would stop its `$` closing -- Pandoc's
+      // rule, which the reader follows so that `$5-$10` stays a price range --
+      // so it is written as the reference the reader decodes in that one place.
+      if (isMathRun(content[index - 1]) && /^[0-9]/.test(written)) {
+        written = `&#${written.charCodeAt(0)};${written.slice(1)}`;
       }
 
       // `!` straight before a link makes it an image in every other reader. An
