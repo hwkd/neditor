@@ -1299,7 +1299,12 @@ test.describe('10 · pointer selection across blocks', () => {
           ed.setDocument(doc);
         }, text);
         // Each line's middle: the first letter's; and the blank line, from
-        // the bottom of the line above it to the top of the one below.
+        // the bottom of the line box above it to the top of the one below.
+        // A line box is the line's pitch, centred on its glyphs (the
+        // half-leading is shared out evenly) -- never the glyph box, which
+        // is shorter by the font's own leading: 0.1 down from the glyphs'
+        // bottom was still in the first line with Arial, by 3.5px of
+        // half-leading at `line-height: 1.5`, and rightly put the caret there.
         // (Through the editor's own element: no locator sees into a closed
         // root.)
         const lines = await page.evaluate((down) => {
@@ -1314,9 +1319,11 @@ test.describe('10 · pointer selection across blocks', () => {
             return range.getBoundingClientRect();
           };
           const middle = (offset: number) => (box(offset).top + box(offset).bottom) / 2;
+          // Two lines from the first to the third: the blank one between.
+          const pitch = (middle(11) - middle(0)) / 2;
           return {
             left: host.getBoundingClientRect().left,
-            blank: box(0).bottom + (box(11).top - box(0).bottom) * down,
+            blank: middle(0) + pitch / 2 + pitch * down,
             gamma: middle(11),
             delta: middle(23),
           };
@@ -1744,6 +1751,7 @@ test.describe('10 · pointer selection across blocks', () => {
       pressAt = 4,
       mount: 'plain' | 'shadow' = 'plain',
       peerFirst = false,
+      drag = true,
     ) => {
       await editor.load({ doc: 'paragraphs', toolbar: 0, mount });
       await page.evaluate((text) => {
@@ -1781,6 +1789,11 @@ test.describe('10 · pointer selection across blocks', () => {
       }
       await page.mouse.down({ clickCount: clicks });
       await page.keyboard.up('Shift');
+      if (!drag) {
+        await page.mouse.up({ clickCount: clicks });
+        await editor.settle();
+        return (await editor.selection())?.range;
+      }
       // A peer's "zz " put in front before the first move: the text under
       // the press is redrawn while it still holds the browser's range.
       if (peerFirst) {
@@ -1811,17 +1824,35 @@ test.describe('10 · pointer selection across blocks', () => {
     expect(double).toEqual(browserName === 'firefox' ? { start: 4, end: 39 } : direct);
     expect(await run(2, true), 'Shift+double-click').toEqual(double);
 
+    // Which end of the reader's range the engine keeps as the anchor for a
+    // Shift+click is the platform's: Chromium and Safari on macOS re-anchor
+    // at the end farther from the click, while on Linux they keep the
+    // anchor, as Firefox does everywhere. So it is measured, in the same
+    // run: the reader's range, the same Shift+click with no drag, and the
+    // end of the browser's range that is not the press is the anchor the
+    // drag must keep, out to 37.
+    const anchorKept = async (before: readonly [number, number], pressAt: number) => {
+      const range = await run(1, false, before, pressAt, 'plain', false, false);
+      expect(range, `Shift+click at ${pressAt}`).toBeDefined();
+      expect([range!.start, range!.end], `Shift+click at ${pressAt}`).toContain(pressAt);
+      return range!.start === pressAt ? range!.end : range!.start;
+    };
     const firefox = browserName === 'firefox';
-    for (const [label, before, pressAt, chromium, gecko] of [
-      ['[4,9] Shift+clicked at 2', [4, 9], 2, { start: 9, end: 37 }, { start: 4, end: 37 }],
-      ['[9,4] Shift+clicked at 20', [9, 4], 20, { start: 4, end: 37 }, { start: 9, end: 37 }],
-      ['[4,20] Shift+clicked at 11', [4, 20], 11, { start: 20, end: 37 }, null],
+    const mac = process.platform === 'darwin';
+    for (const [label, before, pressAt, macAnchor, gecko] of [
+      ['[4,9] Shift+clicked at 2', [4, 9], 2, 9, 4],
+      ['[9,4] Shift+clicked at 20', [9, 4], 20, 4, 9],
+      ['[4,20] Shift+clicked at 11', [4, 20], 11, 20, null],
     ] as const) {
       // A press inside a range is the start of a drag of that text in
       // Firefox, Shift or not: not a selection at all.
       if (firefox && gecko === null) continue;
+      const anchor = await anchorKept(before, pressAt);
+      // Where it is known: Firefox's, and macOS's for the others.
+      if (firefox) expect(anchor, `${label}: anchor`).toBe(gecko);
+      else if (mac) expect(anchor, `${label}: anchor`).toBe(macAnchor);
       const native = await run(1, false, before, pressAt);
-      expect(native, label).toEqual(firefox ? gecko : chromium);
+      expect(native, label).toEqual({ start: Math.min(anchor, 37), end: Math.max(anchor, 37) });
       expect(await run(1, true, before, pressAt), `${label}, via p3`).toEqual(native);
     }
 
@@ -3151,15 +3182,20 @@ test.describe('10 · pointer selection across blocks', () => {
               const b = box(offset);
               return { x: b.left + b.width * across, y: (b.top + b.bottom) / 2 };
             };
-            // Across the page, in the page.
-            const line = box(barred);
+            // Across the page, in the page, over the whole line box: the
+            // line's pitch centred on its glyphs. Over the glyph box alone
+            // (17px of a 24px line in Arial) a step of the drag under it
+            // was still on the barred line, outside the bar, where the
+            // editor rightly found a caret.
+            const pitch = point(20).y - point(10).y;
+            const barY = point(barred).y;
             const bar = document.createElement('div');
-            bar.style.cssText = `position:fixed;left:0;right:0;top:${line.top}px;height:${line.height}px;background:#f002;z-index:5`;
+            bar.style.cssText = `position:fixed;left:0;right:0;top:${barY - pitch / 2}px;height:${pitch}px;background:#f002;z-index:5`;
             document.body.append(bar);
             const below = content('p3').getBoundingClientRect();
             return {
               left: host.getBoundingClientRect().left,
-              barY: (line.top + line.bottom) / 2,
+              barY,
               third: point(20).y,
               fourth: point(32).y,
               bravo: point(12),
@@ -3265,8 +3301,11 @@ test.describe('10 · pointer selection across blocks', () => {
           expect(drawn!.end - drawn!.start, `${label}: before the bar`).toBeGreaterThan(4);
         }
         // (At once is in one move: on the way there, any step still on the
-        // third line finds a caret.)
-        await page.mouse.move(under, at.barY, { steps: mode.endsWith('at once') ? 1 : 6 });
+        // third line finds a caret. Five steps of a line's pitch, so that
+        // none lands on the boundary between the two lines, which is not
+        // under the bar and which Chromium gives to the line above: six put
+        // the fourth exactly there, and the caret on the barred line.)
+        await page.mouse.move(under, at.barY, { steps: mode.endsWith('at once') ? 1 : 5 });
         await editor.settle();
         const held = (await editor.selection())?.range;
         await page.mouse.up();
@@ -3529,6 +3568,32 @@ test.describe('10 · pointer selection across blocks', () => {
     browserName,
   }) => {
     test.skip(browserName === 'firefox', 'Playwright’s Firefox moves outside the window elsewhere');
+    // The edge auto-scroll moves on animation frames, and a loaded runner's
+    // headless WebKit draws few of them: the whole of a 160-line block did
+    // not fit in a 5s poll, though it was still moving. So what is asserted
+    // is that the value keeps moving towards its goal until it passes it
+    // (`direction` 1 up past `goal`, -1 down below it): one that stands
+    // still for 3s -- the range left behind while the page scrolls on, as
+    // in R14-RV1-2 -- fails, however long the frames take.
+    test.slow();
+    const reaches = async (
+      label: string,
+      read: () => Promise<number>,
+      direction: 1 | -1,
+      goal: number,
+    ) => {
+      let last = await read();
+      let moved = Date.now();
+      while (direction > 0 ? last <= goal : last >= goal) {
+        await page.waitForTimeout(100);
+        const now = await read();
+        if ((now - last) * direction > 0) {
+          last = now;
+          moved = Date.now();
+        }
+        expect(Date.now() - moved, `${label}: stood still at ${last}`).toBeLessThan(3000);
+      }
+    };
     const tall = Array.from({ length: 160 }, (_, i) => `line ${i} of a tall block`).join('\n');
 
     // The block of three that is tall, the edge, where the page starts, and
@@ -3593,17 +3658,13 @@ test.describe('10 · pointer selection across blocks', () => {
       });
 
       if (reach === 'on') {
-        await expect
-          .poll(async () => (await state()).length, { message: edge })
-          .toBeGreaterThan(inside + 400);
+        await reaches(edge, async () => (await state()).length, 1, inside + 400);
       } else if (reach === 'start') {
         // "line 0 of a tall block" is 22 characters.
-        await expect.poll(async () => (await state()).y, { message: edge }).toBe(0);
-        await expect.poll(async () => (await state()).start, { message: edge }).toBeLessThan(23);
+        await reaches(`${edge}: scrolled`, async () => (await state()).y, -1, 1);
+        await reaches(edge, async () => (await state()).start, -1, 23);
       } else {
-        await expect
-          .poll(async () => (await state()).end, { message: edge })
-          .toBeGreaterThan(tall.length - 23);
+        await reaches(edge, async () => (await state()).end, 1, tall.length - 23);
       }
 
       await page.mouse.up();
@@ -4279,19 +4340,26 @@ test.describe('10 · pointer selection across blocks', () => {
           range.setEnd(host.firstChild!, offset + 1);
           return range.getBoundingClientRect();
         };
-        const second = line(10);
-        const bar = document.createElement('div');
-        bar.style.cssText = `position:fixed;left:0;right:0;top:${second.top}px;height:${second.height}px;background:#f002;z-index:5`;
-        document.body.append(bar);
         const middle = (offset: number) => (line(offset).top + line(offset).bottom) / 2;
+        // Over the second line's whole line box (its pitch, centred on its
+        // glyphs), not its glyph box, which the font's leading makes shorter.
+        const pitch = middle(20) - middle(10);
+        const bar = document.createElement('div');
+        bar.style.cssText = `position:fixed;left:0;right:0;top:${middle(10) - pitch / 2}px;height:${pitch}px;background:#f002;z-index:5`;
+        document.body.append(bar);
+        // A quarter into "three"'s "t", 26: a caret before it, whatever the
+        // font's advances (60px in from the block's edge was 25 in
+        // Liberation Sans).
+        const t = line(26);
         return {
-          left: host.getBoundingClientRect().left,
+          x: t.left + t.width * 0.25,
           second: middle(10),
           third: middle(20),
           fourth: middle(32),
+          left: host.getBoundingClientRect().left,
         };
       }, text);
-      const x = at.left + 60;
+      const x = at.x;
       await page.mouse.move(at.left - 6, at.fourth);
       await page.mouse.down();
       await page.mouse.move(at.left - 7, at.fourth);

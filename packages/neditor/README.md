@@ -1617,8 +1617,9 @@ Where the paste lands depends on its shape:
   you are in, and the last absorbs whatever followed the caret. They keep their
   own shape, from the depth of the block you are in. Pasted into a toggle's or a
   callout's own text, they become its children, as Enter makes them, and a
-  collapsed one opens (an empty one with nothing under it is replaced, and at
-  the start of one they go in front: the bullets below). A collapsed toggle the
+  collapsed one opens (an empty one is never replaced: it takes the first as
+  its own text and the rest as its children; at the start of one with text
+  they go in front: the bullets below). A collapsed toggle the
   paste brings is opened if anything of yours would end up under it.
 - A **table, image, divider, code block or equation** is spliced in whole
   rather than merged -- an equation's TeX is not prose, nor prose TeX -- because

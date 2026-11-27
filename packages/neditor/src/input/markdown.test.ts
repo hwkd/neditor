@@ -1221,15 +1221,22 @@ describe('a backtick that begins inside a link destination', () => {
     ['a refused link holding a bare backtick', (n: number) => '[a](x`)'.repeat(n)],
     ['a refused link holding an escaped one', (n: number) => '[a](x\\`)'.repeat(n)],
     ['one destination of many backticks', (n: number) => `[a](${'x`'.repeat(n)})`],
-  ])('%s, repeated, stays linear', (_name, line) => {
-    const n = 5000;
-    const short = elapsed(line(n));
-    const long = elapsed(line(8 * n));
+  ])(
+    '%s, repeated, stays linear',
+    (_name, line) => {
+      const n = 5000;
+      const short = elapsed(line(n));
+      const long = elapsed(line(8 * n));
 
-    expect(long / short, `long ${Math.round(long)}ms vs short ${Math.round(short)}ms`).toBeLessThan(
-      20,
-    );
-  });
+      expect(
+        long / short,
+        `long ${Math.round(long)}ms vs short ${Math.round(short)}ms`,
+      ).toBeLessThan(20);
+      // About 2 s here and over 5 s on a shared CI runner: the time a growth
+      // test needs, as the others have it, not vitest's 5 s default.
+    },
+    60_000,
+  );
 });
 
 describe('an escaped character in a link destination is that character', () => {

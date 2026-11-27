@@ -1,5 +1,6 @@
 import { expect, MOD, test } from '../helpers/test.ts';
 import { EditorPage } from '../helpers/editor.ts';
+import { unguardedBackspaces, watchBackspace } from '../helpers/backspace.ts';
 
 /** `n` words of a-z prefixes from a seeded generator: the probes' text, line for line. */
 const seededWords = (n: number, seed: number): string => {
@@ -718,6 +719,7 @@ test.describe('16 · tables', () => {
     editor,
     page,
   }) => {
+    await watchBackspace(page);
     for (const [mount, portal] of [
       ['plain', undefined],
       ['shadow', undefined],
@@ -748,9 +750,11 @@ test.describe('16 · tables', () => {
       await page.keyboard.press('Backspace');
       await page.waitForTimeout(300);
       expect(page.url(), label).toBe(url);
+      expect(await unguardedBackspaces(page), label).toEqual([]);
       await page.keyboard.press('Backspace');
       await page.waitForTimeout(300);
       expect(page.url(), label).toBe(url);
+      expect(await unguardedBackspaces(page), label).toEqual([]);
       expect(await mounted.doc(), label).toEqual(before);
     }
   });

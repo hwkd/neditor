@@ -5446,6 +5446,15 @@ function visitDetails(doc: Document, element: Element, depth: number, out: Block
     pasteLast = lastContentEdge(element, summary);
   }
 
+  // The summary's pictures are the toggle's first children, as a heading's
+  // and a quote's are handed on after them: read as the title, they went
+  // nowhere. Found before a wrapped summary is taken out of the tree.
+  if (summary && containsImage(summary)) {
+    for (const image of textImages(summary, () => false).filter(hasUsableImage)) {
+      pushImage(out, image, block.depth + 1);
+    }
+  }
+
   // A direct summary is skipped by identity: a <details> holds every nested
   // <details> below it, so copying one per level was quadratic in the nesting
   // depth exactly as the list case was.
@@ -8379,11 +8388,15 @@ function readBlocksFromHtml(doc: Document, html: string, options: HtmlReadOption
   inlineNesting = 0;
   lineOpen = false;
   // Asked for, or ours from before the writer marked its blocks -- which can
-  // only be recognised when a block of it carries a `data-neditor-*` mark:
-  // see `legacyOwnHtml` and `HtmlReadOptions.whitespace`.
+  // only be recognised when a block of it carries one of the marks that writer
+  // emitted: see `legacyOwnHtml` and `HtmlReadOptions.whitespace`. Not any
+  // `data-neditor-*`: a live editor's formula, display equation and code
+  // label carry the renderer's own, and a page range copied across one is
+  // the page's HTML.
   legacyOwnHtml =
     options.whitespace === 'preserve' ||
-    (/\sdata-neditor-/.test(html) && !/white-space:\s*pre-wrap/i.test(html));
+    (/\sdata-neditor-(?:depth|list|checked|callout)\b/.test(html) &&
+      !/white-space:\s*pre-wrap/i.test(html));
   // Not in this editor's own HTML from before its writer marked every block:
   // an empty paragraph there is a line it wrote, and holds no `white-space`
   // to say so.

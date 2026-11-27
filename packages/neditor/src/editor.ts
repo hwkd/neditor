@@ -11326,9 +11326,12 @@ export class NEditor {
     // and a first block that cannot merge -- a table -- landed beside it and
     // left exactly that husk, so that one goes in front, as for any block.
     // Prose still merges there: its first line is the block's text and the
-    // rest its siblings, as Enter makes them at that depth. Nor are lines
-    // pasted into a list item put in front of it: they are its further items
-    // (`continuing`), as Enter makes them.
+    // rest its siblings, as Enter makes them at that depth. Lines pasted into
+    // a list item are its further items (`continuing`), as Enter makes them:
+    // after the caret, and, at the very start of an item with text, in front
+    // of it as open items of its type, the item keeping its id, check and
+    // text, as Enter there keeps them. Put after it there, the check and the
+    // id went with the first pasted line and the reader's text to a new item.
     const keepsOwnText =
       !isRichEmpty(after) ||
       !acceptsChildren(target.type) ||
@@ -11337,7 +11340,7 @@ export class NEditor {
     if (
       isRichEmpty(before) &&
       !replaceable &&
-      !continuing &&
+      (!continuing || !isRichEmpty(after)) &&
       keepsOwnText &&
       (!merges || pasted.length > 1)
     ) {
@@ -11349,7 +11352,13 @@ export class NEditor {
       let at = findBlockIndex(blocks, target.id);
 
       front.forEach((block, index) => {
-        blocks = insertBlockAt(blocks, at, { ...cloneBlock(block), depth: depths[index]! });
+        blocks = insertBlockAt(
+          blocks,
+          at,
+          continuing
+            ? createBlock(target.type, block.content, target.depth)
+            : { ...cloneBlock(block), depth: depths[index]! },
+        );
         at += 1;
       });
 
@@ -11431,7 +11440,22 @@ export class NEditor {
         content: targetContent,
       };
 
-      blocks = this.#blocks.map((block) => (block.id === target.id ? replacement : block));
+      // The same no-op test as below: plain `## ` into an empty heading is
+      // the heading it replaces, and rebuilt it was an undo step and a
+      // `change` for nothing.
+      const unchanged =
+        created.length === 0 &&
+        richEquals(replacement.content, target.content) &&
+        Object.keys({ ...replacement, ...target }).every(
+          (key) =>
+            key === 'content' ||
+            JSON.stringify(replacement[key as keyof Block]) ===
+              JSON.stringify(target[key as keyof Block]),
+        );
+
+      blocks = unchanged
+        ? this.#blocks
+        : this.#blocks.map((block) => (block.id === target.id ? replacement : block));
     } else if (created.length === 0 && richEquals(targetContent, target.content)) {
       // A paste that brings nothing back to where it started -- `## ` as plain
       // text parses to one empty heading, which merges as no text at all --

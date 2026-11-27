@@ -2,6 +2,44 @@ import { expect, MOD, test } from '../helpers/test.ts';
 import { copyFromPage, shape, writeClipboard } from '../helpers/clipboard.ts';
 import { afterFailedLoads, READER_COPIES, recordArrivingHtml } from '../helpers/hostile.ts';
 
+/*
+ * Safari's own copies, for the WebKit ports that are not Apple's (r1 ci-9).
+ * These tests pin what the reader makes of Safari's copy of a drag, and the
+ * README supports Safari. The Linux WebKit port CI runs is not Safari: for
+ * the same drags its serializer writes an emptied `<details>` that declares
+ * `white-space`, which the edge rule keeps as written (C30d), or HTML with no
+ * text in it at all (C30f). So on Apple's WebKit (macOS) the drag is copied
+ * live, and on any other WebKit port the markup Safari wrote for that very
+ * drag is pasted instead, through a real copy and paste (`copyFromPage`, which
+ * no engine cleans). Recorded with the tests' own drags and copy in
+ * Playwright's WebKit on macOS, as each paste's `clipboardData` held it,
+ * byte for byte.
+ */
+const SAFARI_BLOCK_STYLE =
+  'color: rgb(17, 17, 17); font-family: system-ui, sans-serif; font-size: medium; font-style: normal; font-variant-caps: normal; font-weight: 400; letter-spacing: normal; orphans: 2; text-align: start; text-indent: 0px; text-transform: none; white-space: normal; widows: 2; word-spacing: 0px; -webkit-tap-highlight-color: rgba(0, 0, 0, 0.4); -webkit-text-stroke-width: 0px; background-color: rgb(255, 255, 255); text-decoration: none;';
+const SAFARI_HEADING_STYLE = SAFARI_BLOCK_STYLE.replace(' font-size: medium;', '').replace(
+  ' font-weight: 400;',
+  '',
+);
+const SAFARI_COPIES = {
+  "ended at the start of a closed details' summary": {
+    html: '<!DOCTYPE html><p id="s0">one</p><details></summary><br class="Apple-interchange-newline">',
+    text: 'one\n\n',
+  },
+  'a drag across closed details': {
+    html:
+      `<!DOCTYPE html><details style="${SAFARI_BLOCK_STYLE}"><details style="${SAFARI_BLOCK_STYLE}">` +
+      `<h3 data-first="" style="${SAFARI_HEADING_STYLE}">FAQ</h3>` +
+      `<details style="${SAFARI_BLOCK_STYLE}"><summary>How do I install it?</summary></span></details>` +
+      `<details style="${SAFARI_BLOCK_STYLE}"><summary>Does it work offline?</summary></span></details>` +
+      `<p data-last="" style="${SAFARI_BLOCK_STYLE}">Still stuck? Open an issue.</p>`,
+    text: 'FAQ\n\nHow do I install it?\nDoes it work offline?\nStill stuck? Open an issue.',
+  },
+} as const;
+/** Pastes Safari's recorded copy rather than this port's own (see `SAFARI_COPIES`). */
+const replaysSafari = (browserName: string): boolean =>
+  browserName === 'webkit' && process.platform !== 'darwin';
+
 test.describe('11 · clipboard', () => {
   test.describe('block-mode copy round trips', () => {
     // Was FINDING F8 in Firefox, fixed; see docs/e2e-progress.md.
@@ -819,66 +857,77 @@ test.describe('11 · clipboard', () => {
       await editor.setDocument({
         blocks: [{ id: 'z', type: 'paragraph', depth: 0, content: [{ text: 'XXYY' }] }],
       });
-      await page.evaluate((html) => {
-        const div = document.createElement('div');
+      const safari =
+        name in SAFARI_COPIES && replaysSafari(browserName)
+          ? SAFARI_COPIES[name as keyof typeof SAFARI_COPIES]
+          : undefined;
+      if (safari) {
+        await copyFromPage(page, MOD, safari);
+      } else {
+        await page.evaluate((html) => {
+          const div = document.createElement('div');
 
-        div.id = 'foreign';
-        div.innerHTML = html;
-        document.body.prepend(div);
-      }, html);
-      // Measured on the block's text, whatever source whitespace is around it.
-      const point = ([id, where]: [string, Where]) =>
-        page.evaluate(
-          ({ id, where }) => {
-            const element = document.getElementById(id)!;
-            const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-            const nodes: Text[] = [];
+          div.id = 'foreign';
+          div.innerHTML = html;
+          document.body.prepend(div);
+        }, html);
+        // Measured on the block's text, whatever source whitespace is around it.
+        const point = ([id, where]: [string, Where]) =>
+          page.evaluate(
+            ({ id, where }) => {
+              const element = document.getElementById(id)!;
+              const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+              const nodes: Text[] = [];
 
-            for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-              nodes.push(node as Text);
-            }
+              for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+                nodes.push(node as Text);
+              }
 
-            const text = nodes.map((node) => node.data).join('');
-            const charRect = (offset: number) => {
-              let at = offset;
-              const node = nodes.find((candidate) => {
-                if (at < candidate.data.length) {
-                  return true;
-                }
+              const text = nodes.map((node) => node.data).join('');
+              const charRect = (offset: number) => {
+                let at = offset;
+                const node = nodes.find((candidate) => {
+                  if (at < candidate.data.length) {
+                    return true;
+                  }
 
-                at -= candidate.data.length;
-                return false;
-              })!;
-              const range = document.createRange();
+                  at -= candidate.data.length;
+                  return false;
+                })!;
+                const range = document.createRange();
 
-              range.setStart(node, at);
-              range.setEnd(node, at + 1);
+                range.setStart(node, at);
+                range.setEnd(node, at + 1);
 
-              return range.getBoundingClientRect();
-            };
+                return range.getBoundingClientRect();
+              };
 
-            if (where === 'past-end') {
-              const rect = charRect(text.trimEnd().length - 1);
-              return { x: rect.right + 6, y: rect.top + rect.height / 2 };
-            }
+              if (where === 'past-end') {
+                const rect = charRect(text.trimEnd().length - 1);
+                return { x: rect.right + 6, y: rect.top + rect.height / 2 };
+              }
 
-            if (where === 'before-start') {
-              const rect = charRect(text.length - text.trimStart().length);
-              return { x: element.getBoundingClientRect().left - 3, y: rect.top + rect.height / 2 };
-            }
+              if (where === 'before-start') {
+                const rect = charRect(text.length - text.trimStart().length);
+                return {
+                  x: element.getBoundingClientRect().left - 3,
+                  y: rect.top + rect.height / 2,
+                };
+              }
 
-            const rect = charRect(text.indexOf(where.before));
-            return { x: rect.left + 1, y: rect.top + rect.height / 2 };
-          },
-          { id, where },
-        );
-      const start = await point(from);
-      const end = await point(to);
-      await page.mouse.move(start.x, start.y);
-      await page.mouse.down();
-      await page.mouse.move(end.x, end.y, { steps: 10 });
-      await page.mouse.up();
-      await page.keyboard.press(`${MOD}+c`);
+              const rect = charRect(text.indexOf(where.before));
+              return { x: rect.left + 1, y: rect.top + rect.height / 2 };
+            },
+            { id, where },
+          );
+        const start = await point(from);
+        const end = await point(to);
+        await page.mouse.move(start.x, start.y);
+        await page.mouse.down();
+        await page.mouse.move(end.x, end.y, { steps: 10 });
+        await page.mouse.up();
+        await page.keyboard.press(`${MOD}+c`);
+      }
       await editor.clickAt('z', 2);
       await page.keyboard.press(`${MOD}+v`);
 
@@ -1436,15 +1485,20 @@ test.describe('11 · clipboard', () => {
   test('C30f a drag across closed details pastes every question at its depth', async ({
     editor,
     page,
+    browserName,
   }) => {
     await editor.load({ doc: 'empty' });
     await editor.setDocument({
       blocks: [{ id: 'z', type: 'paragraph', depth: 0, content: [{ text: 'XXYY' }] }],
     });
-    await copyRegion(
-      page,
-      '<h3 data-first>FAQ</h3><details><summary>How do I install it?</summary><p>Run the installer.</p></details><details><summary>Does it work offline?</summary><p>Yes.</p></details><p data-last>Still stuck? Open an issue.</p>',
-    );
+    if (replaysSafari(browserName)) {
+      await copyFromPage(page, MOD, SAFARI_COPIES['a drag across closed details']);
+    } else {
+      await copyRegion(
+        page,
+        '<h3 data-first>FAQ</h3><details><summary>How do I install it?</summary><p>Run the installer.</p></details><details><summary>Does it work offline?</summary><p>Yes.</p></details><p data-last>Still stuck? Open an issue.</p>',
+      );
+    }
     await editor.clickAt('z', 2);
     await page.keyboard.press(`${MOD}+v`);
 

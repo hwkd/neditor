@@ -1,5 +1,6 @@
 import type { Locator } from '@playwright/test';
 import { EditorPage, expect, MOD, test } from '../helpers/test.ts';
+import { unguardedBackspaces, watchBackspace } from '../helpers/backspace.ts';
 
 async function inViewport(portal: Locator, width: number, height: number): Promise<void> {
   const box = (await portal.boundingBox())!;
@@ -651,6 +652,7 @@ test.describe('18 · popover ownership & viewport', () => {
   test('PO15 a panel in the page around an iframe mount closed by a peer leaves Backspace on the page', async ({
     page,
   }) => {
+    await watchBackspace(page);
     const editor = new EditorPage(page, 0, page.frameLocator('#frame'));
     const outer = (name: string) => page.locator(`.neditor-portal.neditor-${name}`);
     const cases = [
@@ -688,9 +690,11 @@ test.describe('18 · popover ownership & viewport', () => {
       await page.keyboard.press('Backspace');
       await page.waitForTimeout(300);
       expect(page.url(), label).toBe(url);
+      expect(await unguardedBackspaces(page), label).toEqual([]);
       await page.keyboard.press('Backspace');
       await page.waitForTimeout(300);
       expect(page.url(), label).toBe(url);
+      expect(await unguardedBackspaces(page), label).toEqual([]);
       expect(await editor.doc(), label).toEqual(before);
     }
   });

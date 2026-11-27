@@ -1,4 +1,5 @@
 import { EditorPage, expect, MOD, test } from '../helpers/test.ts';
+import { likeSafarisButton, unguardedBackspaces, watchBackspace } from '../helpers/backspace.ts';
 
 test.describe('08 · block selection (keyboard)', () => {
   test('B1 Escape selects the block; Escape again leaves the editor and says so', async ({
@@ -1110,6 +1111,7 @@ test.describe('08 · block selection (keyboard)', () => {
     editor,
     page,
   }) => {
+    await watchBackspace(page);
     const fiveParas = () => {
       const ed = window.__e2e.editor;
       ed.setDocument({
@@ -1149,6 +1151,7 @@ test.describe('08 · block selection (keyboard)', () => {
         await page.keyboard.press('Backspace');
         await page.waitForTimeout(300);
         expect(page.url(), how).toBe(url);
+        expect(await unguardedBackspaces(page), how).toEqual([]);
         expect(await editor.texts(), how).toEqual(before);
       } else {
         await page.keyboard.down('Backspace');
@@ -1158,6 +1161,7 @@ test.describe('08 · block selection (keyboard)', () => {
         await page.keyboard.up('Backspace');
         await page.waitForTimeout(300);
         expect(page.url(), how).toBe(url);
+        expect(await unguardedBackspaces(page), how).toEqual([]);
         expect(await editor.texts(), how).toEqual(['Title', 'Alpha', 'Charlie', 'Delta']);
       }
     }
@@ -1175,6 +1179,7 @@ test.describe('08 · block selection (keyboard)', () => {
     editor,
     page,
   }) => {
+    await watchBackspace(page);
     for (const mount of ['plain', 'shadow', 'iframe', 'dialog'] as const) {
       const mounted =
         mount === 'iframe' ? new EditorPage(page, 0, page.frameLocator('#frame')) : editor;
@@ -1216,6 +1221,7 @@ test.describe('08 · block selection (keyboard)', () => {
       await page.keyboard.up('Backspace');
       await page.waitForTimeout(300);
       expect(page.url(), mount).toBe(url);
+      expect(await unguardedBackspaces(page), mount).toEqual([]);
       expect(await mounted.texts(), mount).toEqual(before);
     }
   });
@@ -1233,6 +1239,7 @@ test.describe('08 · block selection (keyboard)', () => {
     editor,
     page,
   }) => {
+    await watchBackspace(page);
     for (const delay of [0, 20, 200]) {
       for (const mode of ['blocks', 'text'] as const) {
         const label = `${delay}ms ${mode}`;
@@ -1277,6 +1284,7 @@ test.describe('08 · block selection (keyboard)', () => {
         await page.keyboard.up('Backspace');
         await page.waitForTimeout(500);
         expect(page.url(), label).toBe(url);
+        expect(await unguardedBackspaces(page), label).toEqual([]);
       }
     }
   });
@@ -1351,6 +1359,7 @@ test.describe('08 · block selection (keyboard)', () => {
     editor,
     page,
   }) => {
+    await watchBackspace(page);
     const sequences = {
       'a second press': ['Backspace', 'Backspace'],
       '"x" then Backspace': ['x', 'Backspace'],
@@ -1392,6 +1401,7 @@ test.describe('08 · block selection (keyboard)', () => {
           await page.waitForTimeout(150);
         }
         expect(page.url(), label).toBe(url);
+        expect(await unguardedBackspaces(page), label).toEqual([]);
         expect(await editor.texts(), label).toEqual(before);
       }
     }
@@ -1408,6 +1418,7 @@ test.describe('08 · block selection (keyboard)', () => {
     editor,
     page,
   }) => {
+    await watchBackspace(page);
     for (const host of ['sync', 'debounced'] as const) {
       await page.goto('about:blank');
       await editor.load({ doc: 'empty' });
@@ -1441,6 +1452,7 @@ test.describe('08 · block selection (keyboard)', () => {
       await page.keyboard.press('Backspace');
       await page.waitForTimeout(300);
       expect(page.url(), host).toBe(url);
+      expect(await unguardedBackspaces(page), host).toEqual([]);
       expect(await editor.texts(), host).toEqual(before);
     }
   });
@@ -1584,6 +1596,7 @@ test.describe('08 · block selection (keyboard)', () => {
     editor,
     page,
   }) => {
+    await watchBackspace(page);
     const fourParas = () =>
       window.__e2e.editor.setDocument({
         blocks: ['Alpha', 'Beta', 'Gamma', 'Delta'].map((text, i) => ({
@@ -1616,6 +1629,7 @@ test.describe('08 · block selection (keyboard)', () => {
       await page.keyboard.press(key);
       await page.waitForTimeout(250);
       expect(page.url(), key).toBe(url);
+      expect(await unguardedBackspaces(page), key).toEqual([]);
       expect(await editor.texts(), key).toEqual(['Alpha', 'Gamma', 'Delta']);
     }
 
@@ -1635,6 +1649,7 @@ test.describe('08 · block selection (keyboard)', () => {
       await page.waitForTimeout(250);
       await page.keyboard.type('x');
       expect(page.url(), mount).toBe(url);
+      expect(await unguardedBackspaces(page), mount).toEqual([]);
       expect(await mounted.texts(), mount).toEqual(['Alpha', 'Gamma', 'Delta']);
     }
   });
@@ -1652,6 +1667,7 @@ test.describe('08 · block selection (keyboard)', () => {
     editor,
     page,
   }) => {
+    await watchBackspace(page);
     await page.goto('about:blank');
     await editor.load({ doc: 'empty', mount: 'dialog' });
     await page.evaluate(() => {
@@ -1681,6 +1697,7 @@ test.describe('08 · block selection (keyboard)', () => {
     await page.keyboard.press('Backspace');
     await page.waitForTimeout(300);
     expect(page.url(), `focus on the dialog: ${onDialog}`).toBe(url);
+    expect(await unguardedBackspaces(page), `focus on the dialog: ${onDialog}`).toEqual([]);
     if (onDialog) {
       expect(await editor.texts()).toEqual(before);
     }
@@ -1700,6 +1717,7 @@ test.describe('08 · block selection (keyboard)', () => {
     editor,
     page,
   }) => {
+    await watchBackspace(page);
     const one = (text: string) =>
       window.__e2e.editor.setDocument(
         { blocks: [{ id: 'z', type: 'paragraph', depth: 0, content: [{ text }] }] },
@@ -1740,6 +1758,7 @@ test.describe('08 · block selection (keyboard)', () => {
       await page.keyboard.press('Backspace');
       await page.waitForTimeout(300);
       expect(page.url(), mount).toBe(url);
+      expect(await unguardedBackspaces(page), mount).toEqual([]);
       expect(await mounted.texts(), mount).toEqual(['Goodbye moon']);
     }
   });
@@ -1759,7 +1778,9 @@ test.describe('08 · block selection (keyboard)', () => {
   test('B33c a peer taking away the host of a range WebKit kept for a page button leaves no Backspace that leaves the page', async ({
     editor,
     page,
+    browserName,
   }) => {
+    await watchBackspace(page);
     const edits = [
       'block deleted',
       'every id renamed',
@@ -1783,6 +1804,7 @@ test.describe('08 · block selection (keyboard)', () => {
           button.textContent = 'Host button';
           (document.querySelector('#dialog') ?? document.body).prepend(button);
         });
+        await likeSafarisButton(page, browserName, '#host-button');
         await (table ? editor.cell('tbl', 1, 1) : editor.content('p2')).click();
         await page.keyboard.press('End');
         await page.keyboard.press('Shift+ArrowLeft');
@@ -1808,6 +1830,7 @@ test.describe('08 · block selection (keyboard)', () => {
         await page.keyboard.press('Backspace');
         await page.waitForTimeout(300);
         expect(page.url(), label).toBe(url);
+        expect(await unguardedBackspaces(page), label).toEqual([]);
         expect(await editor.doc(), label).toEqual(after);
       }
     }
@@ -2260,6 +2283,23 @@ test.describe('08 · block selection (keyboard)', () => {
     editor,
     page,
   }) => {
+    // A row whose range the keys make by the clusters the engine draws, which
+    // are the font's: the carry is the same JS everywhere, the range it is
+    // handed is not. Its result is keyed by that range, measured, rather than
+    // the range assumed. "\u1100\u1161\u1100\u1161\u11a8" (NFD "가각"):
+    // where a font shapes conjoining jamo (macOS; Chromium and WebKit on
+    // Linux), "각" is one caret stop and Shift+→ selects all of it, [2,5], and
+    // the readings agree on its final jamo alone; Firefox on Linux, with no
+    // such font, stops after its "가" as well, Shift+→ selects [2,4], one
+    // reading deletes all of that, and the range is a caret before the final
+    // jamo, which was not selected and stays (r1 ci-8). Either way no
+    // unselected text is taken.
+    const drawnClusters: Record<string, Record<string, readonly string[]>> = {
+      'jamo 각 selected, 가 deleted': {
+        '2,5': ['\u1100\u1161Q'],
+        '2,4': ['\u1100\u1161Q\u11a8'],
+      },
+    };
     for (const [label, start, right, extend, peer, wanted, lock] of [
       // Since R12-RV7-KEY-2 the range is what every reading of the deletion
       // agrees on: where the deleted text could have been the selection
@@ -2362,6 +2402,14 @@ test.describe('08 · block selection (keyboard)', () => {
       for (let i = 0; i < Math.abs(extend); i += 1) {
         await page.keyboard.press(extend > 0 ? 'Shift+ArrowRight' : 'Shift+ArrowLeft');
       }
+      const made = (await editor.selection())?.range;
+      const byRange = drawnClusters[label];
+      if (byRange) {
+        expect(Object.keys(byRange), `${label}: the range the keys made`).toContain(
+          `${made?.start},${made?.end}`,
+        );
+      }
+      const expected = byRange?.[`${made?.start},${made?.end}`] ?? wanted;
       await page.evaluate(
         ([text, lock]) => {
           const ed = window.__e2e.editor;
@@ -2375,7 +2423,7 @@ test.describe('08 · block selection (keyboard)', () => {
         [peer, lock] as const,
       );
       await page.keyboard.type('Q');
-      expect(wanted, label).toContain((await editor.texts())[0]);
+      expect(expected, label).toContain((await editor.texts())[0]);
     }
   });
 
@@ -2501,7 +2549,9 @@ test.describe('08 · block selection (keyboard)', () => {
   test('B33 a peer redrawing the block a page button left a range in drops it', async ({
     editor,
     page,
+    browserName,
   }) => {
+    await watchBackspace(page);
     const content = [
       { text: 'alpha\n' },
       { text: 'bold one', marks: ['bold' as const] },
@@ -2526,6 +2576,7 @@ test.describe('08 · block selection (keyboard)', () => {
           button.textContent = 'Host';
           document.body.prepend(button);
         }, content);
+        await likeSafarisButton(page, browserName, '#host-button');
         const url = page.url();
         await editor.content('z').click();
         await page.keyboard.press(`${MOD}+ArrowDown`);
@@ -2546,6 +2597,7 @@ test.describe('08 · block selection (keyboard)', () => {
         await page.keyboard.press(key);
         await page.waitForTimeout(250);
         expect(page.url(), label).toBe(url);
+        expect(await unguardedBackspaces(page), label).toEqual([]);
         expect(await editor.texts(), label).toEqual(after);
       }
     }

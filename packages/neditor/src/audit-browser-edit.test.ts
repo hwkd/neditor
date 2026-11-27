@@ -358,6 +358,28 @@ describe('CLIP-9: plain lines pasted into a list item are more items', () => {
     ]);
   });
 
+  // Merge audit, 27 Nov: at offset 0 the new items went after the to-do, so
+  // its check and id went with "line one" and the reader's text to a new,
+  // open item. Enter at offset 0 puts the new item in front.
+  test('at the start of a checked to-do, in front of it: it keeps its check, id and text', () => {
+    const editor = mount([
+      block({ id: 't', type: 'todo', depth: 0, checked: true, content: text('Todo') }),
+    ]);
+    editor.focusRange('t', 0, 0);
+    clipboard(hostOf(editor, 't'), 'paste', plainClipboard(LINES));
+
+    expect(outline(editor)).toEqual(['todo:line one', 'todo:line two', 'todo:line threeTodo']);
+    expect(editor.getDocument().blocks.map((b) => [b.checked, b.id === 't'])).toEqual([
+      [false, false],
+      [false, false],
+      [true, true],
+    ]);
+
+    editor.undo();
+
+    expect(outline(editor)).toEqual(['todo:Todo']);
+  });
+
   test('into an empty numbered item, which stays an item', () => {
     const editor = mount([block({ id: 'n', type: 'numbered_list' })]);
     editor.focusRange('n', 0, 0);

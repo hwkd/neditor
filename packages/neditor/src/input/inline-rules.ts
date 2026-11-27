@@ -677,8 +677,9 @@ export function matchInlineRule(
   textBeforeCaret: string,
   options: {
     /**
-     * The text is the Markdown reader's projection, in which a NUL stands for
-     * an escaped character. Never set for typed text, where a NUL is a NUL.
+     * The text is a projection, in which a NUL stands for a character that
+     * is not itself: an escaped one in the Markdown reader's, a code run's in
+     * {@link matchTypedInlineRule}'s. Unset, a NUL is a NUL.
      */
     readonly projection?: boolean;
     /**
@@ -1017,6 +1018,16 @@ export function matchTypedInlineRule(content: RichText, caret: number): InlineRu
   }
 
   const match = matchInlineRule(projected, { projection: true });
+
+  // A formula's TeX is the text it covers, never the projection, where every
+  // character of a code run inside it is a NUL: `$a ` then code `b` then `$`
+  // typed made TeX "a \u0000" and lost the "b".
+  if (match?.math !== undefined) {
+    return {
+      ...match,
+      math: text.slice(match.start + match.openLength, match.end - match.closeLength),
+    };
+  }
 
   if (!match?.link) {
     return match;

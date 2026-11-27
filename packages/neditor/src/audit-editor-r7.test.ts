@@ -393,6 +393,25 @@ describe('a paste that changes nothing records nothing', () => {
     expect(changes).toBe(0);
     expect(editor.canUndo).toBe(false);
   });
+
+  // Merge audit, 27 Nov: into an empty block of the same type, the paste
+  // replaces it, and the replacement was rebuilt equal to it.
+  test.each([
+    ['## ', 'heading2'],
+    ['# ', 'heading1'],
+    ['> ', 'quote'],
+  ] as const)('%j into an empty %s', (plain, type) => {
+    const editor = mount([block({ id: 'h', type, content: [] })]);
+    const before = editor.getDocument();
+    let changes = 0;
+    editor.on('change', () => (changes += 1));
+    caret(hostOf(editor, 'h'), 0);
+    hostOf(editor, 'h').dispatchEvent(pasteEvent('', plain));
+
+    expect(editor.getDocument()).toEqual(before);
+    expect(changes).toBe(0);
+    expect(editor.canUndo).toBe(false);
+  });
 });
 
 describe('a callout at the depth ceiling cannot take a paste as children', () => {

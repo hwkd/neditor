@@ -245,6 +245,38 @@ test.describe('30 · math', () => {
         await editor.load({ doc: 'math', math: 'katex' });
         await editor.placeCaret('m2', 11);
         await editor.press('End');
+        // Where this engine's own word rule starts the deletion, read from the
+        // input's target range before the editor sees it: the text before that
+        // start when it reaches past the formula, else null.
+        await page.evaluate(() => {
+          const w = window as unknown as { __wordStart?: string | null };
+          w.__wordStart = undefined;
+          window.addEventListener(
+            'beforeinput',
+            (event) => {
+              if (event.inputType !== 'deleteWordBackward') {
+                return;
+              }
+              const host = (event.target as Element).closest('.neditor-block__content')!;
+              const target = event.getTargetRanges()[0];
+              w.__wordStart = null;
+              if (!target) {
+                return;
+              }
+              const start = document.createRange();
+              start.setStart(target.startContainer, target.startOffset);
+              const formula = document.createRange();
+              formula.setStartBefore(host.querySelector('[data-neditor-math]')!);
+              if (start.compareBoundaryPoints(Range.START_TO_START, formula) < 0) {
+                const before = document.createRange();
+                before.setStart(host, 0);
+                before.setEnd(target.startContainer, target.startOffset);
+                w.__wordStart = before.toString();
+              }
+            },
+            { capture: true },
+          );
+        });
 
         if (chord === 'Shift+Home') {
           await page.keyboard.press(chord);
@@ -255,11 +287,22 @@ test.describe('30 · math', () => {
 
         // A line deletion takes the line. A word deletion takes the formula:
         // alone in Chromium and WebKit, and from past the separator in every
-        // engine (Firefox deleted nothing there; M5g). From just after the formula Firefox's own word
-        // rule asks for the word before it too, and the editor leaves a
-        // deletion wider than the formula to the browser.
+        // engine (Firefox deleted nothing there; M5g). From just after the
+        // formula Firefox's own word rule is the platform's: on macOS its ⌥⌫
+        // asks for the word before the formula too, and the editor leaves a
+        // deletion wider than the formula to the browser; on Linux its
+        // Ctrl+Backspace asks for the formula alone, which the editor takes
+        // (ci-7). So Firefox's expectation is read from its own target range.
+        const wordStart = await page.evaluate(
+          () => (window as unknown as { __wordStart?: string | null }).__wordStart,
+        );
+        if (name === 'a word') {
+          // The chord was a word deletion, so the rule was asked.
+          expect(wordStart).not.toBeUndefined();
+        }
+        const word = browserName === 'firefox' && wordStart != null ? wordStart : 'Ends with ';
         expect((await editor.blockData('m2'))?.content).toEqual(
-          name === 'a word' ? [{ text: browserName === 'firefox' ? 'Ends ' : 'Ends with ' }] : [],
+          name === 'a word' ? [{ text: word }] : [],
         );
       });
     }

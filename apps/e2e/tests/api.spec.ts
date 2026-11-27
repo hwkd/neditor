@@ -1,5 +1,11 @@
 import { EditorPage, expect, MOD, test } from '../helpers/test.ts';
 
+/**
+ * The platform's own key for the end of the document: ⌘↓ on macOS,
+ * Ctrl+End elsewhere (Linux WebKit's Ctrl+↓ does not move the caret, ci-5).
+ */
+const DOC_END = process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End';
+
 test.describe('24 · public API & events', () => {
   test('AP1 change fires once per edit, never for a no-op; the other events carry the right payloads', async ({
     editor,
@@ -337,8 +343,13 @@ test.describe('24 · public API & events', () => {
         });
       }, content);
       await editor.block('z').locator('.neditor-block__content').click();
-      await page.keyboard.press(`${MOD}+ArrowDown`);
+      await page.keyboard.press(DOC_END);
       await page.keyboard.press('End');
+      // At the block's end before the update, or the test is not about one.
+      expect(await editor.selection(), key).toMatchObject({
+        blockId: 'z',
+        range: { start: 33, end: 33 },
+      });
       await page.evaluate(() =>
         window.__e2e.editor.setDocument({
           blocks: [
@@ -380,8 +391,13 @@ test.describe('24 · public API & events', () => {
         });
       }, content);
       await editor.block('z').locator('.neditor-block__content').click();
-      await page.keyboard.press(`${MOD}+ArrowDown`);
+      await page.keyboard.press(DOC_END);
       await page.keyboard.press('End');
+      // At the block's end before the update, or the test is not about one.
+      expect(await editor.selection(), variant).toMatchObject({
+        blockId: 'z',
+        range: { start: 33, end: 33 },
+      });
 
       const thrown = await page.evaluate((variant) => {
         const blocks = [
@@ -453,8 +469,13 @@ test.describe('24 · public API & events', () => {
         document.body.prepend(button);
       }, content);
       await editor.block('z').locator('.neditor-block__content').click();
-      await page.keyboard.press(`${MOD}+ArrowDown`);
+      await page.keyboard.press(DOC_END);
       await page.keyboard.press('End');
+      // At the block's end before the update, or the test is not about one.
+      expect(await editor.selection(), how).toMatchObject({
+        blockId: 'z',
+        range: { start: 33, end: 33 },
+      });
       if (how === 'clicked') {
         await page.locator('#host-button').click();
       } else {

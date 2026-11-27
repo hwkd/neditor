@@ -164,7 +164,14 @@ test.describe('22 · IME composition', () => {
           },
         ],
       });
-      await editor.clickAt('x', 4);
+      await editor.clickAt('x', 2);
+      // Arrowed to the link's edge: a press at offset 4 is a pixel from the
+      // anchor, and Chromium's hit test on Linux puts it on the link, whose
+      // click opens the link editor (ci-2).
+      for (let i = 0; i < 2; i += 1) {
+        await page.keyboard.press('ArrowRight');
+      }
+      expect(await editor.selection()).toMatchObject({ range: { start: 4, end: 4 } });
       for (let i = 0; i < 4; i += 1) {
         await page.keyboard.press('Shift+ArrowRight');
       }

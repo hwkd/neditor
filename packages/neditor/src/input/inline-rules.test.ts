@@ -838,6 +838,16 @@ describe("a code run's dollar, typed against", () => {
   // Audit round 2: `x$` formatted as code and `$y$` typed after it read as
   // `$$` -- display math -- in the plain text, and no formula came, where the
   // Markdown reader (`` `x$`$y$ ``) makes one.
+  // Merge audit, 27 Nov: the TeX was read from the projection, where a code
+  // run's characters are NULs, so the code run's text was lost from it.
+  test('a formula typed around a code run takes its TeX from the text', () => {
+    expect(typed([{ text: '$a ' }, { text: 'b', marks: ['code'] }, { text: '$' }])).toMatchObject({
+      start: 0,
+      end: 5,
+      math: 'a b',
+    });
+  });
+
   test('a formula typed straight after a code run ending in a dollar closes', () => {
     expect(matchInlineRule('x$$y$')).toBeNull();
     expect(typed([{ text: 'x$', marks: ['code'] }, { text: '$y$' }])).toMatchObject({

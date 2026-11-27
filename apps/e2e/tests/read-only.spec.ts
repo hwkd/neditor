@@ -1,5 +1,6 @@
 import { EditorPage, expect, MOD, test } from '../helpers/test.ts';
 import { writeClipboard } from '../helpers/clipboard.ts';
+import { likeSafarisButton, unguardedBackspaces, watchBackspace } from '../helpers/backspace.ts';
 
 test.describe('17 · read-only', () => {
   test('RO1 nothing is editable, and typing, deleting and pasting change nothing', async ({
@@ -115,6 +116,7 @@ test.describe('17 · read-only', () => {
     editor,
     page,
   }) => {
+    await watchBackspace(page);
     for (const mount of ['plain', 'shadow', 'iframe'] as const) {
       const mounted =
         mount === 'iframe' ? new EditorPage(page, 0, page.frameLocator('#frame')) : editor;
@@ -148,6 +150,7 @@ test.describe('17 · read-only', () => {
         await page.keyboard.press('Backspace');
         await page.waitForTimeout(300);
         expect(page.url(), label).toBe(url);
+        expect(await unguardedBackspaces(page), label).toEqual([]);
         expect(await mounted.doc(), label).toEqual(before);
       }
     }
@@ -208,6 +211,7 @@ test.describe('17 · read-only', () => {
     page,
     browserName,
   }) => {
+    await watchBackspace(page);
     for (const mount of ['plain', 'shadow', 'dialog'] as const) {
       for (const select of [false, true]) {
         for (const unlock of [false, true, 'after a peer deleted p2'] as const) {
@@ -223,6 +227,7 @@ test.describe('17 · read-only', () => {
             // In a modal dialog, everything outside it is inert.
             (document.querySelector('#dialog') ?? document.body).prepend(button);
           });
+          await likeSafarisButton(page, browserName, '#save');
           await editor.content('p2').click();
           await page.keyboard.press('End');
           if (select) await page.keyboard.press('Shift+ArrowLeft');
@@ -243,6 +248,7 @@ test.describe('17 · read-only', () => {
           await page.keyboard.press('Backspace');
           await page.waitForTimeout(300);
           expect(page.url(), label).toBe(url);
+          expect(await unguardedBackspaces(page), label).toEqual([]);
           // Unlocked over the same range, WebKit's Backspace deletes in it as
           // before the lock; with its block gone, it reaches nothing.
           expect(await editor.texts(), label).toEqual(
@@ -270,6 +276,7 @@ test.describe('17 · read-only', () => {
     page,
     browserName,
   }) => {
+    await watchBackspace(page);
     for (const mount of ['plain', 'shadow'] as const) {
       for (const [key, expected] of [
         ['Shift+ArrowLeft', 'Bravo '],
@@ -286,6 +293,7 @@ test.describe('17 · read-only', () => {
           button.onclick = () => window.__e2e.editor.setEditable(false);
           document.body.prepend(button);
         });
+        await likeSafarisButton(page, browserName, '#save');
         await editor.content('p2').click();
         await page.keyboard.press('End');
         await page.keyboard.press('Shift+ArrowLeft');
@@ -298,6 +306,7 @@ test.describe('17 · read-only', () => {
         await page.keyboard.press('Backspace');
         await page.waitForTimeout(300);
         expect(page.url(), label).toBe(url);
+        expect(await unguardedBackspaces(page), label).toEqual([]);
         expect(await editor.texts(), label).toEqual(
           browserName === 'webkit' ? ['Alpha one', expected, 'Charlie three'] : texts,
         );
@@ -322,6 +331,7 @@ test.describe('17 · read-only', () => {
     editor,
     page,
   }) => {
+    await watchBackspace(page);
     // And a drag that had not left its own block yet: the browser's own
     // goes on across the read-only blocks, in every engine, and its range
     // was promoted at the release -- "p1,p2,p3,p4" from a drag the lock had
@@ -595,6 +605,7 @@ test.describe('17 · read-only', () => {
       await page.keyboard.press('Backspace');
       await editor.settle();
       expect(page.url(), `${then}: Backspace`).toBe(url);
+      expect(await unguardedBackspaces(page), `${then}: Backspace`).toEqual([]);
 
       // And the next press is a press like any other.
       await page.evaluate(() => window.__e2e.editor.setEditable(true));
@@ -2339,6 +2350,9 @@ test.describe('17 · read-only', () => {
    * page button, and a host re-rendering with `setEditable(false)` again:
    * nothing was being typed, and Backspace is Safari's own, as it was before
    * round 13 -- here, Back. WebKit only: the other engines focus the button.
+   * So does every WebKit port but Apple's, where the button here does what
+   * Safari's does (`likeSafarisButton`), so the Backspace is on `<body>`
+   * wherever this runs (r1 ci-6).
    */
   test('RO6g2 setEditable(false) again on a read-only editor guards nothing', async ({
     editor,
@@ -2346,6 +2360,21 @@ test.describe('17 · read-only', () => {
     browserName,
   }) => {
     test.skip(browserName !== 'webkit', 'only WebKit gives a page button no focus');
+    // Reported through a binding, which outlives the page: on macOS the
+    // Backspace navigates, and the page that recorded it is gone.
+    const backspaces: { target: string; prevented: boolean }[] = [];
+    await page.exposeBinding('__e2eBackspace', (_source, seen: (typeof backspaces)[number]) => {
+      backspaces.push(seen);
+    });
+    await page.addInitScript(() => {
+      window.addEventListener('keydown', (event) => {
+        if (event.key !== 'Backspace') return;
+        (window as Window & { __e2eBackspace?: (seen: unknown) => void }).__e2eBackspace?.({
+          target: (event.target as Node | null)?.nodeName ?? '',
+          prevented: event.defaultPrevented,
+        });
+      });
+    });
     await page.goto('about:blank');
     await editor.load({ doc: 'paragraphs', editable: false });
     await page.evaluate(() => {
@@ -2355,12 +2384,22 @@ test.describe('17 · read-only', () => {
       button.onclick = () => window.__e2e.editor.setEditable(false);
       document.body.prepend(button);
     });
+    await likeSafarisButton(page, browserName, '#rerender');
     const point = await editor.pointAt(editor.content('p2'), 7);
     await page.mouse.dblclick(point.x, point.y);
     await page.locator('#rerender').click();
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
 
     await page.keyboard.press('Backspace');
-    await expect.poll(() => page.url()).toBe('about:blank');
+    // The guard's own verdict, on every platform: a Backspace on the page
+    // that nothing cancelled. Whether that goes back is the platform's:
+    // Safari on macOS binds Backspace to Back, and no Linux WebKit port does,
+    // where the page stays whether the editor guards or not (r1 ci-6).
+    await expect.poll(() => backspaces.length).toBe(1);
+    expect(backspaces[0]).toEqual({ target: 'BODY', prevented: false });
+    if (process.platform === 'darwin') {
+      await expect.poll(() => page.url()).toBe('about:blank');
+    }
   });
 
   /*
@@ -2375,6 +2414,7 @@ test.describe('17 · read-only', () => {
     editor,
     page,
   }) => {
+    await watchBackspace(page);
     for (const mount of ['plain', 'shadow', 'iframe'] as const) {
       const mounted =
         mount === 'iframe' ? new EditorPage(page, 0, page.frameLocator('#frame')) : editor;
@@ -2402,6 +2442,7 @@ test.describe('17 · read-only', () => {
         await page.keyboard.press('Backspace');
         await page.waitForTimeout(300);
         expect(page.url(), label).toBe(url);
+        expect(await unguardedBackspaces(page), label).toEqual([]);
         expect(await mounted.doc(), label).toEqual(before);
       }
     }

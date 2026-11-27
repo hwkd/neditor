@@ -295,7 +295,14 @@ test.describe('02 · typing & caret', () => {
         },
       ],
     });
-    await editor.clickAt('x', 4);
+    await editor.clickAt('x', 2);
+    // Arrowed to the link's edge: a press at offset 4 is a pixel from the
+    // anchor, and Chromium's hit test on Linux puts it on the link, whose
+    // click opens the link editor (ci-2).
+    for (let i = 0; i < 2; i += 1) {
+      await page.keyboard.press('ArrowRight');
+    }
+    expect(await editor.selection()).toMatchObject({ range: { start: 4, end: 4 } });
     for (let i = 0; i < 4; i += 1) {
       await page.keyboard.press('Shift+ArrowRight');
     }
@@ -348,7 +355,14 @@ test.describe('02 · typing & caret', () => {
     /** `XY` typed over "docs": the continuation waits at offset 6. */
     const typedOver = async (): Promise<void> => {
       await load('docs');
-      await editor.clickAt('x', 4);
+      await editor.clickAt('x', 2);
+      // Arrowed to the link's edge: a press at offset 4 is a pixel from the
+      // anchor, and Chromium's hit test on Linux puts it on the link, whose
+      // click opens the link editor (ci-2).
+      for (let i = 0; i < 2; i += 1) {
+        await page.keyboard.press('ArrowRight');
+      }
+      expect(await editor.selection()).toMatchObject({ range: { start: 4, end: 4 } });
       for (let i = 0; i < 4; i += 1) {
         await page.keyboard.press('Shift+ArrowRight');
       }

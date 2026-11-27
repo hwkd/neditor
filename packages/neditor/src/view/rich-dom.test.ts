@@ -4970,6 +4970,36 @@ describe('HTML from an older writer can be read as it was written', () => {
       ['paragraph', 1, 'e'],
     ]);
   });
+
+  test.each([
+    ['an inline formula', '<span data-neditor-math="a" contenteditable="false">a</span>'],
+    ['a display equation', '<div data-neditor-math-block="a">a</div>'],
+    ['a code block label', '<pre data-neditor-code-label="Code">a</pre>'],
+  ])("a live editor's %s in a page's copy is no sign of that writer", (_, mark) => {
+    // R1-reader-1: that writer emitted only `data-neditor-depth`, `-list`,
+    // `-checked` and `-callout`. A page range copied across a live editor
+    // carries the renderer's own marks, and one of them anywhere read the
+    // whole page raw: its source newline and indent pasted as text.
+    const html =
+      '<p>Intro text\n    wrapped in source</p>\n' +
+      `<div class="neditor"><div class="neditor-block"><p class="neditor-block__content">x ${mark} y</p></div></div>\n` +
+      '<p>After\n    text</p>';
+    const texts = blocksFromHtml(document, html).map(blockText);
+
+    expect(texts[0]).toBe('Intro text wrapped in source');
+    expect(texts.at(-1)).toBe('After text');
+  });
+
+  test.each([
+    '<p data-neditor-depth="0">d</p>',
+    '<ul data-neditor-list="bulleted_list"><li>d</li></ul>',
+    '<ul><li data-neditor-checked="true">d</li></ul>',
+    '<blockquote data-neditor-callout="i">d</blockquote>',
+  ])("each mark that writer emitted still says it is that writer's: %s", (mark) => {
+    expect(blocksFromHtml(document, `<p>soft\nbreak</p>${mark}`).map(blockText)[0]).toBe(
+      'soft\nbreak',
+    );
+  });
 });
 
 describe('a copied text range keeps its spaces in other applications', () => {
@@ -8905,13 +8935,18 @@ describe('math audit round 6: a display equation in a list item changes no order
     const inner =
       '<details open>k<td><summary><img src="https://e.x/a.png" alt="al"></summary><br></td></details>';
 
+    // The summary's picture is handed on as the toggle's first child (R1
+    // reader-2), ahead of the body: what is pinned here is the body's line
+    // break, which the stale image memo lost.
     expect(shape(inner)).toEqual([
       ['toggle', 0, ''],
+      ['image', 1, ''],
       ['paragraph', 1, 'k\n'],
     ]);
     expect(shape(`<details open><div>${inner}<summary>O</summary></div></details>`)).toEqual([
       ['toggle', 0, 'O'],
       ['toggle', 1, ''],
+      ['image', 2, ''],
       ['paragraph', 2, 'k\n'],
     ]);
     // Every element from the summary up to its <details>, not just its parent.
@@ -8920,7 +8955,32 @@ describe('math audit round 6: a display equation in a list item changes no order
     expect(shape(`<details open><div>${wrapped}<summary>O</summary></div></details>`)).toEqual([
       ['toggle', 0, 'O'],
       ['toggle', 1, ''],
+      ['image', 2, ''],
       ['paragraph', 2, 'k\n'],
+    ]);
+  });
+
+  test.each([
+    [
+      'beside its text',
+      '<details><summary>Title<img src=https://e.x/a.png></summary>body</details>',
+      'Title',
+    ],
+    ['alone', '<details><summary><img src=https://e.x/a.png></summary>body</details>', ''],
+    [
+      'wrapped',
+      '<details><b><summary>Title<img src=https://e.x/a.png></summary></b>body</details>',
+      'Title',
+    ],
+  ])("a summary's picture %s is the toggle's first child", (_, html, title) => {
+    // R1 reader-2: a heading's, a quote's and a cell's pictures are handed on
+    // as image blocks; a summary's went nowhere. The title reads as before.
+    expect(
+      blocksFromHtml(document, html).map((b) => [b.type, b.depth, blockText(b), b.src ?? null]),
+    ).toEqual([
+      ['toggle', 0, title, null],
+      ['image', 1, '', 'https://e.x/a.png'],
+      ['paragraph', 1, 'body', null],
     ]);
   });
 
