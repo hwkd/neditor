@@ -525,7 +525,9 @@ describe('pasted prose behind a destination that never closes keeps its marks', 
     const large = time(40000);
 
     expect(large / small, `${Math.round(small)}ms -> ${Math.round(large)}ms`).toBeLessThan(25);
-  });
+    // Over 5 s on a shared CI runner, every retry: the time a growth test
+    // needs, as the others have it, not vitest's 5 s default.
+  }, 60_000);
 });
 
 /**
