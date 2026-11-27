@@ -80,6 +80,18 @@ describe('normalizeDepths', () => {
     expect(result[0]).toBe(blocks[0]);
   });
 
+  test('a negative depth is the root, not a level above a later one', () => {
+    const { blocks } = build(['a', -2], ['b', -1]);
+
+    expect(depths(normalizeDepths(blocks))).toEqual([0, 0]);
+  });
+
+  test('a NaN depth is the root, and does not swallow what follows it', () => {
+    const { blocks } = build(['a', 0], ['b', Number.NaN], ['c', 0]);
+
+    expect(depths(normalizeDepths(blocks))).toEqual([0, 0, 0]);
+  });
+
   test('no block passes MAX_DEPTH, however legal the step to it looks', () => {
     // Each of these is one level below its predecessor, so the "one level at a
     // time" rule alone accepts every one of them.
@@ -621,5 +633,110 @@ describe('normalizeDocument enforces unique block ids', () => {
     }).blocks.map((b) => b.id);
 
     expect(ids).toEqual(['a', 'b']);
+  });
+});
+
+describe('indentBlocks moves each block only as far as it can', () => {
+  test('a block that cannot indent is returned untouched, and so is its child', () => {
+    const { blocks, ids } = build(['Item1', 0], ['Sub', 1]);
+    const result = indentBlocks(blocks, ids('Item1'), 1);
+
+    expect(depths(result)).toEqual([0, 1]);
+    result.forEach((block, index) => expect(block).toBe(blocks[index]));
+  });
+
+  test('a run whose first block cannot move indents the rest under it', () => {
+    const { blocks, ids } = build(['A', 0], ['B', 0], ['C', 0]);
+
+    expect(depths(indentBlocks(blocks, ids('A', 'B', 'C'), 1))).toEqual([0, 1, 1]);
+  });
+
+  test('a block at the ceiling beside a sibling there is returned untouched', () => {
+    // `previous + 1` would allow 33 here; only the ceiling refuses it, and a
+    // rebuilt block would make Tab look like an edit to `sameBlocks`.
+    const { blocks, ids } = build(
+      ...Array.from({ length: MAX_DEPTH + 1 }, (_, i): [string, number] => [`b${i}`, i]),
+      ['c', MAX_DEPTH],
+    );
+    const result = indentBlocks(blocks, ids('c'), 1);
+
+    expect(result.at(-1)).toBe(blocks.at(-1));
+  });
+
+  test('a block is pinned at the ceiling only by selected blocks it would carry', () => {
+    // x could indent under c30; z cannot pass the ceiling, but y between them
+    // is unselected, so x does not carry z and is free to move.
+    const chain = Array.from({ length: MAX_DEPTH - 1 }, (_, i) =>
+      createBlock('paragraph', `c${i}`, i),
+    );
+    const x = createBlock('paragraph', 'x', MAX_DEPTH - 2);
+    const y = createBlock('paragraph', 'y', MAX_DEPTH - 1);
+    const z = createBlock('paragraph', 'z', MAX_DEPTH);
+    const result = indentBlocks([...chain, x, y, z], new Set([x.id, z.id]), 1);
+
+    expect(result.find((block) => block.id === x.id)?.depth).toBe(MAX_DEPTH - 1);
+  });
+
+  test('a collapsed toggle just under the ceiling does not indent out of its hidden child', () => {
+    const chain = Array.from({ length: MAX_DEPTH }, (_, i) => createBlock('paragraph', `c${i}`, i));
+    const toggle = { ...createBlock('toggle', 'T', MAX_DEPTH - 1), collapsed: true };
+    const hidden = createBlock('paragraph', 'h', MAX_DEPTH);
+    // `c31` sits at the toggle's depth, so the toggle could indent under it.
+    const blocks = [...chain, toggle, hidden];
+    const result = indentBlocks(blocks, new Set([toggle.id, hidden.id]), 1);
+
+    expect(result.at(-2)).toBe(toggle);
+    expect(result.at(-1)).toBe(hidden);
+    expect(hiddenBlockIds(result).has(hidden.id)).toBe(true);
+  });
+});
+
+describe('copies keep the tree they were taken from', () => {
+  test('a later, shallower block keeps its child in the clipboard', () => {
+    const { blocks, ids } = build(['A', 2], ['B', 3], ['C', 1], ['D', 2]);
+
+    expect(depths(sliceDocument(blocks, ids('A', 'B', 'C', 'D')).blocks)).toEqual([0, 1, 0, 1]);
+  });
+
+  test('copies of a selection that starts deeper than it ends stay at its depth, in its list', () => {
+    // The floor is 1, not 0: the copies must be re-rooted there, neither left
+    // at r's depth (where s would adopt the copy of r) nor sent to the root.
+    const { blocks, ids } = build(['P', 0], ['q', 1], ['r', 2], ['s', 1], ['Z', 0]);
+    const result = duplicateBlocks(blocks, ids('r', 's'));
+
+    expect(texts(result.blocks)).toEqual(['P', 'q', 'r', 's', 'r', 's', 'Z']);
+    expect(depths(result.blocks)).toEqual([0, 1, 2, 1, 1, 1, 0]);
+  });
+
+  test('a parent duplicated with its first child keeps its second', () => {
+    const { blocks, ids, id } = build(['A', 0], ['a1', 1], ['a2', 1], ['B', 0]);
+    const result = duplicateBlocks(blocks, ids('A', 'a1'));
+
+    expect(texts(result.blocks)).toEqual(['A', 'a1', 'a2', 'A', 'a1', 'B']);
+    expect(descendantsOf(result.blocks, id('A'))).toEqual([id('a1'), id('a2')]);
+  });
+
+  test("a duplicate goes after the original's children, which stay the original's", () => {
+    const { blocks, ids, id } = build(['A', 0], ['c', 1], ['after', 0]);
+    const result = duplicateBlocks(blocks, ids('A'));
+
+    expect(texts(result.blocks)).toEqual(['A', 'c', 'A', 'after']);
+    expect(depths(result.blocks)).toEqual([0, 1, 0, 0]);
+    expect(descendantsOf(result.blocks, id('A'))).toEqual([id('c')]);
+  });
+});
+
+describe('normalizeDocument caps the output, not the stored depths', () => {
+  test('a hidden child stored past the ceiling stays hidden', () => {
+    const doc = normalizeDocument({
+      blocks: [
+        createBlock('paragraph', 'root', 0),
+        { ...createBlock('toggle', 'toggle', 35), collapsed: true },
+        createBlock('paragraph', 'hidden', 40),
+      ],
+    });
+
+    expect(depths(doc.blocks)).toEqual([0, 1, 2]);
+    expect(texts(visibleBlocks(doc.blocks))).toEqual(['root', 'toggle']);
   });
 });

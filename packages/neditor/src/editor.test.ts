@@ -123,6 +123,23 @@ describe('a malformed stored document cannot break the editor', () => {
     expect(() => toMarkdown(doc)).not.toThrow();
   });
 
+  test('absurd depths deeper than the ceiling are clamped to it, not past it', () => {
+    // A single block is always at the root, so it proves nothing about a cap.
+    const doc = normalizeDocument({
+      blocks: [
+        block({ depth: 0 }),
+        block({ depth: 1e12 }),
+        block({ depth: 1e12 + 1 }),
+        ...Array.from({ length: 40 }, (_, i) => block({ depth: 1e12 + 2 + i })),
+      ],
+    });
+    const depths = doc.blocks.map((b) => b.depth);
+
+    expect(depths.slice(0, 3)).toEqual([0, 1, 2]);
+    expect(Math.max(...depths)).toBe(32);
+    expect(() => toMarkdown(doc)).not.toThrow();
+  });
+
   test('an unknown block type degrades to a paragraph', () => {
     const doc = normalizeDocument({
       blocks: [block({ type: 'constructor' as Block['type'], content: [{ text: 'x' }] })],
