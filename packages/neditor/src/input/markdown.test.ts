@@ -3,12 +3,14 @@ import { describe, expect, test } from 'vitest';
 import type { Block } from '../model/document.ts';
 import { blockText, createBlock, toMarkdown } from '../model/document.ts';
 import {
+  MATH_ATOM,
   richFromPlainText,
   richSetLink,
   richSetMark,
   richToPlainText,
 } from '../model/rich-text.ts';
 import { matchInputRule } from './input-rules.ts';
+import { LINEAR, growth } from '../test-timing.ts';
 import { blocksFromMarkdown, normalizeLineBreaks, parseInlineMarkdown } from './markdown.ts';
 
 const types = (md: string) => blocksFromMarkdown(md).map((b) => b.type);
@@ -132,7 +134,10 @@ describe('blocksFromMarkdown', () => {
     ['- item', 'bulleted_list'],
     ['* item', 'bulleted_list'],
     ['1. item', 'numbered_list'],
-    ['7) item', 'numbered_list'],
+    ['1) item', 'numbered_list'],
+    // The model numbers from 1, so a list written from 7 keeps its number as
+    // text (`keepWrittenNumbers`).
+    ['7) item', 'paragraph'],
     ['> quote', 'quote'],
     ['- [ ] task', 'todo'],
     ['[x] task', 'todo'],
@@ -1081,13 +1086,10 @@ describe('a plain destination never begins with "<"', () => {
     // destination holds an escape, and the content holds the `<` itself: asked
     // there which form this was, the reader took the angled one and sliced off
     // a character at each end -- `https://u@x.tes/`, a link to another host.
-    // (The `<u` is a user name, which `sanitizeUrl` drops.)
-    expect(parseInlineMarkdown('[a](\\<u@x.test)')).toEqual([
-      { text: 'a', link: 'https://x.test/' },
-    ]);
-    expect(parseInlineMarkdown('[a](\\<u@x.test/p)')).toEqual([
-      { text: 'a', link: 'https://x.test/p' },
-    ]);
+    // Read as content, a destination with no scheme names no host at all
+    // (`sanitizeReadUrl`): the span stays the text it was, every character.
+    expect(parseInlineMarkdown('[a](\\<u@x.test)')).toEqual([{ text: '[a](<u@x.test)' }]);
+    expect(parseInlineMarkdown('[a](\\<u@x.test/p)')).toEqual([{ text: '[a](<u@x.test/p)' }]);
   });
 
   test('an escape inside a bracketed destination still reads as one', () => {
@@ -1406,6 +1408,374 @@ describe("a finished code span's dollar is code to a formula", () => {
     // where the text holds it: the href is read from the content.
     expect(parseInlineMarkdown('[x](https://a.test/\uFFFF)')).toEqual([
       { text: 'x', link: 'https://a.test/%EF%BF%BF' },
+    ]);
+  });
+});
+
+/** Each block as its type and what it shows: an image its source, else its text. */
+const shown = (markdown: string): Array<readonly [string, number, string]> =>
+  blocksFromMarkdown(markdown).map((block) => [
+    block.type,
+    block.depth,
+    block.type === 'image' ? `${block.alt ?? ''}@${block.src ?? ''}` : blockText(block),
+  ]);
+
+describe('a relative destination is no host (CB1)', () => {
+  test('a file name links nowhere, and the span stays the text it was', () => {
+    const blocks = blocksFromMarkdown(
+      'See [the guide](README.md), [setup](setup.py), [download](release.zip) and ![logo](logo.png)',
+    );
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]!.content.some((run) => run.link !== undefined)).toBe(false);
+    expect(blockText(blocks[0]!)).toBe(
+      'See [the guide](README.md), [setup](setup.py), [download](release.zip) and ![logo](logo.png)',
+    );
+  });
+
+  test('an image line with a relative source is no image either', () => {
+    expect(shown('![logo](logo.png)')).toEqual([['paragraph', 0, '![logo](logo.png)']]);
+  });
+
+  test('absolute, site-relative and in-page destinations still link', () => {
+    expect(parseInlineMarkdown('[a](https://a.test/) [b](/b) [c](#c)')).toEqual([
+      { text: 'a', link: 'https://a.test/' },
+      { text: ' ' },
+      { text: 'b', link: '/b' },
+      { text: ' ' },
+      { text: 'c', link: '#c' },
+    ]);
+  });
+});
+
+describe('an image inside a line is an image (CB2)', () => {
+  test('a badge in a sentence cuts the paragraph, as an inline <img> does', () => {
+    expect(shown('Build ![ci](https://ci.test/badge.png) passing')).toEqual([
+      ['paragraph', 0, 'Build'],
+      ['image', 0, 'ci@https://ci.test/badge.png'],
+      ['paragraph', 0, 'passing'],
+    ]);
+  });
+
+  test('two images on a line are two images, with no "!" invented', () => {
+    expect(shown('![a](https://i.test/a.png) ![b](https://i.test/b.png)')).toEqual([
+      ['image', 0, 'a@https://i.test/a.png'],
+      ['image', 0, 'b@https://i.test/b.png'],
+    ]);
+  });
+
+  test('a linked badge is its picture', () => {
+    expect(shown('[![ci](https://ci.test/b.png)](https://ci.test/)')).toEqual([
+      ['image', 0, 'ci@https://ci.test/b.png'],
+    ]);
+    expect(shown('Status: [![ci](https://ci.test/b.png)](https://ci.test/) ok')).toEqual([
+      ['paragraph', 0, 'Status:'],
+      ['image', 0, 'ci@https://ci.test/b.png'],
+      ['paragraph', 0, 'ok'],
+    ]);
+  });
+
+  test('a badge whose link is relative is its picture too (VR1)', () => {
+    // A link refused as no host leaves its span as text, but the picture it
+    // held is still a picture: no "[" and "](LICENSE)" either side of it.
+    expect(shown('[![a](https://a.test/b.png)](CONTRIBUTING.md)')).toEqual([
+      ['image', 0, 'a@https://a.test/b.png'],
+    ]);
+    expect(
+      shown(
+        '[![npm](https://img.shields.io/npm/v/x.svg)](https://npmjs.com/package/x) ' +
+          '[![License](https://img.shields.io/badge/l-MIT-blue.svg)](LICENSE)',
+      ),
+    ).toEqual([
+      ['image', 0, 'npm@https://img.shields.io/npm/v/x.svg'],
+      ['image', 0, 'License@https://img.shields.io/badge/l-MIT-blue.svg'],
+    ]);
+    expect(shown('- see [![a](https://a.test/b.png)](<docs/a b.md>) now')).toEqual([
+      ['bulleted_list', 0, 'see now'],
+      ['image', 1, 'a@https://a.test/b.png'],
+    ]);
+    // A label holding more than the picture is a link like any other, and an
+    // escaped bracket opens nothing.
+    expect(shown('[![a](https://a.test/b.png) more](LICENSE)')).toEqual([
+      ['paragraph', 0, '['],
+      ['image', 0, 'a@https://a.test/b.png'],
+      ['paragraph', 0, 'more](LICENSE)'],
+    ]);
+    expect(shown('\\[![a](https://a.test/b.png)](LICENSE)')).toEqual([
+      ['paragraph', 0, '['],
+      ['image', 0, 'a@https://a.test/b.png'],
+      ['paragraph', 0, '](LICENSE)'],
+    ]);
+  });
+
+  test('a list item of many pictures is joined in linear time (VR-P3-1)', () => {
+    expect(
+      growth(
+        (size) => blocksFromMarkdown(`- ${'*x* ![a](https://a.test/b.png) '.repeat(size)}`),
+        250,
+      ),
+    ).toBeLessThan(LINEAR);
+  }, 60_000);
+
+  test('a list item keeps its text whole and the picture goes inside it', () => {
+    expect(shown('- a ![x](https://i.test/x.png) b')).toEqual([
+      ['bulleted_list', 0, 'a b'],
+      ['image', 1, 'x@https://i.test/x.png'],
+    ]);
+    expect(shown('## a ![x](https://i.test/x.png) b')).toEqual([
+      ['heading2', 0, 'a b'],
+      ['image', 0, 'x@https://i.test/x.png'],
+    ]);
+  });
+
+  test('a span around the picture is read where it stands', () => {
+    const blocks = blocksFromMarkdown('*a ![x](https://i.test/x.png) b*');
+
+    expect(blocks.map((block) => block.content)).toEqual([
+      [{ text: 'a', marks: ['italic'] }],
+      [],
+      [{ text: 'b', marks: ['italic'] }],
+    ]);
+  });
+
+  test('an image nobody can show stays text, never "!" and a link', () => {
+    expect(parseInlineMarkdown('x ![a](mailto:me@a.test) y')).toEqual([
+      { text: 'x ![a](mailto:me@a.test) y' },
+    ]);
+    expect(shown('`![x](https://i.test/x.png)`')).toEqual([
+      ['paragraph', 0, '![x](https://i.test/x.png)'],
+    ]);
+    // The writer's own spelling of a "!" before a link.
+    expect(parseInlineMarkdown('Wow\\![l](https://a.test/)')).toEqual([
+      { text: 'Wow!' },
+      { text: 'l', link: 'https://a.test/' },
+    ]);
+  });
+
+  test('a line of unclosed openers stays linear', () => {
+    expect(growth((size) => blocksFromMarkdown('![a'.repeat(size)), 2_000)).toBeLessThan(LINEAR);
+  }, 60_000);
+});
+
+describe('a list keeps the numbers the model cannot draw (CB3)', () => {
+  test('a line that only looks like an item keeps its number', () => {
+    expect(shown('1986. A great year')).toEqual([['paragraph', 0, '1986. A great year']]);
+  });
+
+  test('a list written from 5 keeps 5 and 6', () => {
+    expect(shown('5. five\n6. six')).toEqual([
+      ['paragraph', 0, '5. five'],
+      ['paragraph', 0, '6. six'],
+    ]);
+  });
+
+  test('a list resumed after a paragraph keeps its number; one from 1 is a list', () => {
+    expect(shown('1. one\n2. two\n\nnote\n\n3. three')).toEqual([
+      ['numbered_list', 0, 'one'],
+      ['numbered_list', 0, 'two'],
+      ['paragraph', 0, 'note'],
+      ['paragraph', 0, '3. three'],
+    ]);
+    expect(shown('1. a\n   3. sub\n2. b')).toEqual([
+      ['numbered_list', 0, 'a'],
+      ['paragraph', 1, '3. sub'],
+      ['numbered_list', 0, 'b'],
+    ]);
+  });
+
+  test('a kept number goes out escaped and comes back the same', () => {
+    const blocks = blocksFromMarkdown('5. five\n6. six');
+    const again = blocksFromMarkdown(toMarkdown({ blocks }));
+
+    expect(again.map((block) => [block.type, blockText(block)])).toEqual(
+      blocks.map((block) => [block.type, blockText(block)]),
+    );
+  });
+});
+
+describe('the dialects of the other readers (CB P3)', () => {
+  test('a setext underline makes the line above it a heading', () => {
+    expect(shown('Setext\n======')).toEqual([['heading1', 0, 'Setext']]);
+    expect(shown('Other\n-----')).toEqual([['heading2', 0, 'Other']]);
+  });
+
+  test('only directly under a paragraph: a blank line or a list item before it is a divider', () => {
+    expect(shown('a\n\n---')).toEqual([
+      ['paragraph', 0, 'a'],
+      ['divider', 0, ''],
+    ]);
+    expect(shown('- item\n---')).toEqual([
+      ['bulleted_list', 0, 'item'],
+      ['divider', 0, ''],
+    ]);
+    expect(shown('# H\n===')).toEqual([
+      ['heading1', 0, 'H'],
+      ['paragraph', 0, '==='],
+    ]);
+  });
+
+  test('a tilde fence is a code block, closed only by tildes', () => {
+    expect(shown('~~~\ncode\n  x\n~~~\nafter')).toEqual([
+      ['code', 0, 'code\n  x'],
+      ['paragraph', 0, 'after'],
+    ]);
+    expect(shown('~~~py\na\n```\nb\n~~~')).toEqual([['code', 0, 'a\n```\nb']]);
+    expect(shown('```\n~~~\n```')).toEqual([['code', 0, '~~~']]);
+  });
+
+  test('what the writer makes of "===", "---" and "~~~" as text comes back as text', () => {
+    const blocks = ['a', '===', 'b', '---', '~~~', 'c'].map((text) =>
+      createBlock('paragraph', [{ text }], 0),
+    );
+
+    expect(blocksFromMarkdown(toMarkdown({ blocks })).map(blockText)).toEqual(
+      blocks.map(blockText),
+    );
+  });
+});
+
+describe('a badge inside another link (VV-2)', () => {
+  test('the inner badge wins as its picture, and the outer brackets stay text', () => {
+    // Links do not nest (CommonMark): the badge is the inner link, so the
+    // outer `[` opens nothing, and nothing of the source is dropped.
+    expect(shown('[label [![a](https://a.test/b.png)](LICENSE)](https://x.test/)')).toEqual([
+      ['paragraph', 0, '[label'],
+      ['image', 0, 'a@https://a.test/b.png'],
+      ['paragraph', 0, '](https://x.test/)'],
+    ]);
+    expect(shown('[[![a](https://a.test/b.png)](LICENSE)](https://x.test/)')).toEqual([
+      ['paragraph', 0, '['],
+      ['image', 0, 'a@https://a.test/b.png'],
+      ['paragraph', 0, '](https://x.test/)'],
+    ]);
+    // The same with an inner destination the link rule accepts (VW-2).
+    expect(shown('[x [![a](https://a.test/b.png)](https://c.test/)](https://x.test/)')).toEqual([
+      ['paragraph', 0, '[x'],
+      ['image', 0, 'a@https://a.test/b.png'],
+      ['paragraph', 0, '](https://x.test/)'],
+    ]);
+  });
+});
+
+describe('an image has the precedence of a link (VW-1)', () => {
+  const badge = '[![a](https://a.test/b.png)]';
+
+  test('a "[" that opens no label leaves a later relative badge its picture', () => {
+    expect(shown(`[0, 1) ${badge}(LICENSE)`)).toEqual([
+      ['paragraph', 0, '[0, 1)'],
+      ['image', 0, 'a@https://a.test/b.png'],
+    ]);
+
+    const [formula, picture, ...rest] = blocksFromMarkdown(`$x \\in [0,1)$ ${badge}(LICENSE)`);
+
+    expect(formula!.content).toEqual([{ text: MATH_ATOM, math: 'x \\in [0,1)' }]);
+    expect([picture!.type, picture!.src, rest]).toEqual(['image', 'https://a.test/b.png', []]);
+
+    const [linked, image, ...after] = blocksFromMarkdown(
+      `[t](https://x.test/?q=[) ${badge}(LICENSE)`,
+    );
+
+    expect(linked!.content).toEqual([{ text: 't', link: 'https://x.test/?q=[' }]);
+    expect([image!.type, image!.src, after]).toEqual(['image', 'https://a.test/b.png', []]);
+    expect(shown(`<https://x.test/[> ${badge}(LICENSE)`)).toEqual([
+      ['paragraph', 0, 'https://x.test/['],
+      ['image', 0, 'a@https://a.test/b.png'],
+    ]);
+    expect(
+      shown(`[0, 1) ${badge}(https://c.test/) and [![b](https://a.test/c.png)](LICENSE)`),
+    ).toEqual([
+      ['paragraph', 0, '[0, 1)'],
+      ['image', 0, 'a@https://a.test/b.png'],
+      ['paragraph', 0, 'and'],
+      ['image', 0, 'b@https://a.test/c.png'],
+    ]);
+  });
+
+  test('an image inside an autolink is part of its URL', () => {
+    const line = '<https://a.test/![a](https://a.test/b.png)>';
+
+    expect(shown(line)).toEqual([['paragraph', 0, 'https://a.test/![a](https://a.test/b.png)']]);
+  });
+
+  test('an image inside a formula or a destination is its text', () => {
+    // A second picture on the line is still a picture: the one the formula or
+    // the destination holds is forgotten, never a reason to read the whole
+    // line as text.
+    const [formula, picture, ...rest] = blocksFromMarkdown(
+      '$a ![x](https://a.test/x.png) b$ ![c](https://a.test/c.png)',
+    );
+
+    expect(formula!.content).toEqual([{ text: MATH_ATOM, math: 'a ![x](https://a.test/x.png) b' }]);
+    expect([picture!.type, picture!.src, rest]).toEqual(['image', 'https://a.test/c.png', []]);
+
+    const line = '[t](https://x.test/![a](https://a.test/b.png))';
+    const [linked, image, ...after] = blocksFromMarkdown(`${line} ![c](https://a.test/c.png)`);
+
+    expect(linked!.content).toEqual(parseInlineMarkdown(line));
+    expect([image!.type, image!.src, after]).toEqual(['image', 'https://a.test/c.png', []]);
+  });
+
+  test('an escaped "!" or "[" makes no picture', () => {
+    expect(blocksFromMarkdown('Wow \\![a](https://a.test/b.png)').map((b) => b.content)).toEqual([
+      [{ text: 'Wow !' }, { text: 'a', link: 'https://a.test/b.png' }],
+    ]);
+    expect(shown('Wow !\\[a](https://a.test/b.png)')).toEqual([
+      ['paragraph', 0, 'Wow ![a](https://a.test/b.png)'],
+    ]);
+  });
+
+  test('a picture inside alt text is its alt text', () => {
+    expect(shown('![![a](https://a.test/b.png)](https://a.test/c.png)')).toEqual([
+      ['image', 0, 'a@https://a.test/c.png'],
+    ]);
+  });
+
+  test('a picture with no alt text is a picture', () => {
+    expect(shown('Build ![](https://ci.test/b.png) ok')).toEqual([
+      ['paragraph', 0, 'Build'],
+      ['image', 0, '@https://ci.test/b.png'],
+      ['paragraph', 0, 'ok'],
+    ]);
+  });
+
+  test('two relative badges in a row are two pictures', () => {
+    expect(shown(`${badge}(LICENSE)${badge}(CONTRIBUTING.md)`)).toEqual([
+      ['image', 0, 'a@https://a.test/b.png'],
+      ['image', 0, 'a@https://a.test/b.png'],
+    ]);
+  });
+
+  test('brackets, badges and openers stay linear', () => {
+    expect(
+      growth((size) => blocksFromMarkdown(`${'[0, 1) * '.repeat(size)}${badge}(LICENSE)`), 2_000),
+    ).toBeLessThan(LINEAR);
+    expect(
+      growth((size) => blocksFromMarkdown(`${`* [x ${badge}(LICENSE) `.repeat(size)}`), 250),
+    ).toBeLessThan(LINEAR);
+  }, 60_000);
+});
+
+describe('a `!` that is no image is no URL opener (VY-1)', () => {
+  test('`!www.` is not a bare URL, so the underscores after it are emphasis', () => {
+    expect(blocksFromMarkdown('!www.a.test/_y_')[0]?.content).toEqual([
+      { text: '!www.a.test/' },
+      { text: 'y', marks: ['italic'] },
+    ]);
+  });
+
+  test('a `!` in a destination is still a `!` (VZ-1)', () => {
+    expect(blocksFromMarkdown('[x](https://a!b.test/) y')[0]?.content).toEqual([
+      { text: 'x', link: 'https://a!b.test/' },
+      { text: ' y' },
+    ]);
+    expect(blocksFromMarkdown('[x](<https://a!b.test/p q>)')[0]?.content).toEqual([
+      { text: 'x', link: 'https://a!b.test/p%20q' },
+    ]);
+  });
+
+  test('an escaped `*` before `www.` still opens one', () => {
+    expect(blocksFromMarkdown('\\*www.a.test/_y_')[0]?.content).toEqual([
+      { text: '*www.a.test/_y_' },
     ]);
   });
 });

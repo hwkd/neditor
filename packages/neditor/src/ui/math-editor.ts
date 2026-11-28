@@ -2,8 +2,8 @@ import type { NEditorLabels } from '../labels.ts';
 import { nextId } from '../util/ids.ts';
 import type { MathRenderer } from '../view/math.ts';
 import { drawMath } from '../view/math.ts';
-import type { PortalTheme } from './portal.ts';
-import { createPortal, positionPortal } from './portal.ts';
+import type { AnchorPin, PortalTheme } from './portal.ts';
+import { createPortal, holdsFocus, positionPortal } from './portal.ts';
 
 /**
  * The inline equation popover.
@@ -36,6 +36,8 @@ export class MathEditor {
   readonly #renderMath: MathRenderer | undefined;
 
   #open = false;
+  /** Finds the anchor again after a scroll or resize (`reposition`). */
+  #pin: AnchorPin | null = null;
   /** Whether the renderer refused the TeX in the field, as last drawn. */
   #failed = false;
 
@@ -153,8 +155,11 @@ export class MathEditor {
   /**
    * @param existing Whether the TeX belongs to a formula already in the text,
    * which is what makes Remove an offer rather than a dead button.
+   * @param pin Finds the anchor again, so the dialog follows it on a scroll
+   * or resize rather than closing under the reader's typing.
    */
-  open(anchor: DOMRect, tex: string, existing: boolean): void {
+  open(anchor: DOMRect, tex: string, existing: boolean, pin: AnchorPin | null = null): void {
+    this.#pin = pin;
     this.#element.hidden = false;
     this.#open = true;
     this.#input.value = tex;
@@ -176,7 +181,29 @@ export class MathEditor {
     }
 
     this.#open = false;
+    this.#pin = null;
     this.#element.hidden = true;
+  }
+
+  /** True while the user is in the dialog: its field or one of its buttons. */
+  get hasFocus(): boolean {
+    return this.#open && holdsFocus(this.#element);
+  }
+
+  /**
+   * Places the dialog against wherever its anchor has moved to. False when it
+   * was opened without a pin or the anchor has left the page, so there is
+   * nothing left to place it against.
+   */
+  reposition(): boolean {
+    const anchor = this.#open ? this.#pin?.() : null;
+
+    if (!anchor) {
+      return false;
+    }
+
+    positionPortal(this.#element, anchor, { prefer: 'below' });
+    return true;
   }
 
   /** True when focus is inside the popover, so a blur can be ignored. */

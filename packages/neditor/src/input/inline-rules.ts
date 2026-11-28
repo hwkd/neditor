@@ -232,7 +232,7 @@ function inOpenAutolink(window: string): boolean {
  * `[]` is. Stops at the first `]` behind the hinge, so the label scans of
  * successive hinges never cover the same text twice.
  */
-function labelStart(window: string, close: number): number {
+function labelStart(window: string, close: number, images = false): number {
   for (let at = close - 1; at >= 0; at -= 1) {
     const code = window.charCodeAt(at);
 
@@ -241,7 +241,7 @@ function labelStart(window: string, close: number): number {
     }
 
     if (code === 91) {
-      return at < close - 1 ? at : -1;
+      return at < close - 1 || (images && window.charCodeAt(at - 1) === BANG) ? at : -1;
     }
   }
 
@@ -297,17 +297,21 @@ export interface DestinationAhead {
  * offset. The formula rule gives its opening `$`: a link whose `[` came first
  * holds the formula's dollars as its own (`[Save $](https://a.test/?q=$)` is
  * a link), and one whose `[` is inside the TeX is the TeX's (`$[0,1](x$)`).
+ *
+ * `images` is the Markdown reader's image mode (see `matchInlineRule`), where
+ * `![](src)` -- an image with no alt text -- has a label too.
  */
 function inOpenDestination(
   window: string,
   ahead?: DestinationAhead,
   before: number = window.length,
   labelBefore: number = window.length,
+  images = false,
 ): boolean {
   // Only the last `](<` can be open in the angled form: an earlier one would
   // hold this one's `<`, which that form does not admit.
   const angled = window.lastIndexOf('](<');
-  const angledLabel = angled === -1 ? -1 : labelStart(window, angled);
+  const angledLabel = angled === -1 ? -1 : labelStart(window, angled, images);
 
   if (
     angled !== -1 &&
@@ -337,7 +341,7 @@ function inOpenDestination(
     clean = at;
 
     if (at + 2 <= before) {
-      const label = labelStart(window, at);
+      const label = labelStart(window, at, images);
 
       if (label !== -1 && label < labelBefore) {
         break;
@@ -450,7 +454,33 @@ export interface InlineRuleMatch {
    * an escape is still the backslash TeX needs (`$a\_b$`).
    */
   readonly math?: string;
+  /**
+   * `![alt](src)`, in the Markdown reader's image mode only: `start` is the
+   * `!`, the opening delimiter is `![` and the closing one `](src)`. The
+   * reader decides the source (`sanitizeReadImageUrl`); none is asked here.
+   */
+  readonly image?: boolean;
+  /**
+   * A link whose label is pictures alone (`[![ci](b.png)](c)`), in the image
+   * mode only: the reader keeps the pictures and drops the rest, whatever the
+   * destination, so none is asked here.
+   */
+  readonly badge?: boolean;
 }
+
+/** `!`, by character code. */
+const BANG = 33;
+/**
+ * What the Markdown reader puts in its text where it has read an image, in
+ * its image mode: a noncharacter, which no rule treats as punctuation, so
+ * the line around the picture is read in one parse (see `readInlineImages`).
+ */
+export const MARKDOWN_IMAGE = '\uFDD6';
+/** A label made of pictures alone. Anchored at both ends, so it is linear. */
+const ONLY_IMAGES = /^\uFDD6+$/;
+/** The link patterns with an empty label allowed, for `![](src)`. */
+const EMPTY_LABEL_LINK = /^\[()\]\(([^\s<][^\s]*)\)$/;
+const EMPTY_LABEL_ANGLED = /\[()\]\(<([^<>\n]*)>\)$/;
 
 /** `$`, by character code. */
 const DOLLAR = 36;
@@ -616,6 +646,17 @@ function linkOpener(window: string, angled: boolean): number {
 const ESCAPED_PLACEHOLDER = String.fromCharCode(0);
 
 /**
+ * The Markdown reader's projection of a `!` that is no image's bang (one not
+ * followed by `[`): a noncharacter no rule reads as anything. Not
+ * {@link ESCAPED_PLACEHOLDER}, which {@link BARE_URL_IN_TOKEN} lets open a
+ * `www.` URL where a `!` may not (`!www.a.test/_y_` is italic). Shared so the
+ * destination check below reads it back as the `!` it stands for -- left as
+ * it was, `https://a!b.test/` failed the host parse and the link was lost
+ * (VZ-1).
+ */
+export const NO_BANG = '\uFDD7';
+
+/**
  * A bare URL's start in the part of a token that precedes a span's opener.
  *
  * A protocol anywhere in it; `www.` opening the token or after `*`, `_`, `~`,
@@ -692,6 +733,15 @@ export function matchInlineRule(
       readonly angledCloses: () => boolean;
       readonly plainCloses: (depth: number) => boolean;
     };
+    /**
+     * The Markdown reader's image mode (`readInlineImages`): `![alt](src)` is
+     * an image, matched where the link rule matches and refused where a link
+     * is -- inside a code span, an autolink, a link destination -- so a
+     * picture has a link's precedence; and a link whose label is pictures
+     * alone is a badge. Typing never passes it, and makes no picture: a
+     * typed `![a](https://…)` is a `!` and a link to that address.
+     */
+    readonly images?: boolean;
   } = {},
 ): InlineRuleMatch | null {
   // One character past the window, so the lookbehinds see what really precedes
@@ -710,7 +760,14 @@ export function matchInlineRule(
   // URL. The writer escapes a backtick in a destination (the URL parser
   // percent-encodes one in a path but not in a query), so a code span cannot
   // close inside a destination we wrote.
-  const inDestination = inOpenDestination(window, options.ahead);
+  const images = options.images === true;
+  const inDestination = inOpenDestination(
+    window,
+    options.ahead,
+    window.length,
+    window.length,
+    images,
+  );
   const inAutolink = inOpenAutolink(window);
 
   // A `$` closes nothing but a formula, and nothing closes inside a link
@@ -778,6 +835,15 @@ export function matchInlineRule(
       searchedFrom = opener;
       match = rule.pattern.exec(window.slice(opener));
 
+      // `![](src)`: a picture with no alt text, which no link can be.
+      if (!match && images) {
+        const empty = (rule.angled ? EMPTY_LABEL_ANGLED : EMPTY_LABEL_LINK).exec(
+          window.slice(opener),
+        );
+
+        match = empty && window.charCodeAt(opener + empty.index - 1) === BANG ? empty : null;
+      }
+
       // The pattern takes the first `](` after the label; `linkOpener` balanced
       // the parentheses against the last. Only where they agree is it a link:
       // `[x](https://w.test/a](b)` is none, in CommonMark or here.
@@ -795,7 +861,14 @@ export function matchInlineRule(
     const whole = match?.[0];
     const inner = match?.[1];
 
-    if (!match || whole === undefined || inner === undefined || inner.length === 0) {
+    // In the image mode, a link pattern behind an unescaped `!` is an image.
+    const image =
+      images &&
+      rule.isLink === true &&
+      match !== null &&
+      window.charCodeAt(searchedFrom + match.index - 1) === BANG;
+
+    if (!match || whole === undefined || inner === undefined || (inner.length === 0 && !image)) {
       continue;
     }
 
@@ -804,7 +877,7 @@ export function matchInlineRule(
     // and then the link to the atom, so `[$x$](https://a.test/)` kept only the
     // formula. The writer never spells one -- it has no link to write -- so
     // this only reads foreign Markdown, and leaves it as written.
-    if (rule.isLink && ONLY_ATOMS.test(inner)) {
+    if (rule.isLink && !image && ONLY_ATOMS.test(inner)) {
       // The angled form refuses outright, as for an unsafe href below: the
       // plain rule would retry from a `[` inside the refused URL, and
       // `[$x$](<javascript:void[x](//evil.test/>)` linked `x`.
@@ -903,6 +976,42 @@ export function matchInlineRule(
 
     let link: string | undefined;
 
+    // An image has a link's precedence, and one more refusal: a destination
+    // open where its `!` stands holds it as its own characters, as it holds
+    // any link written inside it. The source is the reader's to decide.
+    if (image) {
+      if (
+        inOpenDestination(window, options.ahead, index - 1, window.length, true) ||
+        (match[2] ?? '').includes(String.fromCharCode(ATOM))
+      ) {
+        if (rule.angled) {
+          return null;
+        }
+
+        continue;
+      }
+
+      return {
+        start: offset + index - 1,
+        end: offset + index + whole.length,
+        openLength: 2,
+        closeLength: whole.length - 1 - inner.length,
+        image: true,
+      };
+    }
+
+    // A badge: a link whose label is pictures alone is those pictures,
+    // whatever its destination says (see `readInlineImages`).
+    if (images && rule.isLink && ONLY_IMAGES.test(inner)) {
+      return {
+        start: offset + index,
+        end: offset + index + whole.length,
+        openLength: rule.open,
+        closeLength: whole.length - rule.open - inner.length,
+        badge: true,
+      };
+    }
+
     if (rule.isLink) {
       // In the reader's projection an escaped character is a NUL. One in a
       // host made the URL unparseable, so the writer's own
@@ -932,7 +1041,10 @@ export function matchInlineRule(
 
       const href = sanitizeUrl(
         options.projection
-          ? destination.replaceAll(ESCAPED_PLACEHOLDER, 'a').replaceAll(CODE_DOLLAR, '$')
+          ? destination
+              .replaceAll(ESCAPED_PLACEHOLDER, 'a')
+              .replaceAll(CODE_DOLLAR, '$')
+              .replaceAll(NO_BANG, '!')
           : destination,
       );
 

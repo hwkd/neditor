@@ -124,4 +124,29 @@ test.describe('14 · to-do, toggle, callout', () => {
     await expect(picker).toBeHidden();
     await expect(page.locator('#before')).toBeFocused();
   });
+
+  // UX P3-4: the field was last in the dialog, so Tab from where it opens left
+  // the dialog at once, and the grid could be reached only by Shift+Tab.
+  test('K12 the icon picker tabs forward from its field into the grid, and the arrows rove it', async ({
+    editor,
+    page,
+  }) => {
+    await editor.load({ doc: 'callout' });
+    const picker = editor.portal('icon-picker');
+    await editor.clickControl(editor.block('co').locator('.neditor-block__icon'));
+    await expect(picker.getByRole('textbox', { name: 'Custom icon' })).toBeFocused();
+
+    await page.keyboard.press('Tab');
+    await expect(picker).toBeVisible();
+    await expect(picker.getByRole('button', { name: '💡' })).toBeFocused();
+    await page.keyboard.press('ArrowRight');
+    await expect(picker.getByRole('button', { name: '📌' })).toBeFocused();
+    await page.keyboard.press('ArrowDown');
+    await expect(picker.getByRole('button', { name: '🔖' })).toBeFocused();
+    await page.keyboard.press('End');
+    await expect(picker.getByRole('button', { name: '👉' })).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(picker).toBeHidden();
+    expect((await editor.blockData('co'))?.icon).toBe('👉');
+  });
 });

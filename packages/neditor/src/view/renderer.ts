@@ -147,6 +147,14 @@ export class Renderer {
   /** Distinguishes this editor's DOM ids from every other editor's on the page. */
   readonly #instance: number;
 
+  /**
+   * Watches each table's scroller, and the table in it, for whether the table
+   * is wider than the block (`#markTableScroller`). Made on the first table;
+   * `null` where the realm has no `ResizeObserver`.
+   */
+  #tableObserver: ResizeObserver | null | undefined;
+  readonly #watchedTables = new WeakSet<HTMLElement>();
+
   constructor(
     root: HTMLElement,
     hooks: RendererHooks,
@@ -226,6 +234,111 @@ export class Renderer {
 
     if (type === 'image') {
       this.#applyImagePlaceholder(view);
+    }
+
+    // The checkbox stays focusable and in the tree in a read-only view -- it is
+    // the to-do's state, and a reader has to be able to hear it -- but it no
+    // longer takes a press, and `checkbox` is a role that may say so. Without
+    // it a screen reader offered a box to tick that did nothing.
+    const checkbox = type === 'todo' ? view.root.querySelector('.neditor-block__checkbox') : null;
+
+    if (checkbox && checkbox.hasAttribute('aria-readonly') === this.#editable) {
+      if (this.#editable) {
+        checkbox.removeAttribute('aria-readonly');
+      } else {
+        checkbox.setAttribute('aria-readonly', 'true');
+      }
+    }
+
+    if (view.type === 'table') {
+      this.#watchTable(view);
+    }
+  }
+
+  /**
+   * A table wider than a read-only view is a tab stop, a named region.
+   *
+   * Its scroller is the only way to its last columns. In an editable view the
+   * cells are hosts and the browser scrolls the caret's into view, but a
+   * read-only one has nothing focusable inside: WebKit never stops on the
+   * scroller, so the columns past its edge could not be reached by keyboard at
+   * all, and Chromium and Firefox stop on it as a nameless group. Only while it
+   * overflows, so a table that fits adds no tab stop.
+   */
+  #markTableScroller(wrapper: HTMLElement): void {
+    if (!this.#editable && wrapper.scrollWidth > wrapper.clientWidth) {
+      if (wrapper.getAttribute('tabindex') !== '0') {
+        wrapper.tabIndex = 0;
+      }
+
+      wrapper.setAttribute('role', 'region');
+      wrapper.setAttribute('aria-label', this.#labels.tableScrollRegion);
+      return;
+    }
+
+    wrapper.removeAttribute('tabindex');
+    wrapper.removeAttribute('role');
+    wrapper.removeAttribute('aria-label');
+  }
+
+  /** Marks a table's scroller now, and again whenever it or its table resizes. */
+  #watchTable(view: BlockView): void {
+    const wrapper = view.root.querySelector<HTMLElement>('.neditor-table');
+
+    if (!wrapper) {
+      return;
+    }
+
+    this.#markTableScroller(wrapper);
+
+    if (this.#watchedTables.has(wrapper)) {
+      return;
+    }
+
+    if (this.#tableObserver === undefined) {
+      const Observer = this.#root.ownerDocument.defaultView?.ResizeObserver;
+
+      this.#tableObserver = Observer
+        ? new Observer((entries) => {
+            for (const { target } of entries) {
+              const scroller = target.closest<HTMLElement>('.neditor-table');
+
+              if (scroller) {
+                this.#markTableScroller(scroller);
+              }
+            }
+          })
+        : null;
+    }
+
+    if (!this.#tableObserver) {
+      return;
+    }
+
+    this.#watchedTables.add(wrapper);
+    this.#tableObserver.observe(wrapper);
+
+    const table = wrapper.querySelector('table');
+
+    if (table) {
+      this.#tableObserver.observe(table);
+    }
+  }
+
+  /** Lets go of a table view's elements, which the observer would otherwise keep. */
+  #unwatchTable(view: BlockView): void {
+    const wrapper = view.root.querySelector<HTMLElement>('.neditor-table');
+
+    if (!wrapper || !this.#tableObserver || !this.#watchedTables.has(wrapper)) {
+      return;
+    }
+
+    this.#tableObserver.unobserve(wrapper);
+
+    const table = wrapper.querySelector('table');
+
+    if (table) {
+      this.#tableObserver.unobserve(table);
     }
   }
 
@@ -344,6 +457,7 @@ export class Renderer {
     for (const [id, view] of this.#views) {
       if (!live.has(id)) {
         view.root.remove();
+        this.#unwatchTable(view);
         this.#views.delete(id);
       }
     }
@@ -353,7 +467,11 @@ export class Renderer {
 
       // A change of shape swaps the elements, so the view is rebuilt.
       if (!view || view.key !== viewKey(block)) {
-        view?.root.remove();
+        if (view) {
+          view.root.remove();
+          this.#unwatchTable(view);
+        }
+
         view = this.#createView(block);
         this.#views.set(block.id, view);
       }
@@ -469,6 +587,9 @@ export class Renderer {
     for (const view of this.#views.values()) {
       view.root.remove();
     }
+
+    this.#tableObserver?.disconnect();
+    this.#tableObserver = null;
 
     this.#views.clear();
   }

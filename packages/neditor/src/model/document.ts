@@ -1,4 +1,4 @@
-import { sanitizeImageUrl } from '../util/url.ts';
+import { sanitizeReadImageUrl } from '../util/url.ts';
 import { createBlockId } from './ids.ts';
 import type { Mark, RichText, TextRun } from './rich-text.ts';
 import { BARE_URL_START, INLINE_SPAN_LIMIT } from '../input/inline-rules.ts';
@@ -416,7 +416,12 @@ export function moveVisibleBlocks(
   // and out of a list; its children are no deeper than the mover, so none can
   // be adopted. The selection's depth is its shallowest block's: a selection
   // that starts inside a list and ends on a section header steps over the next
-  // section whole, the way that header alone would.
+  // section whole, the way that header alone would. A drop, which can name
+  // any gap, keeps the same rule in `moveBlocks` by joining such children
+  // instead. The gap chosen here asks it to only going down from a selection
+  // with a gap in it, before a moving block's second child, with a block
+  // after that child whose parent stays where it was, in one of the
+  // selection's gaps: there the group joins that block's siblings (VV-1).
   const depth = selected.reduce((low, block) => Math.min(low, block.depth), Infinity);
   let landingAt = direction === -1 ? from - 1 : to + 2;
 
@@ -662,7 +667,8 @@ export function normalizeDocument(doc: Partial<NEditorDocument> | undefined): NE
 
       if (normalized.type === 'image') {
         // An unsafe src is dropped rather than rendered.
-        normalized.src = typeof block.src === 'string' ? (sanitizeImageUrl(block.src) ?? '') : '';
+        normalized.src =
+          typeof block.src === 'string' ? (sanitizeReadImageUrl(block.src) ?? '') : '';
         normalized.alt = typeof block.alt === 'string' ? plainCharacters(block.alt) : '';
       }
 
@@ -1033,6 +1039,24 @@ export function removeBlocks(blocks: readonly Block[], ids: ReadonlySet<string>)
  * The moved blocks land as one contiguous group, in document order, even when
  * they were not contiguous before: a selection with gaps in it gathers at the
  * drop, and the blocks that sat in its gaps stay where they were.
+ *
+ * A move never changes the parent of a block it did not move whose parent
+ * it did not move either (the parent being the nearest shallower block above,
+ * or the root); a block whose parent moves goes with the block before it, as
+ * it must. `blocks.test.ts` holds that over every gap of a fuzz. Dropped
+ * between a parent and its children, or among them, the group keeping its
+ * own depth took the children after the gap as its own: "Child two" left
+ * its toggle for the paragraph dropped before it, and collapsing the toggle
+ * no longer hid it. So the group comes down to the depth of the first block
+ * after the gap that stays and whose parent, above the gap, stays too, and
+ * joins the children it lands among -- the way into a toggle, a callout or a
+ * list by pointer. Asking only the block right after the gap, and nothing
+ * when that block's parent moved, left the group with a gap in it at its own
+ * depth among the children a moved parent left behind, and it took the
+ * siblings after them (VV-1). The group is never raised past that depth, and
+ * never lowered: a group deeper than it is shallower than none of them. The
+ * keyboard's move (`moveVisibleBlocks`) mostly picks its gap so that this
+ * does not apply, by stepping over such a run instead.
  */
 export function moveBlocks(
   blocks: readonly Block[],
@@ -1051,9 +1075,48 @@ export function moveBlocks(
 
   const at = gap - removedBefore;
 
+  // The depth the group comes down to: that of the first block after the gap
+  // that stays and whose parent, above the gap, stays too. The blocks whose
+  // parent is above the gap are the ones no deeper than any block between
+  // the gap and them, and their depths only fall from the first, so the first
+  // that counts is the deepest -- and a group no shallower than it is
+  // shallower than none of them. A block whose parent moves goes with the
+  // block before it, so it asks for nothing, and neither does a moving block.
+  // Once they are no deeper than the group, nothing after them can ask more.
+  const floor = moving.reduce((low, block) => Math.min(low, block.depth), Infinity);
+  let lift = 0;
+  let parents: number[] | undefined;
+
+  for (let after = gap, low = Infinity; after < blocks.length; after += 1) {
+    const block = blocks[after]!;
+
+    if (block.depth > low) {
+      continue;
+    }
+
+    low = block.depth;
+
+    if (low <= floor) {
+      break;
+    }
+
+    if (ids.has(block.id)) {
+      continue;
+    }
+
+    parents ??= parentIndexes(blocks);
+
+    if (!ids.has(blocks[parents[after]!]?.id ?? '')) {
+      lift = low - floor;
+      break;
+    }
+  }
+  const landing =
+    lift === 0 ? moving : moving.map((block) => ({ ...block, depth: block.depth + lift }));
+
   // Not `splice(at, 0, ...moving)`: spread into one call, a selection of a
   // hundred thousand blocks passed the engine's limit on arguments.
-  return normalizeDepths([...rest.slice(0, at), ...moving, ...rest.slice(at)]);
+  return normalizeDepths([...rest.slice(0, at), ...landing, ...rest.slice(at)]);
 }
 
 /**

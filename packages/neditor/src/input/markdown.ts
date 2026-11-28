@@ -1,11 +1,12 @@
 import type { Block, BlockType } from '../model/document.ts';
-import { DEFAULT_CALLOUT_ICON, createBlock } from '../model/document.ts';
+import { DEFAULT_CALLOUT_ICON, MAX_DEPTH, createBlock } from '../model/document.ts';
 import type { TableRows } from '../model/table.ts';
 import { normalizeTableRows } from '../model/table.ts';
-import { sanitizeImageUrl, sanitizeUrl } from '../util/url.ts';
+import { sanitizeReadImageUrl, sanitizeReadUrl } from '../util/url.ts';
 import type { RichText } from '../model/rich-text.ts';
 import {
   MATH_ATOM,
+  normalizeRuns,
   richConcat,
   richDelete,
   richFromPlainText,
@@ -13,11 +14,19 @@ import {
   richMath,
   richSetLink,
   richSetMark,
+  richSlice,
   richSplit,
   richToPlainText,
 } from '../model/rich-text.ts';
 import type { DestinationAhead } from './inline-rules.ts';
-import { CODE_DOLLAR, INLINE_SPAN_LIMIT, matchInlineRule, projectCode } from './inline-rules.ts';
+import {
+  CODE_DOLLAR,
+  INLINE_SPAN_LIMIT,
+  MARKDOWN_IMAGE,
+  NO_BANG,
+  matchInlineRule,
+  projectCode,
+} from './inline-rules.ts';
 import { normalizeControlCharacters, normalizeLineBreaks } from './line-breaks.ts';
 
 export { normalizeLineBreaks };
@@ -52,6 +61,12 @@ const BLOCK_PREFIXES: ReadonlyArray<readonly [RegExp, BlockType]> = [
 ];
 
 const DIVIDER = /^(?:-{3,}|\*{3,}|_{3,})$/;
+
+/**
+ * A setext heading's underline: `===` makes the line above it a first-level
+ * heading, `---` a second. (One `-` is an empty list item, as it was.)
+ */
+const SETEXT_UNDERLINE = /^(?:=+|-{2,})$/;
 
 /**
  * A callout is a quote whose first token is its bracketed icon.
@@ -272,7 +287,20 @@ function parseTableLines(lines: readonly string[]): TableRows {
  * inline code -- is a paragraph with a code span. Read as a fence it dropped
  * the line's text as an info string and made code of every line after it.
  */
-const FENCE_OPEN = /^(`{3,})(?![^\n]*`)/;
+const FENCE_OPEN = /^(?:(`{3,})(?![^\n]*`)|(~{3,})(?![^\n]*~))/;
+
+/**
+ * The run that opens a fence -- backticks, or CommonMark's tildes -- or null.
+ * A tilde fence's info string holds no tilde either, unlike CommonMark's: a
+ * line like `~~~a~~~` is struck-through text in every reader that strikes
+ * through with three tildes, and read as a fence it made code of every line
+ * after it. (The writer escapes every `~`, so it never writes one.)
+ */
+function fenceOpening(line: string): string | null {
+  const match = FENCE_OPEN.exec(line);
+
+  return match?.[1] ?? match?.[2] ?? null;
+}
 
 const CHECKED = /\[[xX]\]/;
 
@@ -283,8 +311,8 @@ const CHECKED = /\[[xX]\]/;
  * one that opened the block — otherwise ```` ``` ```` inside the code ends it
  * three lines early and one block comes back as three.
  */
-function closingFenceLength(line: string): number {
-  const match = /^(`{3,})\s*$/.exec(line);
+function closingFenceLength(line: string, opening: string): number {
+  const match = (opening.startsWith('~') ? /^(~{3,})\s*$/ : /^(`{3,})\s*$/).exec(line);
 
   return match?.[1]?.length ?? 0;
 }
@@ -449,6 +477,18 @@ function decodeReference(match: RegExpExecArray): string | null {
 const ESCAPED = '\u0000';
 
 /**
+ * Stands for an inline image while its line is read (`readInlineImages`): a
+ * noncharacter, which no rule treats as punctuation, so the line around the
+ * picture is read in one parse, as the HTML reader reads one (`IMAGE_ATOM`).
+ */
+const INLINE_IMAGE = MARKDOWN_IMAGE;
+
+interface InlineImage {
+  readonly src: string;
+  readonly alt: string;
+}
+
+/**
  * A line that opens or closes a display equation: `$$` alone.
  *
  * Only alone. `$$` with TeX after it on the same line is Pandoc's spelling of
@@ -498,7 +538,7 @@ function joinSoftBreaks(lines: readonly string[]): string[] {
   // longer string whether it ends in a break, was quadratic in a long
   // soft-broken paragraph.
   let pending: string[] = [];
-  let fence = 0;
+  let fence = '';
   // A display equation's lines are TeX and pass through untouched, as a code
   // fence's do. An even run of backslashes at a line's end -- TeX's `\\` row
   // break -- would be left alone anyway; an odd one would not, and TeX ends a
@@ -516,16 +556,16 @@ function joinSoftBreaks(lines: readonly string[]): string[] {
   for (const line of lines) {
     const trimmed = line.trimStart();
 
-    if (math || (fence === 0 && isMathFence(trimmed))) {
+    if (math || (fence === '' && isMathFence(trimmed))) {
       math = !math || !isMathFence(trimmed);
       flush();
       out.push(line);
       continue;
     }
 
-    if (fence > 0) {
-      if (closingFenceLength(trimmed) >= fence) {
-        fence = 0;
+    if (fence !== '') {
+      if (closingFenceLength(trimmed, fence) >= fence.length) {
+        fence = '';
       }
 
       flush();
@@ -533,10 +573,10 @@ function joinSoftBreaks(lines: readonly string[]): string[] {
       continue;
     }
 
-    const opening = FENCE_OPEN.exec(trimmed);
+    const opening = fenceOpening(trimmed);
 
-    if (opening?.[1]) {
-      fence = opening[1].length;
+    if (opening !== null) {
+      fence = opening;
       flush();
       out.push(line);
       continue;
@@ -645,6 +685,16 @@ function destinationsAhead(text: string): (caret: number) => DestinationAhead {
  * delimiters in the text.
  */
 export function parseInlineMarkdown(source: string): RichText {
+  return readInline(source);
+}
+
+/**
+ * {@link parseInlineMarkdown}, and with `images` its image mode: each
+ * `![alt](src)` the rules match, and whose source `sanitizeReadImageUrl`
+ * takes, is written into the text as one `INLINE_IMAGE` and pushed onto
+ * `images` (see `readInlineImages`).
+ */
+function readInline(source: string, images?: InlineImage[]): RichText {
   if (source.length === 0) {
     return [];
   }
@@ -796,6 +846,64 @@ export function parseInlineMarkdown(source: string): RichText {
 
     opens.length = write;
     openSources.length = write;
+  };
+
+  /**
+   * Forgets the images read in a range of `matchable` that a span is about to
+   * take as its own text: a formula's TeX, an image's alt text, which is the
+   * inner pictures' alt text, as CommonMark reads it. They are the last ones
+   * read, since the span ends at the caret.
+   */
+  const dropImagesIn = (start: number, end: number): InlineImage[] => {
+    if (images === undefined || images.length === 0) {
+      return [];
+    }
+
+    let count = 0;
+
+    for (let at = matchable.indexOf(INLINE_IMAGE, start); at !== -1 && at < end;) {
+      count += 1;
+      at = matchable.indexOf(INLINE_IMAGE, at + 1);
+    }
+
+    return images.splice(images.length - count, count);
+  };
+
+  /**
+   * Makes every `[` still open before `before` open nothing, as CommonMark
+   * does once a link closes: links do not nest, so the inner one wins and
+   * the outer brackets are text. The content keeps each `[`; the projection
+   * reads it as an escaped one. Only a badge asks (see `readInlineImages`):
+   * typing, which the reader otherwise replays, lets an outer link close
+   * around an inner one.
+   */
+  const closeLabelsBefore = (before: number): void => {
+    const limit = before + origin;
+    let write = openFrom;
+    let rebuilt = '';
+    let copied = 0;
+
+    for (let read = openFrom; read < opens.length; read += 1) {
+      const open = opens[read]!;
+      const at = open - origin;
+
+      if (open < limit && matchable[at] === '[' && matchable[at - 1] !== '!') {
+        rebuilt += matchable.slice(copied, at) + ESCAPED;
+        copied = at + 1;
+        continue;
+      }
+
+      opens[write] = open;
+      openSources[write] = openSources[read]!;
+      write += 1;
+    }
+
+    opens.length = write;
+    openSources.length = write;
+
+    if (copied > 0) {
+      matchable = rebuilt + matchable.slice(copied);
+    }
   };
 
   /**
@@ -971,6 +1079,18 @@ export function parseInlineMarkdown(source: string): RichText {
       }
     }
 
+    // A `!` is an image's only where the source puts a `[` straight after
+    // it, and that is decided here, from the source: in the projection a
+    // closed span's delimiters are gone, so the `!` that ends `**Done!**` or
+    // the label of `[Hi!](p)` stood straight before the next link's `[`, was
+    // taken for its bang, lost from the text, and the link became a picture
+    // (VX-1). Any other `!` is projected as {@link NO_BANG}, which nothing
+    // reads as a bang; the content keeps the `!`, and no other rule has it
+    // for a delimiter.
+    if (projected === '!' && next !== '[') {
+      projected = NO_BANG;
+    }
+
     pending += literal;
     matchable += projected;
 
@@ -990,6 +1110,7 @@ export function parseInlineMarkdown(source: string): RichText {
     const match = matchInlineRule(matchable, {
       projection: true,
       ahead: ahead?.(index + 1),
+      images: images !== undefined,
     });
 
     if (!match) {
@@ -1025,6 +1146,7 @@ export function parseInlineMarkdown(source: string): RichText {
       flush();
       recall(match.start);
       afterFormula = index + 1;
+      dropImagesIn(match.start, match.end);
       content = richInsert(
         richDelete(content, match.start - base, match.end - base),
         match.start - base,
@@ -1040,7 +1162,7 @@ export function parseInlineMarkdown(source: string): RichText {
     const innerStart = match.start + match.openLength;
     const innerEnd = match.end - match.closeLength;
 
-    if (innerEnd <= innerStart) {
+    if (innerEnd <= innerStart && !match.image) {
       continue;
     }
 
@@ -1071,22 +1193,73 @@ export function parseInlineMarkdown(source: string): RichText {
     // a destination: CommonMark escapes all of it there, where in prose only
     // what the writer protects is honoured (see `ESCAPABLE`). Such a backslash
     // is still a backslash in the projection, so `?q=a\$b` kept it.
-    if (
-      link !== undefined &&
-      (tail.includes(ESCAPED) || tail.includes(CODE_DOLLAR) || DESTINATION_ESCAPE.test(tail))
-    ) {
-      const raw = richToPlainText(content).slice(innerEnd - base, match.end - base);
-      let closing = '';
+    //
+    // And every destination is read as read content is (`sanitizeReadUrl`),
+    // not as typed: the rule asked `sanitizeUrl`, which takes `README.md` for
+    // a host. A destination it refuses leaves the whole span as text. An
+    // image's source is read the same way, and asked of
+    // `sanitizeReadImageUrl` instead.
+    const destination = (): string => {
+      let closing = tail;
 
-      for (let at = 0; at < raw.length; at += 1) {
-        if (!(tail[at] === '\\' && ASCII_PUNCTUATION.test(tail[at + 1] ?? ''))) {
-          closing += raw[at];
+      if (
+        tail.includes(ESCAPED) ||
+        tail.includes(NO_BANG) ||
+        tail.includes(CODE_DOLLAR) ||
+        DESTINATION_ESCAPE.test(tail)
+      ) {
+        const raw = richToPlainText(content).slice(innerEnd - base, match.end - base);
+        closing = '';
+
+        for (let at = 0; at < raw.length; at += 1) {
+          if (!(tail[at] === '\\' && ASCII_PUNCTUATION.test(tail[at + 1] ?? ''))) {
+            closing += raw[at];
+          }
         }
       }
 
-      const href = sanitizeUrl(
-        tail.startsWith('](<') ? closing.slice(3, -2) : closing.slice(2, -1),
+      return tail.startsWith('](<') ? closing.slice(3, -2) : closing.slice(2, -1);
+    };
+
+    // An image, in the image mode: one atom where it stood, and its alt text
+    // as plain text -- the content its label was read to, as CommonMark
+    // reads alt text, with any picture inside it forgotten.
+    if (match.image) {
+      const src = images && tail.startsWith('](') ? sanitizeReadImageUrl(destination()) : null;
+
+      if (!src) {
+        continue;
+      }
+
+      const inside = dropImagesIn(innerStart, innerEnd);
+      let next = 0;
+      const alt = richSlice(content, innerStart - base, innerEnd - base)
+        .map((run) => (run.math === undefined ? run.text : `$${run.math}$`))
+        .join('')
+        .replaceAll(INLINE_IMAGE, () => inside[next++]?.alt ?? '');
+
+      images!.push({ src, alt });
+      content = richInsert(
+        richDelete(content, match.start - base, match.end - base),
+        match.start - base,
+        richFromPlainText(INLINE_IMAGE),
       );
+      matchable = matchable.slice(0, match.start) + INLINE_IMAGE;
+      spliceOpens(match.start, match.end);
+      park();
+      retire();
+      continue;
+    }
+
+    if (link !== undefined && tail.startsWith('](')) {
+      // `![alt](src)` is an image, never `!` and a link to the picture: an
+      // image the block reader did not take (see `readInlineImages`) stays
+      // text, as the writer means it to, since it escapes a `!` before a link.
+      if (matchable[match.start - 1] === '!') {
+        continue;
+      }
+
+      const href = sanitizeReadUrl(destination());
 
       // Nothing has been changed yet: flushing and recalling only move runs.
       if (!href) {
@@ -1104,6 +1277,10 @@ export function parseInlineMarkdown(source: string): RichText {
     matchable = matchable.slice(0, match.start) + matchable.slice(innerStart);
     spliceOpens(innerEnd, match.end);
     spliceOpens(match.start, innerStart);
+
+    if (match.badge) {
+      closeLabelsBefore(match.start);
+    }
 
     const start = match.start - base;
     const end = start + (innerEnd - innerStart);
@@ -1199,6 +1376,152 @@ function depthReader(): (line: string) => number {
   };
 }
 
+/**
+ * A line's text read around the images inside it: the pieces between them,
+ * in order, and the images, or null where the line holds none it can read.
+ *
+ * `![alt](src)` inside a line was read by the link rule, which took
+ * `[alt](src)` and left the `!`: a README badge became "!" and a link to the
+ * picture. The line is read in one parse in the reader's image mode
+ * (`readInline`), where an image is a rule like any other: matched where a
+ * link is, so with a link's precedence -- none inside a code span, an
+ * autolink (`<https://a.test/![a](b.png)>` is one URL) or a link
+ * destination, and one inside a formula is its TeX -- and written as one
+ * `INLINE_IMAGE`, so a span around a picture (`*a ![x](y) b*`) is read where
+ * it stands, as the HTML reader reads one; the result is cut at the atoms.
+ * A source `sanitizeReadImageUrl` refuses leaves the image as text.
+ *
+ * A badge, `[![ci](b.png)](c)` -- a link whose label is pictures alone -- is
+ * its pictures, whatever its destination reads as, as a linked `<img>` is:
+ * left to the link rule, a destination it refuses (`LICENSE`, no host) kept
+ * the span as text around the atom, "[", the picture and "](LICENSE)". Links
+ * do not nest (CommonMark), so a badge inside another link's label is the
+ * inner link: the outer `[` opens nothing, and its brackets and destination
+ * stay text -- `[x [![a](b.png)](c)](d)` is "[x ", the picture and "](d)".
+ * Only a badge closes the labels around it so: a link inside a link's label
+ * is otherwise read as typing reads it, the outer link around the inner one.
+ * Typing makes no picture at all: a typed `![a](https://…)` is a `!` and
+ * a link to that address, the link rule's match, which only this reader refuses.
+ */
+function readInlineImages(line: string): {
+  readonly pieces: RichText[];
+  readonly images: InlineImage[];
+} | null {
+  if (!line.includes('![') || line.includes(INLINE_IMAGE)) {
+    return null;
+  }
+
+  const images: InlineImage[] = [];
+  const content = readInline(line, images);
+
+  if (images.length === 0) {
+    return null;
+  }
+
+  const plain = richToPlainText(content);
+  const atoms: number[] = [];
+
+  for (let at = plain.indexOf(INLINE_IMAGE); at !== -1; at = plain.indexOf(INLINE_IMAGE, at + 1)) {
+    atoms.push(at);
+  }
+
+  // Every image read is an atom in the text, in order: a span that took one
+  // as its own text forgot it (`dropImagesIn`). Should the two disagree, the
+  // line is read as it was written rather than cut at the wrong place.
+  if (atoms.length !== images.length) {
+    return null;
+  }
+
+  const pieces: RichText[] = [];
+  let start = 0;
+
+  for (const at of [...atoms, plain.length]) {
+    pieces.push(richSlice(content, start, at));
+    start = at + 1;
+  }
+
+  return { pieces, images };
+}
+
+/** How much of `text`'s start (or end) is spaces, tabs and line breaks. */
+function edgeSpace(text: string, end: boolean): number {
+  const match = (end ? /[ \t\n]*$/ : /^[ \t\n]*/).exec(text);
+
+  return match?.[0].length ?? 0;
+}
+
+/** `content` without the whitespace at its start and/or end. */
+function trimRich(content: RichText, start: boolean, end: boolean): RichText {
+  const plain = richToPlainText(content);
+  const from = start ? edgeSpace(plain, false) : 0;
+  const to = end ? plain.length - edgeSpace(plain.slice(from), true) : plain.length;
+
+  return richSlice(content, from, Math.max(from, to));
+}
+
+/**
+ * The number a Markdown or HTML ordered list's item was written with, which
+ * the model cannot hold: it numbers consecutive items from 1
+ * (`computeListNumbers`). `first` marks the first item of an HTML `<ol>`; a
+ * Markdown list starts wherever the numbering does.
+ */
+export interface WrittenNumber {
+  readonly marker: string;
+  readonly value: number;
+  readonly first?: boolean;
+}
+
+/**
+ * Keeps the numbers a list was written with where the model would draw
+ * others: every item of a list whose first item it would not draw with its
+ * written number -- `5. five` / `6. six`, `<ol start="5">`, `1986. A great
+ * year` -- becomes a paragraph that keeps its number as text, in place.
+ * Renumbered, "step 5" after a note became "1.", and a dated line pasted into
+ * a sentence lost its year. A list drawn as written -- from 1, or the writer's
+ * `start`, which is the number it was drawn with -- stays a list. In place,
+ * since a kept list is a run of paragraphs, which restart the numbering
+ * after it as a list's own end does.
+ */
+export function keepWrittenNumbers(
+  blocks: Block[],
+  written: ReadonlyMap<Block, WrittenNumber>,
+): void {
+  if (written.size === 0) {
+    return;
+  }
+
+  /** Per depth, the list open there: its count, or that its numbers are kept. */
+  const counters = new Map<number, { count: number; keep: boolean }>();
+
+  for (const block of blocks) {
+    for (const depth of [...counters.keys()]) {
+      if (block.type === 'numbered_list' ? depth > block.depth : depth >= block.depth) {
+        counters.delete(depth);
+      }
+    }
+
+    if (block.type !== 'numbered_list') {
+      continue;
+    }
+
+    const number = written.get(block);
+    let counter = counters.get(block.depth);
+
+    if (counter === undefined || number?.first === true) {
+      const drawn = (counter !== undefined && !counter.keep ? counter.count : 0) + 1;
+      counter = { count: drawn, keep: number !== undefined && number.value !== drawn };
+      counters.set(block.depth, counter);
+    } else {
+      counter.count += 1;
+    }
+
+    if (counter.keep && number !== undefined) {
+      block.type = 'paragraph';
+      block.content = richConcat(richFromPlainText(number.marker), block.content);
+    }
+  }
+}
+
 interface PrefixMatch {
   readonly type: BlockType;
   readonly rest: string;
@@ -1249,7 +1572,8 @@ export function blocksFromMarkdown(text: string): Block[] {
   const blocks: Block[] = [];
   let fence: string[] | null = null;
   let fenceDepth = 0;
-  let fenceLength = 0;
+  /** The run that opened the fence: what closes it is the same, as long or longer. */
+  let fenceOpen = '';
   let fenceIndent = '';
   /** The lines of an open `$$` display equation, as a code fence collects its own. */
   let math: string[] | null = null;
@@ -1258,6 +1582,8 @@ export function blocksFromMarkdown(text: string): Block[] {
   let table: string[] | null = null;
   let tableDepth = 0;
   const depthOf = depthReader();
+  /** Each numbered item's marker, for `keepWrittenNumbers`. */
+  const written = new Map<Block, WrittenNumber>();
 
   const flushTable = (): void => {
     if (!table) {
@@ -1282,8 +1608,13 @@ export function blocksFromMarkdown(text: string): Block[] {
     }
   };
 
+  /** The paragraph the line just read made, while the next could underline it. */
+  let plainParagraph: { block: Block; source: string; column: number } | null = null;
+
   for (const raw of lines) {
     const trimmedStart = raw.trimStart();
+    const above = plainParagraph;
+    plainParagraph = null;
 
     // A display equation's lines are TeX, taken verbatim up to the closing
     // `$$` -- a row of `|` in a matrix is no table, and `\\` is no soft break.
@@ -1322,7 +1653,7 @@ export function blocksFromMarkdown(text: string): Block[] {
     if (fence) {
       // Only a fence at least as long as the opening one closes the block; a
       // shorter one, or one carrying an info string, is code.
-      if (closingFenceLength(trimmedStart) >= fenceLength) {
+      if (closingFenceLength(trimmedStart, fenceOpen) >= fenceOpen.length) {
         blocks.push(createBlock('code', unindentBody(fence, fenceIndent), fenceDepth));
         fence = null;
       } else {
@@ -1332,11 +1663,11 @@ export function blocksFromMarkdown(text: string): Block[] {
       continue;
     }
 
-    const opening = FENCE_OPEN.exec(trimmedStart);
+    const opening = fenceOpening(trimmedStart);
 
-    if (opening?.[1]) {
+    if (opening !== null) {
       fence = [];
-      fenceLength = opening[1].length;
+      fenceOpen = opening;
       fenceDepth = depthOf(raw);
       fenceIndent = raw.slice(0, raw.length - trimmedStart.length);
       continue;
@@ -1346,6 +1677,18 @@ export function blocksFromMarkdown(text: string): Block[] {
 
     // Blank lines only separate blocks; they do not become one.
     if (line.length === 0) {
+      continue;
+    }
+
+    // A setext underline: the paragraph on the line just above is a heading,
+    // as CommonMark reads it -- where it was a paragraph of `=` or, for `---`,
+    // a divider under the paragraph. Only directly under a paragraph's own
+    // line: the writer separates blocks with a blank line and escapes `=` and
+    // `-` after a break, so it never writes one. Read before the depth, which
+    // an underline has none of.
+    if (above && SETEXT_UNDERLINE.test(line) && columnsOf(raw) <= above.column + 3) {
+      above.block.type = line.startsWith('=') ? 'heading1' : 'heading2';
+      above.block.content = parseInlineMarkdown(breaksFromHtml(above.source));
       continue;
     }
 
@@ -1369,7 +1712,7 @@ export function blocksFromMarkdown(text: string): Block[] {
       // An empty destination is an image block with no picture yet -- the
       // writer's own spelling of one. Anything else has to be a usable source.
       const destination = image[2] ?? image[3] ?? '';
-      const src = destination === '' ? '' : sanitizeImageUrl(stripEscapes(destination));
+      const src = destination === '' ? '' : sanitizeReadImageUrl(stripEscapes(destination));
 
       if (src !== null) {
         const caption = breakAt === -1 ? '' : line.slice(breakAt + 1);
@@ -1417,11 +1760,71 @@ export function blocksFromMarkdown(text: string): Block[] {
       }
     }
 
-    const block = createBlock(
-      type,
-      parseInlineMarkdown(type.startsWith('heading') ? breaksFromHtml(rest) : rest),
-      depth,
-    );
+    const source = type.startsWith('heading') ? breaksFromHtml(rest) : rest;
+    const inline = readInlineImages(source);
+    const imageBlocks = (inline?.images ?? []).map((image) => {
+      const block = createBlock('image', [], depth);
+      block.src = image.src;
+      block.alt = image.alt;
+      return block;
+    });
+
+    // A paragraph is cut at its pictures, each a block of its own between
+    // the text before and after it, as the HTML reader cuts a `<p>`.
+    if (inline && type === 'paragraph') {
+      inline.pieces.forEach((piece, index) => {
+        const text = trimRich(piece, index > 0, index < inline.pieces.length - 1);
+
+        if (text.length > 0) {
+          blocks.push(createBlock('paragraph', text, depth));
+        }
+
+        if (index < imageBlocks.length) {
+          blocks.push(imageBlocks[index]!);
+        }
+      });
+      continue;
+    }
+
+    // Any other block keeps its text whole, less the pictures, which follow
+    // it -- inside it, as the HTML reader hands on an `<li>`'s, a quote's or
+    // a toggle's, except after a heading, which holds no children. The space
+    // a picture stood between is one space.
+    let content: RichText;
+
+    if (inline) {
+      // Joined once, each piece read once for whether it ends in a space:
+      // asked of the content so far, the join was quadratic in the pictures.
+      // Flattened, never spread: a line can hold more pictures than a call
+      // takes arguments.
+      const parts: RichText[] = [];
+      let joined = true;
+
+      for (const piece of inline.pieces) {
+        const part = joined ? trimRich(piece, true, false) : piece;
+        const plain = richToPlainText(part);
+
+        if (plain.length > 0) {
+          parts.push(part);
+          joined = /[ \t\n]$/.test(plain);
+        }
+      }
+
+      content = trimRich(normalizeRuns(parts.flat()), false, true);
+    } else {
+      content = parseInlineMarkdown(source);
+    }
+
+    const block = createBlock(type, content, depth);
+
+    if (!prefix && !inline) {
+      plainParagraph = { block, source, column: columnsOf(raw) };
+    }
+
+    if (type === 'numbered_list' && prefix) {
+      const marker = line.slice(0, line.length - prefix.rest.length);
+      written.set(block, { marker, value: Number.parseInt(marker, 10) });
+    }
 
     if (type === 'todo') {
       block.checked = prefix?.checked ?? false;
@@ -1436,6 +1839,13 @@ export function blocksFromMarkdown(text: string): Block[] {
     }
 
     blocks.push(block);
+
+    const nests = !type.startsWith('heading');
+
+    for (const image of imageBlocks) {
+      image.depth = nests ? Math.min(depth + 1, MAX_DEPTH) : depth;
+      blocks.push(image);
+    }
   }
 
   flushTable();
@@ -1450,6 +1860,8 @@ export function blocksFromMarkdown(text: string): Block[] {
   if (math) {
     blocks.push(createBlock('math', unindentBody(math, mathIndent), mathDepth));
   }
+
+  keepWrittenNumbers(blocks, written);
 
   return blocks;
 }

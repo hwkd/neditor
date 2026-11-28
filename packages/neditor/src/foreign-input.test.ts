@@ -852,3 +852,32 @@ describe('control characters do not reach the model', () => {
     ).toEqual(['x', 'y', 'z', 'a\nb']);
   });
 });
+
+describe('a paste keeps the characters it was given (CB1, CB3)', () => {
+  const pastePlain = (editor: NEditor, text: string, offset: number): void => {
+    const data = new DataTransfer();
+    data.setData('text/plain', text);
+    editor.focusRange('dst', offset, offset);
+    hosts(editor)[0]!.dispatchEvent(
+      new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }),
+    );
+  };
+
+  test('a dated line pasted into a sentence keeps its year', () => {
+    const editor = mount([block({ id: 'dst', content: [{ text: 'X' }] })]);
+
+    pastePlain(editor, '1986. A great year', 1);
+
+    expect(editor.getDocument().blocks.map(blockText)).toEqual(['X1986. A great year']);
+  });
+
+  test('a README link to a file links to no stranger’s domain', () => {
+    const editor = mount([block({ id: 'dst' })]);
+
+    pastePlain(editor, 'See [Contributing](CONTRIBUTING.md)', 0);
+
+    const [only] = editor.getDocument().blocks;
+    expect(only!.content.some((run) => run.link !== undefined)).toBe(false);
+    expect(blockText(only!)).toBe('See [Contributing](CONTRIBUTING.md)');
+  });
+});

@@ -3639,4 +3639,90 @@ test.describe('16 · tables', () => {
       row.height + 16,
     );
   });
+
+  // UX-1: a read-only table wider than a phone was a scroller nothing in it
+  // could focus. WebKit never stopped on it, so → never reached the last
+  // columns; Chromium and Firefox stopped on a nameless group.
+  test('TB13 a read-only table wider than the view is a named tab stop that the arrows scroll', async ({
+    editor,
+    page,
+  }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    await editor.load({ doc: 'empty', editable: 0 });
+    const cell = (text: string) => [{ text }];
+    await editor.setDocument({
+      blocks: [
+        { id: 'a', type: 'paragraph', depth: 0, content: cell('Before') },
+        {
+          id: 'tbl',
+          type: 'table',
+          depth: 0,
+          content: [],
+          rows: [
+            [cell('Name'), cell('Role'), cell('Team'), cell('Notes')],
+            [cell('Ada'), cell('Lead'), cell('Core'), cell('Last column')],
+          ],
+        },
+      ],
+    });
+    const scroller = editor.block('tbl').locator('.neditor-table');
+    await expect(scroller).toHaveAttribute('tabindex', '0');
+    await expect(scroller).toHaveAttribute('role', 'region');
+    await expect(scroller).toHaveAttribute('aria-label', 'Scrollable table');
+
+    await page.mouse.click(2, 2);
+    for (let press = 0; press < 12; press += 1) {
+      if (await scroller.evaluate((element) => element === document.activeElement)) {
+        break;
+      }
+      await page.keyboard.press('Tab');
+    }
+    await expect(scroller).toBeFocused();
+    // WebKit's first arrow on a newly focused scroller scrolls nothing.
+    await expect
+      .poll(async () => {
+        await page.keyboard.press('ArrowRight');
+        return scroller.evaluate((element) => element.scrollLeft);
+      })
+      .toBeGreaterThan(0);
+
+    // A table that fits is no tab stop, and an editable one never is: its cells are.
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await expect(scroller).not.toHaveAttribute('tabindex');
+    await expect(scroller).not.toHaveAttribute('role');
+    await page.setViewportSize({ width: 375, height: 812 });
+    await expect(scroller).toHaveAttribute('tabindex', '0');
+    await editor.page.evaluate(() => window.__e2e.editor.setEditable(true));
+    await expect(scroller).not.toHaveAttribute('tabindex');
+    await expect(scroller).not.toHaveAttribute('aria-label');
+  });
+
+  // UX P3-6: positionPortal clamps where the toolbar goes, not how wide it is,
+  // and long translated glyphs ran it from 8 to 443px on a 320px phone.
+  test('TB14 a table toolbar with long labels wraps inside a narrow window', async ({
+    editor,
+    page,
+  }) => {
+    await page.setViewportSize({ width: 320, height: 700 });
+    await editor.load({ doc: 'table' });
+    await editor.remount(
+      {
+        labels: {
+          deleteRowGlyph: '⤫ supprimer la ligne',
+          deleteColumnGlyph: '⤫ supprimer la colonne',
+        },
+      },
+      'table',
+    );
+    await editor.placeCaret('tbl', 0, 0, { row: 1, column: 1 });
+    const toolbar = editor.portal('table-toolbar');
+    await expect(toolbar).toBeVisible();
+    const bar = (await toolbar.boundingBox())!;
+    expect(bar.x).toBeGreaterThanOrEqual(0);
+    expect(bar.x + bar.width).toBeLessThanOrEqual(320);
+    for (const button of await toolbar.getByRole('button').all()) {
+      const box = (await button.boundingBox())!;
+      expect(box.x + box.width).toBeLessThanOrEqual(320);
+    }
+  });
 });

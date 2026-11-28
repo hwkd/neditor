@@ -152,6 +152,7 @@ that changes what you store or what other applications receive is listed first.
 
 ### Changed behaviour
 
+- **A second editor on one element throws.** `new NEditor(element)` on an element another live editor is mounted on now throws `An editor is already mounted on this element: destroy it first.`; before, both drew into the same root.
 - **Code blocks are literal, like equations.** The selection toolbar is not
   offered in one, `toggleMark` and `openLinkEditor` do nothing there and
   `setLink` returns `false`: marks and links in a code block were dropped
@@ -215,6 +216,29 @@ that changes what you store or what other applications receive is listed first.
   away from such a toggle just under the limit.
 
 ### Fixed
+
+- Pasted or loaded Markdown no longer reads a `!` that ends bold, italic, strikethrough or a link label as an image's `!`: `**Done!**[docs](…)` and the editor's own `[Hi!](https://a.test/p)[next](https://a.test/q)` beside a formula holding `![` kept their `!` and their link.
+- `Delete` in an empty paragraph removes it, so the next block keeps its type (a code block or heading was turned into a paragraph).
+- `getSelectionState().marks` at a run's edge is the same in every engine.
+- `clearHistory()` on an empty history and a repeated `selectBlocks()` no longer emit events.
+- Popovers are re-placed when the visual viewport changes (a phone's on-screen keyboard).
+- A drop on an image's picture or on a divider inserts the payload after that block; before, the browser never delivered it.
+- Image apply and remove ask the same read-only question as every other edit.
+- Pasted relative links and images (`README.md`, `logo.png`) no longer link to a host of that name, and a stored document's relative link is no longer promoted to one either; inline Markdown images and badges paste as images; lists whose numbering the model cannot draw keep their numbers as text; setext headings and `~~~` fences are read.
+- Host theme-token overrides (`.neditor { --neditor-* }`) now apply in dark mode too (`theme: 'auto'` on a dark OS, or `theme: 'dark'`).
+- A `labels.slashCommands` entry that gives only some fields keeps the defaults for the rest; one giving only `label` crashed the slash menu's filter.
+- Scrolling or resizing no longer closes the equation popover while you type in it, and clicking a formula, Escape and Apply no longer scroll the page.
+- Shift+click on a formula extends the selection instead of opening the equation popover.
+- A word deletion (Alt/Ctrl+Backspace or Delete) beside a formula takes the formula alone in Firefox too.
+- `Mod+K` with the caret inside a link edits that link.
+- Typing over a block selection with an IME, a dead key, or an Option/AltGr character now replaces the selection.
+- `/` in a display equation is text; it no longer opens the slash menu. `↓` at the end of a document ending in an equation opens a paragraph.
+- Moving blocks, by drag or by `Mod+Shift+↑/↓`, no longer changes the parent of a block that was not moved and whose parent was not moved either: dropped among a parent's children, the moved blocks join them at their depth (before, the children after the drop were taken from their parent, and a selection with gaps could do the same to a later sibling).
+- Shift+Enter and Shift+Tab with the slash menu open no longer apply the highlighted command.
+- Read-only tables wider than the view are keyboard-reachable named regions (new label `tableScrollRegion`); read-only to-do checkboxes carry `aria-readonly`.
+- Touch targets are at least 24×24 CSS pixels under a coarse pointer.
+- The icon picker's field comes first in the tab order, and the arrow keys move in its grid.
+- The table toolbar wraps on narrow screens.
 
 - **Security** -- HTML paste and drop (also on earlier versions): an event
   handler on pasted or dropped markup could run, in every engine, and so could

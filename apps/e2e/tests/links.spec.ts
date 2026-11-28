@@ -95,6 +95,47 @@ test.describe('07 · links', () => {
     await page.keyboard.press('Escape');
   });
 
+  // TY-1: with a caret in a link Mod+K was swallowed and opened nothing, so
+  // the keys meant for the URL field (Mod+A, Backspace, Enter) emptied the
+  // paragraph and split it.
+  test('L3b Mod+K with a caret in a link edits the whole link; Escape gives the caret back', async ({
+    editor,
+    page,
+  }) => {
+    await editor.load({ doc: 'links' });
+    const dialog = editor.portal('link-editor');
+    const field = dialog.getByRole('textbox');
+
+    await editor.placeCaret('p1', 10);
+    await page.keyboard.press(`${MOD}+k`);
+    await expect(field).toBeFocused();
+    await expect(field).toHaveValue('https://example.com/docs');
+    await page.keyboard.press(`${MOD}+a`);
+    await page.keyboard.press('Backspace');
+    await page.keyboard.type('example.org/guide');
+    await page.keyboard.press('Enter');
+
+    expect((await editor.blockData('p1'))?.content).toEqual([
+      { text: 'See the ' },
+      { text: 'docs', link: 'https://example.org/guide' },
+      { text: ' for details.' },
+    ]);
+    expect(await editor.selection()).toMatchObject({
+      blockId: 'p1',
+      range: { start: 10, end: 10 },
+    });
+
+    await page.keyboard.press(`${MOD}+k`);
+    await expect(field).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    expect(await editor.selection()).toMatchObject({
+      blockId: 'p1',
+      range: { start: 10, end: 10 },
+    });
+    await expect(editor.content('p1')).toBeFocused();
+  });
+
   test('L4 Escape cancels and restores the selection', async ({ editor, page }) => {
     await editor.load({ doc: 'paragraphs' });
     await editor.placeCaret('p2', 1, 4);

@@ -574,6 +574,50 @@ function splitAt(
 }
 
 /**
+ * The whole link at a collapsed caret: the one the character before it
+ * belongs to, else the one after it -- so a caret at a link's end, where
+ * typing goes outside it, still names it. Formulas carry no link and end one.
+ * Null where neither neighbour is linked.
+ */
+function linkExtentAt(content: RichText, offset: number): OffsetRange | null {
+  const spans: Array<OffsetRange & { href: string }> = [];
+  let position = 0;
+
+  for (const run of content) {
+    const end = position + run.text.length;
+    const href = isMathRun(run) ? undefined : run.link;
+    const last = spans.at(-1);
+
+    if (href !== undefined) {
+      if (last && last.end === position && last.href === href) {
+        last.end = end;
+      } else {
+        spans.push({ start: position, end, href });
+      }
+    }
+
+    position = end;
+  }
+
+  const holding = (at: number) => spans.find((span) => span.start <= at && at < span.end);
+  const span = (offset > 0 ? holding(offset - 1) : undefined) ?? holding(offset);
+
+  return span ? { start: span.start, end: span.end } : null;
+}
+
+/** The selection a link popover gives back: the caret Mod+K had, else its range. */
+function linkContextSelection(context: {
+  start: number;
+  end: number;
+  backward: boolean;
+  caret?: number;
+}): { start: number; end: number; backward: boolean } {
+  return context.caret === undefined
+    ? { start: context.start, end: context.end, backward: context.backward }
+    : { start: context.caret, end: context.caret, backward: false };
+}
+
+/**
  * Whether this platform's shortcut modifier is Cmd rather than Ctrl.
  *
  * macOS gives Ctrl to the system's emacs-style caret bindings — Ctrl+B back a
@@ -1864,6 +1908,9 @@ function keepVisible(
   }
 }
 
+/** The elements an editor is mounted on, so a second mount can be refused. */
+const MOUNTED = new WeakSet<HTMLElement>();
+
 /**
  * A block-based rich-text editor.
  *
@@ -1938,6 +1985,13 @@ export class NEditor {
     end: number;
     cell?: CellCoords;
     backward: boolean;
+    /**
+     * The collapsed caret Mod+K was pressed at, in or beside the link it
+     * opened on: the selection the reader had, which Escape, Apply and undo
+     * give back. Given back as the link selected, the next letter typed
+     * replaced the link's text.
+     */
+    caret?: number;
   } | null = null;
 
   /**
@@ -2140,6 +2194,13 @@ export class NEditor {
       throw new Error(`[neditor] Mount element not found: ${target}`);
     }
 
+    // One editor to an element: a second one rendered its blocks into the
+    // first's, and each then reconciled the other's DOM away.
+    if (MOUNTED.has(element)) {
+      throw new Error('[neditor] An editor is already mounted on this element: destroy it first.');
+    }
+
+    MOUNTED.add(element);
     this.#root = element;
     this.#document = element.ownerDocument;
     this.#editable = options.editable ?? true;
@@ -2479,6 +2540,7 @@ export class NEditor {
     this.#root.addEventListener('copy', this.#handleCopy);
     this.#root.addEventListener('cut', this.#handleCopy);
     this.#root.addEventListener('drop', this.#handleDrop);
+    this.#root.addEventListener('dragover', this.#handleDragOver);
     this.#root.addEventListener('pointerdown', this.#handleRootPointerDown);
     this.#root.addEventListener('pointerover', this.#handlePointerOver);
     this.#root.addEventListener('pointerleave', this.#handlePointerLeave);
@@ -2526,6 +2588,12 @@ export class NEditor {
       shadow.addEventListener('scroll', this.#handleViewportChange, true);
     }
     this.#document.defaultView?.addEventListener('resize', this.#handleViewportChange);
+    // The visual viewport changes alone when a phone's keyboard opens or the
+    // page is pinch-zoomed: no window resize, no scroll of the ground. The
+    // portals follow it as they follow the window.
+    this.#visualViewport = this.#document.defaultView?.visualViewport ?? null;
+    this.#visualViewport?.addEventListener('resize', this.#handleViewportChange);
+    this.#visualViewport?.addEventListener('scroll', this.#handleViewportChange);
 
     this.#render();
 
@@ -2779,8 +2847,14 @@ export class NEditor {
   }
 
   clearHistory(): void {
+    // An empty history clearing is no change, so no event: a listener that
+    // re-reads `canUndo` is told only when something moved.
+    const changed = this.#history.canUndo || this.#history.canRedo;
     this.#history.clear();
-    this.#emitHistory();
+
+    if (changed) {
+      this.#emitHistory();
+    }
   }
 
   getMarkdown(): string {
@@ -3152,11 +3226,23 @@ export class NEditor {
 
     const { block, range } = target;
     const content = this.#contentOf(target);
+    // Armed formatting belongs to one exact caret (`#handleSelectionChange`
+    // ends it when the caret moves), but whether an engine fires the
+    // `selectionchange` that does so after a deletion differs: Chromium kept
+    // the armed marks after a Backspace, Firefox and WebKit dropped them. The
+    // answer is read from the model instead: armed only where it was armed.
+    const armed =
+      this.#pending &&
+      this.#pending.blockId === block.id &&
+      sameCell(this.#pending.cell, target.cell) &&
+      this.#pending.offset === range.start
+        ? this.#pending
+        : null;
     const marks =
       range.start === range.end
         ? // Copied, not aliased: this is the live armed-formatting array, and a
           // caller sorting or splicing it would silently rearm formatting.
-          [...(this.#pending?.marks ?? richMarksAt(content, range.start))]
+          [...(armed?.marks ?? richMarksAt(content, range.start))]
         : richActiveMarks(content, range.start, range.end);
 
     return {
@@ -3245,20 +3331,27 @@ export class NEditor {
     return true;
   }
 
-  /** Opens the link popover for the current selection. */
+  /**
+   * Opens the link popover for the current selection -- or, for a collapsed
+   * caret inside or beside a link, for that whole link, as a click on it
+   * does. A caret in plain text has nothing to edit, and nothing opens.
+   */
   openLinkEditor(): void {
     const target = this.#selectionTarget();
 
-    if (
-      !target ||
-      !this.#editable ||
-      target.range.start === target.range.end ||
-      isLiteralType(target.block.type)
-    ) {
+    if (!target || !this.#editable || isLiteralType(target.block.type)) {
       return;
     }
 
-    const { range, content } = target;
+    const { content } = target;
+    const runs = this.#contentOf(target);
+    const collapsed = target.range.start === target.range.end;
+    const range = collapsed ? linkExtentAt(runs, target.range.start) : target.range;
+
+    if (!range) {
+      return;
+    }
+
     const anchor = this.#selectionRect() ?? content.getBoundingClientRect();
     this.#linkContext = {
       blockId: target.block.id,
@@ -3266,13 +3359,14 @@ export class NEditor {
       end: range.end,
       ...(target.cell ? { cell: target.cell } : {}),
       backward: target.backward,
+      ...(collapsed ? { caret: target.range.start } : {}),
     };
     this.#toolbar.hide();
 
     this.#syncPortalDirection();
     this.#linkEditor.open(
       anchor,
-      richActiveLink(this.#contentOf(target), range.start, range.end),
+      richActiveLink(runs, range.start, range.end),
       pinAnchor(content, anchor),
     );
   }
@@ -3338,13 +3432,11 @@ export class NEditor {
     };
     this.#toolbar.hide();
     this.#syncPortalDirection();
-    this.#mathEditor.open(
+    const anchor =
       this.#mathAnchor(target.content, content, start, existing) ??
-        this.#selectionRect() ??
-        target.content.getBoundingClientRect(),
-      tex,
-      existing,
-    );
+      this.#selectionRect() ??
+      target.content.getBoundingClientRect();
+    this.#mathEditor.open(anchor, tex, existing, pinAnchor(target.content, anchor));
   }
 
   /**
@@ -3718,6 +3810,7 @@ export class NEditor {
     this.#root.removeEventListener('copy', this.#handleCopy);
     this.#root.removeEventListener('cut', this.#handleCopy);
     this.#root.removeEventListener('drop', this.#handleDrop);
+    this.#root.removeEventListener('dragover', this.#handleDragOver);
     this.#root.removeEventListener('pointerdown', this.#handleRootPointerDown);
     this.#root.removeEventListener('pointerover', this.#handlePointerOver);
     this.#root.removeEventListener('pointerleave', this.#handlePointerLeave);
@@ -3726,6 +3819,9 @@ export class NEditor {
       shadow.removeEventListener('scroll', this.#handleViewportChange, true);
     }
     this.#document.defaultView?.removeEventListener('resize', this.#handleViewportChange);
+    this.#visualViewport?.removeEventListener('resize', this.#handleViewportChange);
+    this.#visualViewport?.removeEventListener('scroll', this.#handleViewportChange);
+    this.#visualViewport = null;
     this.#document.removeEventListener('pointermove', this.#handlePointerMove);
     this.#document.removeEventListener('pointerup', this.#handlePointerUp, true);
     this.#document.removeEventListener('pointercancel', this.#handlePointerCancel, true);
@@ -3778,6 +3874,7 @@ export class NEditor {
     this.#renderer.destroy();
     this.#emitter.clear();
     this.#root.classList.remove('neditor');
+    MOUNTED.delete(this.#root);
 
     if (this.#originalClassAttribute === null && this.#root.getAttribute('class') === '') {
       this.#root.removeAttribute('class');
@@ -5182,7 +5279,18 @@ export class NEditor {
       return;
     }
 
-    this.#setBlockSelection(ids);
+    // The same set again is no change, and no event -- but it is still a
+    // call to be in block selection: a page button that calls this twice took
+    // focus off the root in between, and the second call has to give it back
+    // or the next Backspace lands on the button (and, in WebKit, on the page).
+    const visible = new Set(this.#visible().map((block) => block.id));
+    const wanted = new Set(ids.filter((id) => visible.has(id)));
+    const quiet =
+      wanted.size > 0 &&
+      wanted.size === this.#selected.size &&
+      [...wanted].every((id) => this.#selected.has(id));
+
+    this.#setBlockSelection(ids, undefined, { quiet });
   }
 
   /** Leaves block selection, handing the caret back to the text. */
@@ -5238,7 +5346,7 @@ export class NEditor {
   #setBlockSelection(
     ids: readonly string[],
     anchorId?: string,
-    options: { reveal?: boolean; show?: string } = {},
+    options: { reveal?: boolean; show?: string; quiet?: boolean } = {},
   ): void {
     // Selection anchors live in visible space. A block inside a collapsed
     // toggle is not something the reader can point at, and an invisible id in
@@ -5288,6 +5396,12 @@ export class NEditor {
 
     if (shown && (options.reveal ?? true)) {
       this.#reveal(this.#renderer.getView(shown)?.root);
+    }
+
+    // `quiet`: the set did not change (`selectBlocks` with the same ids), so
+    // there is nothing to tell a listener or a screen reader.
+    if (options.quiet) {
+      return;
     }
 
     // Document order, as `getSelectedBlocks()` promises: insertion order is
@@ -5651,7 +5765,10 @@ export class NEditor {
     this.#announce(joinSentences(duplicated, this.#liveRegion.textContent ?? ''));
   }
 
-  /** Replaces the selected blocks with a fresh paragraph holding `char`. */
+  /**
+   * Replaces the selected blocks with a fresh paragraph holding `char` -- an
+   * empty one, for a composition to start in.
+   */
   #replaceSelectionWithText(char: string): void {
     const firstId = this.#orderedSelection()[0];
 
@@ -5938,8 +6055,28 @@ export class NEditor {
       default:
     }
 
-    // Typing over a block selection replaces it, as in any list UI.
-    if (!modifier && !event.altKey && event.key.length === 1) {
+    // A composition, or a dead key's accent, cannot start on the root, which
+    // is no editing host: an IME's keydown is "Process" and a dead key's
+    // "Dead", and the composed text was lost with the blocks still selected.
+    // A keydown reporting keyCode 229 or `isComposing` (all WebKit's says)
+    // never gets here: `#handleKeyDown` gives the selection way for it itself
+    // before routing anything to this handler, so this is a "Process" or
+    // "Dead" key without them. The selection gives way to an
+    // empty paragraph with the caret in it before the default action, so the
+    // composition starts there and ends as any other does.
+    if (event.key === 'Process' || event.key === 'Dead') {
+      this.#replaceSelectionWithText('');
+      return;
+    }
+
+    // Typing over a block selection replaces it, as in any list UI -- with a
+    // character Option types on an Apple platform ("å"), or AltGr elsewhere
+    // ("@" on a German layout), which the event reports as Ctrl+Alt. Alt
+    // alone elsewhere is the browser's menu key, and types nothing.
+    const altGraph = event.getModifierState('AltGraph') && event.ctrlKey && event.altKey;
+    const typed = altGraph || (!modifier && (!event.altKey || this.#applePlatform));
+
+    if (typed && event.key.length === 1) {
       event.preventDefault();
       this.#replaceSelectionWithText(event.key);
     }
@@ -5975,7 +6112,7 @@ export class NEditor {
     const id = this.#imageContext;
     const url = sanitizeImageUrl(src);
 
-    if (!id) {
+    if (!id || !this.#canEdit()) {
       this.#closeImageEditor();
       return;
     }
@@ -5990,12 +6127,15 @@ export class NEditor {
     this.focus(id, CARET_END);
   }
 
-  /** Removing the picture leaves an empty paragraph, not a hole. */
+  /**
+   * Removing the picture leaves a paragraph, not a hole: the caption stays as
+   * its text, and an empty one is an empty line.
+   */
   #removeImage(): void {
     const id = this.#imageContext;
     this.#closeImageEditor();
 
-    if (!id) {
+    if (!id || !this.#canEdit()) {
       return;
     }
 
@@ -9459,6 +9599,9 @@ export class NEditor {
     return tall.side;
   }
 
+  /** The window's visual viewport while mounted, listened to for the keyboard. */
+  #visualViewport: VisualViewport | null = null;
+
   /**
    * Answers the ground moving under the floating UI.
    *
@@ -9538,8 +9681,13 @@ export class NEditor {
     // moment its own input was focused. It moves with its anchor instead. One
     // the user has left is dismissed as before, but focus stays wherever they
     // took it: a scroll is not a choice of where to go.
+    // The equation popover is one of them: closed on every scroll, the TeX
+    // being typed was thrown away and the rest of it went into the prose, and
+    // a click on a formula in a block the window cut never opened it, since
+    // the click's own reveal scrolled.
     for (const [dialog, close] of [
       [this.#linkEditor, (restore: boolean) => this.#closeLinkEditor(restore)],
+      [this.#mathEditor, (restore: boolean) => this.#closeMathEditor(restore)],
       [this.#imageEditor, (restore: boolean) => this.#closeImageEditor(restore)],
       [this.#iconPicker, (restore: boolean) => this.#closeIconPicker(restore)],
     ] as const) {
@@ -9554,11 +9702,6 @@ export class NEditor {
         // focus on the body, so hand it back to the block if there is one.
         close(true);
       }
-    }
-
-    // The math editor has no anchor to follow, and closes as it always did.
-    if (this.#mathEditor.isOpen) {
-      this.#closeMathEditor();
     }
   };
 
@@ -9805,6 +9948,13 @@ export class NEditor {
       return;
     }
 
+    // Armed for one caret only: a deletion that moved it without a
+    // `selectionchange` (Chromium's Backspace) leaves the marks behind.
+    if (range.start !== pending.offset || range.start !== range.end) {
+      this.#pending = null;
+      return;
+    }
+
     event.preventDefault();
     this.#pending = null;
 
@@ -9980,11 +10130,15 @@ export class NEditor {
    * End): the first Backspace deleted the separator, which is no text, so the
    * model did not change, nothing redrew it, and the formula stayed. Firefox's
    * word deletion there deleted nothing at all; Chromium's and WebKit's took
-   * the formula alone, which is what this does in every engine. A deletion
-   * whose target reaches past the formula -- an IME taking back a suggestion
-   * -- is the browser's.
+   * the formula alone, which is what this does in every engine. A character
+   * deletion whose target reaches past the formula -- an IME taking back a
+   * suggestion -- is the browser's. A word deletion never is: Firefox's, in
+   * mid-text, names the formula and the word past it as its target, and
+   * Alt+Backspace after "Area ⟨π r²⟩" took "Area " with it.
    */
   #deleteFormula(event: InputEvent): boolean {
+    const word =
+      event.inputType === 'deleteWordForward' || event.inputType === 'deleteWordBackward';
     const forward =
       event.inputType === 'deleteContentForward' || event.inputType === 'deleteWordForward';
     const backward =
@@ -10007,7 +10161,7 @@ export class NEditor {
     if (
       start < 0 ||
       !isMathRun(richSlice(content, start, start + 1)[0]) ||
-      this.#targetsPastFormula(event, resolved.content, start)
+      (!word && this.#targetsPastFormula(event, resolved.content, start))
     ) {
       return false;
     }
@@ -10394,13 +10548,15 @@ export class NEditor {
     }
 
     // Not where a slash is ordinary text, or where retyping the block would
-    // destroy it. In a code block ` /` is everyday shell; the menu took the
-    // Enter meant for a newline and turned the code into a paragraph. In an
-    // image caption, applying any command retyped the image and deleted its
-    // picture -- the payload `canMergeText` exists to protect.
+    // destroy it. In a code block ` /` is everyday shell, and in a display
+    // equation ` / ` is TeX; the menu took the Enter meant for a newline and
+    // turned the block into a paragraph, or a list holding the TeX before the
+    // `/` (`isLiteralType`). In an image caption, applying any command retyped
+    // the image and deleted its picture -- the payload `canMergeText` exists
+    // to protect.
     const owner = findBlock(this.#blocks, blockId);
 
-    if (!owner || owner.type === 'code' || !canMergeText(owner.type)) {
+    if (!owner || isLiteralType(owner.type) || !canMergeText(owner.type)) {
       return false;
     }
 
@@ -10612,20 +10768,22 @@ export class NEditor {
     // was applied to, and undo put the caret at offset 0. The range the
     // dialog was opened over is that selection -- direction included, which
     // undo restores from here and redo from the selection placed below.
+    // A caret Mod+K opened from is that selection, given back as it was.
+    const given = linkContextSelection(context);
     this.#commitResolved(
       target,
       richSetLink(this.#contentOf(target), context.start, context.end, url),
       null,
       {
         blockId: context.blockId,
-        start: context.start,
-        end: context.end,
+        start: given.start,
+        end: given.end,
         ...(context.cell ? { cell: context.cell } : {}),
-        ...(context.backward ? { backward: true as const } : {}),
+        ...(given.backward ? { backward: true as const } : {}),
       },
     );
     // Shown as Escape shows it (`#closeLinkEditor`).
-    this.#placeRangeInView(target, context.start, context.end, context.backward);
+    this.#placeRangeInView(target, given.start, given.end, given.backward);
     this.#syncToolbar();
   }
 
@@ -10671,7 +10829,7 @@ export class NEditor {
 
     // Nothing written over nothing: a new formula left empty is a cancel.
     if (formula.length === 0 && !context.existing) {
-      this.#focusResolved(target, selection.start, selection.end);
+      this.#placeRangeInView(target, selection.start, selection.end);
       return;
     }
 
@@ -10693,7 +10851,10 @@ export class NEditor {
         ? context.start
         : context.start + formula.length;
 
-    this.#focusResolved(target, caret);
+    // Shown, its host not revealed, as the link editor's Apply is
+    // (`#placeRangeInView`): revealed, a block taller than the window
+    // scrolled the page by its edge.
+    this.#placeRangeInView(target, caret, caret);
     this.#syncToolbar();
   }
 
@@ -10704,11 +10865,17 @@ export class NEditor {
     this.#mathContext = null;
 
     // As for the link popover: back where it was opened from, unless a pointer
-    // dismissed it by placing the caret somewhere else itself.
+    // dismissed it by placing the caret somewhere else itself -- and shown
+    // the same way, its host not revealed (`#placeRangeInView`): Escape from
+    // a block taller than the window scrolled the page by 430px.
     if (context && restoreFocus) {
       const { selection } = context;
+      const target = this.#targetFor(selection.blockId, selection.cell);
 
-      this.focusRange(selection.blockId, selection.start, selection.end, selection.cell);
+      if (target) {
+        this.#placeRangeInView(target, selection.start, selection.end);
+      }
+
       this.#syncToolbar();
     }
   }
@@ -10730,9 +10897,10 @@ export class NEditor {
       // link editor a click opened in a tall block scrolled the page the way
       // the click had (R14-PTR-1).
       const target = this.#targetFor(context.blockId, context.cell);
+      const given = linkContextSelection(context);
 
       if (target) {
-        this.#placeRangeInView(target, context.start, context.end, context.backward);
+        this.#placeRangeInView(target, given.start, given.end, given.backward);
       }
 
       this.#syncToolbar();
@@ -10768,11 +10936,21 @@ export class NEditor {
       const target = this.#resolve(formula);
       const offsets = target ? offsetsOfNode(target.content, formula) : null;
 
+      // A Shift press on the reader's range is no click on the formula
+      // (`#shiftPress`): the press extended the range over it, and opening
+      // the popover replaced that range with a caret after the formula.
+      if (shiftPress) {
+        return;
+      }
+
       // The caret goes after the formula, not over it: `openMathEditor` keeps
       // the selection it opened from for Escape to give back, and a selected
-      // formula given back was replaced by the next key.
+      // formula given back was replaced by the next key. Placed without
+      // revealing its host, as a link's click is (`#placeRangeInView`): the
+      // reveal of a block the window cut scrolled the page, and that scroll
+      // was the ground moving under a popover nobody had typed in yet.
       if (target && offsets && this.#canEdit()) {
-        this.#focusResolved(target, offsets.end);
+        this.#placeRangeInView(target, offsets.end, offsets.end);
         this.openMathEditor();
       }
 
@@ -10945,6 +11123,26 @@ export class NEditor {
   }
 
   /**
+   * Accepts a drag over a picture or a divider, which hold no text: the
+   * browser delivers a drop only where a `dragover` was cancelled, and those
+   * are not editing hosts, so a drop there never arrived (`#dropAfterTextless`
+   * is where it goes). A text host takes its own drops; nothing is accepted
+   * in a read-only view or over anything else.
+   */
+  #handleDragOver = (event: DragEvent): void => {
+    if (!this.#editable || this.#resolve(event.target)) {
+      return;
+    }
+
+    const id = this.#renderer.blockIdFromNode(event.target as Node | null);
+    const block = id === undefined ? undefined : findBlock(this.#blocks, id);
+
+    if (block && (block.type === 'image' || isVoidType(block.type))) {
+      event.preventDefault();
+    }
+  };
+
+  /**
    * A drag from another page or another app, refused as a native edit.
    *
    * The browser's default is to write the dragged fragment straight into the
@@ -10984,6 +11182,9 @@ export class NEditor {
     const resolved = (point && this.#resolve(point.node)) ?? this.#resolve(event.target);
 
     if (!resolved) {
+      // A picture, or a divider: no host of its own holds the point, so the
+      // payload goes after that block, as a drop beside it would.
+      this.#dropAfterTextless(event.target, data.getData('text/html'), data.getData('text/plain'));
       return;
     }
 
@@ -10998,6 +11199,47 @@ export class NEditor {
       () => this.#placeCaretForDrop(resolved, point),
     );
   };
+
+  /**
+   * A drop on a block that has no text host at the point -- an image's
+   * picture, a divider -- inserts the payload after that block, at its depth.
+   * Cancelled with nothing inserted, the drop cursor offered a place that took
+   * nothing. The payload takes the single path every other foreign drop takes
+   * (`#parseClipboard`); only where it goes differs.
+   */
+  #dropAfterTextless(target: EventTarget | null, html: string, plain: string): void {
+    const id = this.#renderer.blockIdFromNode(target as Node | null);
+    const block = id === undefined ? undefined : findBlock(this.#blocks, id);
+
+    if (!block || (block.type !== 'image' && !isVoidType(block.type))) {
+      return;
+    }
+
+    const { blocks: pasted } = this.#parseClipboard(html, plain);
+
+    if (pasted.length === 0) {
+      return;
+    }
+
+    const depths = pastedDepths(pasted, block.depth);
+    const created = pasted.map((item, index) => ({ ...cloneBlock(item), depth: depths[index]! }));
+    const at = findBlockIndex(this.#blocks, block.id) + 1;
+    const blocks = keepVisible(
+      this.#blocks,
+      normalizeDepths(this.#blocks.slice(0, at).concat(created, this.#blocks.slice(at))),
+    );
+
+    this.#commit(blocks);
+
+    const shown = new Set(visibleBlocks(this.#blocks).map((item) => item.id));
+    const landing = [...created]
+      .reverse()
+      .find((item) => shown.has(item.id) && canMergeText(item.type) && !isVoidType(item.type));
+
+    if (landing) {
+      this.focus(landing.id, CARET_END);
+    }
+  }
 
   /**
    * The caret a viewport point names, in whichever spelling this engine ships.
@@ -11672,6 +11914,13 @@ export class NEditor {
     // splits the block instead of committing the candidate, so the whole
     // handler stands down until composition ends.
     if (event.isComposing || event.keyCode === 229 || this.#composing) {
+      // Except over a block selection, where none can be composing: the root
+      // is no editing host. That keydown is the start of one, and the
+      // selection gives way to a paragraph it can start in.
+      if (!this.#composing && this.#selected.size > 0 && this.#canEdit()) {
+        this.#replaceSelectionWithText('');
+      }
+
       return;
     }
 
@@ -11731,9 +11980,16 @@ export class NEditor {
         return;
       }
 
+      // Kept from the browser only when it opened something: a caret in
+      // plain text has no link to edit, as Mod+Shift+E below is not
+      // swallowed where it does nothing.
       if (key === 'k') {
-        event.preventDefault();
         this.openLinkEditor();
+
+        if (this.#linkEditor.isOpen) {
+          event.preventDefault();
+        }
+
         return;
       }
 
@@ -12470,6 +12726,15 @@ export class NEditor {
       return;
     }
 
+    // An empty paragraph has nothing to keep, so the line goes and the next
+    // block stays what it is: merged in, a code block or a heading took the
+    // paragraph's type. An empty line of any other type merges as before.
+    if (block.type === 'paragraph' && isRichEmpty(block.content) && next.type !== 'paragraph') {
+      this.#commit(keepVisible(this.#blocks, normalizeDepths(removeBlock(this.#blocks, block.id))));
+      this.focus(next.id, 0);
+      return;
+    }
+
     const joinAt = richLength(block.content);
     let blocks = updateBlock(this.#blocks, block.id, {
       content: contentForType(block.type, richConcat(block.content, next.content)),
@@ -12487,7 +12752,7 @@ export class NEditor {
    * ↓ off the last block that can hold a caret, when the keyboard has no other
    * way below it.
    *
-   * Enter inside a code block or a table cell is a line break, so a document
+   * Enter inside a code block, an equation or a table cell is a line break, so a document
    * ending in one gave the keyboard no way below it: only a click under the
    * last block opened a paragraph. A document ending in a divider was the same
    * -- the caret cannot stop on one, so ↓ never got past it -- and so is one
@@ -12504,7 +12769,7 @@ export class NEditor {
     if (
       direction !== 1 ||
       !block ||
-      (!passesVoid && block.type !== 'code' && !isTableType(block.type)) ||
+      (!passesVoid && !isLiteralType(block.type) && !isTableType(block.type)) ||
       !this.#canEdit()
     ) {
       return;
@@ -12852,11 +13117,21 @@ export class NEditor {
         // On a link in its own host every engine puts a caret at the press
         // instead of extending, so the editor extends the range there itself,
         // and draws a drag from its anchor as for a press beside the text.
+        // So on a formula, an atom no caret goes inside: the range takes it in
+        // whole, to its far edge (`#extendSelectionOver`); its click opened
+        // the equation popover over a caret after it, and the range was lost.
         const blockId = this.#renderer.blockIdFromNode(pressed);
+        const formula = asElement(node)?.closest<HTMLElement>('.neditor-math') ?? null;
 
-        if (blockId && link) {
+        if (blockId && (link || formula)) {
           event.preventDefault();
-          this.#extendSelectionNear(blockId, event.clientX, event.clientY, node);
+
+          if (formula) {
+            this.#extendSelectionOver(held, formula);
+          } else {
+            this.#extendSelectionNear(blockId, event.clientX, event.clientY, node);
+          }
+
           this.#armPlacedTextDrag(blockId, event.clientX, event.clientY);
           return;
         }
@@ -13219,6 +13494,32 @@ export class NEditor {
       Math.min(anchor, aim.offset),
       Math.max(anchor, aim.offset),
       aim.offset < anchor,
+      false,
+    );
+    this.#revealPlacedCaret(current.content);
+  }
+
+  /**
+   * Extends the reader's range in its own host over a whole formula, to the
+   * formula's far edge, from the end of the range farther from it -- the rule
+   * `#extendSelectionNear` follows for a press in the text.
+   */
+  #extendSelectionOver(current: ResolvedTarget & { range: OffsetRange }, formula: Element): void {
+    const offsets = offsetsOfNode(current.content, formula);
+
+    if (!offsets) {
+      return;
+    }
+
+    const { start, end } = current.range;
+    const anchor = Math.abs(end - offsets.start) > Math.abs(start - offsets.start) ? end : start;
+    const focus = offsets.end <= anchor ? offsets.start : offsets.end;
+
+    this.#focusResolved(
+      current,
+      Math.min(anchor, focus),
+      Math.max(anchor, focus),
+      focus < anchor,
       false,
     );
     this.#revealPlacedCaret(current.content);

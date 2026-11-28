@@ -13,7 +13,7 @@ import {
 import type { TableRows } from '../model/table.ts';
 import { normalizeTableRows } from '../model/table.ts';
 import { normalizeControlCharacters } from '../input/line-breaks.ts';
-import { sanitizeImageUrl, sanitizeUrl } from '../util/url.ts';
+import { sanitizeReadImageUrl, sanitizeReadUrl, sanitizeUrl } from '../util/url.ts';
 import type { MathRenderer } from './math.ts';
 import {
   MATH_ATTR,
@@ -26,6 +26,8 @@ import {
   readingMath,
 } from './math.ts';
 import { SKIP_TAGS } from './skipped.ts';
+import type { WrittenNumber } from '../input/markdown.ts';
+import { keepWrittenNumbers } from '../input/markdown.ts';
 
 /**
  * The bridge between runs and the DOM.
@@ -1448,8 +1450,10 @@ function walk(
     let nextLink = link;
 
     if (tag === 'A') {
-      // An unsafe href is dropped, but its text is kept.
-      nextLink = sanitizeUrl(element.getAttribute('href') ?? '') ?? undefined;
+      // An unsafe href is dropped, but its text is kept -- and so is a
+      // relative one (`CHANGELOG.md`), which names no host: there is no page
+      // here to resolve it against (`sanitizeReadUrl`).
+      nextLink = sanitizeReadUrl(element.getAttribute('href') ?? '') ?? undefined;
     }
 
     // The inline walk recurses per element too, and shares the stack with the
@@ -2419,7 +2423,7 @@ function srcsetSource(srcset: string): string | null {
     // did: with no base URL to resolve it against, a relative candidate would
     // load from the editor's own site, or name a host.
     const candidate = srcset.slice(start, end);
-    const url = ABSOLUTE_URL.test(candidate) ? sanitizeImageUrl(candidate) : null;
+    const url = ABSOLUTE_URL.test(candidate) ? sanitizeReadImageUrl(candidate) : null;
     // `640w` and `2x` both read as their number; no descriptor means `1x`.
     const size = Number.parseFloat(descriptor.trim());
     const weight = Number.isNaN(size) ? 1 : size;
@@ -2440,7 +2444,7 @@ function srcsetSource(srcset: string): string | null {
  * they are the fallback every browser can show. Each passes the same gate.
  */
 function imageSource(image: Element): string | null {
-  const src = sanitizeImageUrl(image.getAttribute('src') ?? '');
+  const src = sanitizeReadImageUrl(image.getAttribute('src') ?? '');
 
   if (src !== null) {
     return src;
@@ -2493,7 +2497,7 @@ function pictureSources(picture: Element): readonly Element[] {
  * Whether the image here is one `pushImage` will actually take.
  *
  * Holding an `<img>` is not the same question: `pushImage` refuses a source
- * `sanitizeImageUrl` rejects — empty, `javascript:`, or a bare relative path —
+ * `sanitizeReadImageUrl` rejects — empty, `javascript:`, or a bare relative path —
  * and `visitBlocks` then recurses into the figure and splits it like anything
  * else. Sealing on the weaker question sealed a subtree that does get split.
  */
@@ -2652,7 +2656,7 @@ function formattingWithin(
   }
 
   // An anchor without an href stands for one whose link is dropped, exactly as
-  // a copy of it would have: `sanitizeUrl` refuses the empty string.
+  // a copy of it would have: `sanitizeReadUrl` refuses the empty string.
   const href = tagNameOf(wrapper) === 'A' ? (wrapper.getAttribute('href') ?? '') : null;
 
   return { link: format.link ?? href, marks, soft };
@@ -5371,7 +5375,7 @@ function titleOf(summary: Element, details: Element): RichText {
   }
 
   const marks = [...format.marks].filter(([, on]) => on).map(([mark]) => mark);
-  const link = format.link === null ? undefined : (sanitizeUrl(format.link) ?? undefined);
+  const link = format.link === null ? undefined : (sanitizeReadUrl(format.link) ?? undefined);
 
   return readRichText(summary, marks, link);
 }
@@ -6364,10 +6368,33 @@ function visitListItemInner(
   visitRun();
 }
 
-function visitList(doc: Document, list: Element, depth: number, out: Block[]): void {
-  const fallback: BlockType = tagNameOf(list) === 'OL' ? 'numbered_list' : 'bulleted_list';
+/**
+ * The number each `<ol>`'s items were drawn with, for `keepWrittenNumbers`:
+ * `start` (1 without one), on by one, or an item's own `value`. Per read.
+ */
+let writtenNumbers = new Map<Block, WrittenNumber>();
 
-  visitListChildren(doc, list, fallback, list.hasAttribute(LIST_ATTR), depth, out);
+/** An `<ol>`'s next item number, as `visitListChildren` reaches its items. */
+interface ListNumbering {
+  next: number;
+  first: boolean;
+}
+
+/** An integer attribute as HTML parses one (`start`, `value`), or null. */
+function integerAttribute(element: Element, name: string): number | null {
+  const value = Number.parseInt(element.getAttribute(name) ?? '', 10);
+
+  return Number.isNaN(value) ? null : value;
+}
+
+function visitList(doc: Document, list: Element, depth: number, out: Block[]): void {
+  const ordered = tagNameOf(list) === 'OL';
+  const fallback: BlockType = ordered ? 'numbered_list' : 'bulleted_list';
+  const numbering = ordered
+    ? { next: integerAttribute(list, 'start') ?? 1, first: true }
+    : undefined;
+
+  visitListChildren(doc, list, fallback, list.hasAttribute(LIST_ATTR), depth, out, numbering);
 }
 
 const LIST_ITEM_DESCENDANTS = new WeakMap<Element, Element | null>();
@@ -6387,6 +6414,7 @@ function visitListChildren(
   declared: boolean,
   depth: number,
   out: Block[],
+  numbering?: ListNumbering,
 ): void {
   let loose: Node[] = [];
 
@@ -6431,7 +6459,27 @@ function visitListChildren(
     lineOpen = false;
 
     if (tag === 'LI') {
+      const before = out.length;
+
       visitListItem(doc, child as Element, fallback, depth, out, declared);
+
+      if (numbering) {
+        // An item's own `value` renumbers the list from it, as a list of its own.
+        const own = integerAttribute(child as Element, 'value');
+        const value = own ?? numbering.next;
+        const item = out[before];
+
+        if (item?.type === 'numbered_list') {
+          writtenNumbers.set(item, {
+            marker: `${value}. `,
+            value,
+            first: numbering.first || own !== null,
+          });
+        }
+
+        numbering.next = value + 1;
+        numbering.first = false;
+      }
       // And ends it: an item ending in an image leaves the line open.
       lineOpen = false;
     } else if (tag !== 'UL' && tag !== 'OL') {
@@ -6445,7 +6493,15 @@ function visitListChildren(
       listNesting += 1;
 
       try {
-        visitListChildren(doc, contentsOf(doc, child as Element), fallback, declared, depth, out);
+        visitListChildren(
+          doc,
+          contentsOf(doc, child as Element),
+          fallback,
+          declared,
+          depth,
+          out,
+          numbering,
+        );
       } finally {
         listNesting -= 1;
       }
@@ -8410,9 +8466,15 @@ function readBlocksFromHtml(doc: Document, html: string, options: HtmlReadOption
 
   ({ first: pasteFirst, last: pasteLast } = contentEdges(template.content));
 
+  const outerNumbers = writtenNumbers;
+  writtenNumbers = new Map();
+
   try {
     visitBlocks(inert, template.content, 0, out);
+    // An `<ol start="5">` is not renumbered from 1: see `keepWrittenNumbers`.
+    keepWrittenNumbers(out, writtenNumbers);
   } finally {
+    writtenNumbers = outerNumbers;
     pasteFirst = new Set();
     pasteLast = new Set();
     plainArbiter = null;
