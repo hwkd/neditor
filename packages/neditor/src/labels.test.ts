@@ -3,7 +3,7 @@ import { describe, expect, test } from 'vitest';
 
 import { NEDITOR_STYLES } from './styles.ts';
 import { DEFAULT_LABELS, pluralLabel, resolveLabels } from './labels.ts';
-import type { NEditorLabels } from './labels.ts';
+import type { NEditorLabels, SlashCommandLabel } from './labels.ts';
 import { createEditor } from './index.ts';
 import { SLASH_COMMANDS, SlashMenu, createSlashCommands, filterCommands } from './ui/slash-menu.ts';
 
@@ -270,6 +270,27 @@ describe('a translation made before a label existed is not lost to English', () 
       expect(labels.blocksMovedUp).toBe(DEFAULT_LABELS.blocksMovedUp);
       expect(labels.blockDuplicated).toBe(DEFAULT_LABELS.blockDuplicated);
     }
+  });
+
+  // `labels` is a runtime option: a JavaScript host or a stored translation file
+  // gives the one field it translates, and the type cannot insist on the rest.
+  // Merged per entry only, `keywords` was `undefined`, and every query that
+  // missed the translated label threw out of the filter on each keystroke.
+  test('an entry that gives only its label keeps the default description and keywords', () => {
+    const labels = resolveLabels({
+      slashCommands: { heading1: { label: 'Titre 1' } as SlashCommandLabel },
+    });
+
+    expect(labels.slashCommands.heading1).toEqual({
+      ...DEFAULT_LABELS.slashCommands.heading1,
+      label: 'Titre 1',
+    });
+
+    const commands = createSlashCommands(labels);
+
+    expect(() => filterCommands('hea', commands)).not.toThrow();
+    expect(filterCommands('hea', commands).map((command) => command.type)).toContain('heading1');
+    expect(filterCommands('tit', commands).map((command) => command.type)).toEqual(['heading1']);
   });
 
   // R4-KEY-2: an older announcement, not any older label. A host that rewords

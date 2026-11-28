@@ -11,11 +11,13 @@ import {
   createBlock,
   descendantsOf,
   duplicateBlocks,
+  findBlockIndex,
   indentBlock,
   indentBlocks,
   hiddenBlockIds,
   moveBlock,
   moveBlocks,
+  moveVisibleBlocks,
   normalizeDepths,
   normalizeDocument,
   removeBlocks,
@@ -307,6 +309,70 @@ describe('moveBlocks', () => {
     const { blocks } = build(['a'], ['b']);
 
     expect(texts(moveBlocks(blocks, new Set(), 0))).toEqual(['a', 'b']);
+  });
+
+  /** Each block's parent text, or null at the root: the tree, as a reader sees it. */
+  const parents = (blocks: readonly Block[]) =>
+    blocks.map((block, at) => {
+      const parent = blocks
+        .slice(0, at)
+        .reverse()
+        .find((above) => above.depth < block.depth);
+
+      return [blockText(block), parent ? blockText(parent) : null];
+    });
+
+  // BL-2: a handle dropped between a parent's children kept its own depth,
+  // and the children after the gap went to it -- "Child two" left the toggle
+  // for the paragraph "Before", and collapsing the toggle no longer hid it.
+  // A drop joins the children it lands among instead, and adopts none.
+  test('a block dropped among a parent’s children joins them and adopts none', () => {
+    const { blocks, ids } = build(['Before', 0], ['tg', 0], ['one', 1], ['two', 1], ['After', 0]);
+
+    expect(parents(moveBlocks(blocks, ids('Before'), 3))).toEqual([
+      ['tg', null],
+      ['one', 'tg'],
+      ['Before', 'tg'],
+      ['two', 'tg'],
+      ['After', null],
+    ]);
+  });
+
+  test('so does one dropped between a list item and its own child', () => {
+    const { blocks, ids } = build(['zero', 0], ['one', 1], ['two', 2], ['After', 0]);
+
+    expect(parents(moveBlocks(blocks, ids('After'), 2))).toEqual([
+      ['zero', null],
+      ['one', 'zero'],
+      ['After', 'one'],
+      ['two', 'one'],
+    ]);
+  });
+
+  test('a group dropped there keeps its own shape', () => {
+    const { blocks, ids } = build(['tg', 0], ['one', 1], ['two', 1], ['p', 0], ['q', 1]);
+
+    expect(parents(moveBlocks(blocks, ids('p', 'q'), 2))).toEqual([
+      ['tg', null],
+      ['one', 'tg'],
+      ['p', 'tg'],
+      ['q', 'p'],
+      ['two', 'tg'],
+    ]);
+  });
+
+  // A child of the moving block after the gap stays its child, as the
+  // keyboard's move (`moveVisibleBlocks`) leaves it: the parent is not
+  // pushed down among them.
+  test('a parent dropped among its own children keeps the ones after the gap', () => {
+    const { blocks, ids } = build(['Before', 0], ['tg', 0], ['one', 1], ['two', 1]);
+
+    expect(parents(moveBlocks(blocks, ids('tg'), 3))).toEqual([
+      ['Before', null],
+      ['one', 'Before'],
+      ['tg', null],
+      ['two', 'tg'],
+    ]);
   });
 });
 
@@ -751,5 +817,402 @@ describe('normalizeDocument caps the output, not the stored depths', () => {
 
     expect(depths(doc.blocks)).toEqual([0, 1, 2]);
     expect(texts(visibleBlocks(doc.blocks))).toEqual(['root', 'toggle']);
+  });
+});
+
+/**
+ * The drop rule, as a property rather than as cases.
+ *
+ * Three rounds patched `moveBlocks` one shape at a time (BL-2, its README
+ * qualification, VV-1), and each left the next shape wrong. So the rule is
+ * stated once here and held over every gap of a seeded fuzz: every block the
+ * move did not take, whose parent it did not take either, has the same parent
+ * afterwards -- the nearest shallower block above it, or the root. Beside it,
+ * the rules AGENTS.md already gives: the depths are re-clamped, and the moved
+ * blocks land as one contiguous group, in document order.
+ */
+describe('moveBlocks keeps every parent it did not move', () => {
+  /** A deterministic generator, so a failure names a case that can be rerun. */
+  function seeded(seed: number): (below: number) => number {
+    let state = seed >>> 0;
+
+    return (below) => {
+      state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+
+      return Math.floor((state / 0x100000000) * below);
+    };
+  }
+
+  /** Blocks at these depths, some of them toggles and some of those collapsed. */
+  function makeDocument(random: (below: number) => number, depths: readonly number[]): Block[] {
+    return depths.map((depth, at) => {
+      const text = String.fromCharCode(65 + at);
+
+      return random(3) === 0
+        ? { ...createBlock('toggle', text, depth), collapsed: random(2) === 0 }
+        : createBlock('paragraph', text, depth);
+    });
+  }
+
+  /** Every legal depth sequence of each size up to `largest`, then `extra` random ones of 3-9 blocks. */
+  function documents(seed: number, largest: number, extra: number): Block[][] {
+    const random = seeded(seed);
+    const out: Block[][] = [];
+    const grow = (depths: number[]) => {
+      if (depths.length >= 3) {
+        out.push(makeDocument(random, depths));
+      }
+
+      if (depths.length < largest) {
+        for (let depth = 0; depth <= depths.at(-1)! + 1; depth += 1) {
+          grow([...depths, depth]);
+        }
+      }
+    };
+    grow([0]);
+
+    for (let round = 0; round < extra; round += 1) {
+      const depths = [0];
+
+      for (let size = 3 + random(7); depths.length < size;) {
+        depths.push(random(depths.at(-1)! + 2));
+      }
+
+      out.push(makeDocument(random, depths));
+    }
+
+    return out;
+  }
+
+  /** Every nonempty subset of `blocks`' ids. */
+  function subsets(blocks: readonly Block[]): Set<string>[] {
+    const out: Set<string>[] = [];
+
+    for (let mask = 1; mask < 1 << blocks.length; mask += 1) {
+      out.push(new Set(blocks.filter((_, at) => mask & (1 << at)).map((block) => block.id)));
+    }
+
+    return out;
+  }
+
+  /** Selections of every shape: contiguous, with gaps, a parent with and without its children. */
+  function selections(random: (below: number) => number, blocks: readonly Block[]): Set<string>[] {
+    const out: Set<string>[] = [];
+
+    for (let at = 0; at < blocks.length; at += 1) {
+      const id = blocks[at]!.id;
+      out.push(new Set([id]));
+      out.push(new Set([id, ...descendantsOf(blocks, id)]));
+      const end = at + random(blocks.length - at);
+      out.push(new Set(blocks.slice(at, end + 1).map((block) => block.id)));
+    }
+
+    for (let round = 0; round < 12; round += 1) {
+      const density = 1 + random(4);
+      const picked = blocks.filter(() => random(6) < density).map((block) => block.id);
+
+      if (picked.length > 0) {
+        out.push(new Set(picked));
+      }
+    }
+
+    return out;
+  }
+
+  const parentOf = (blocks: readonly Block[]) => {
+    const parent = new Map<string, string | null>();
+
+    blocks.forEach((block, at) => {
+      const above = blocks
+        .slice(0, at)
+        .reverse()
+        .find((candidate) => candidate.depth < block.depth);
+      parent.set(block.id, above ? above.id : null);
+    });
+
+    return parent;
+  };
+
+  const name = (blocks: readonly Block[]) =>
+    blocks.map((block) => `${blockText(block)}${block.depth}`).join(' ');
+
+  /** What is wrong with one move, as readable lines; empty when it keeps the rules. */
+  function violations(
+    before: readonly Block[],
+    ids: ReadonlySet<string>,
+    after: readonly Block[],
+    move: string,
+  ): string[] {
+    const label = (id: string | null | undefined) =>
+      id ? blockText(before.find((block) => block.id === id)!) : 'root';
+    const was = parentOf(before);
+    const now = parentOf(after);
+    const out: string[] = [];
+    const where = `${name(before)} | move ${[...ids].map(label).join(',')} ${move} -> ${name(after)}`;
+
+    for (const block of before) {
+      const parent = was.get(block.id)!;
+
+      if (ids.has(block.id) || (parent !== null && ids.has(parent))) {
+        continue;
+      }
+
+      if (now.get(block.id) !== parent) {
+        out.push(
+          `${where}: ${blockText(block)} went from ${label(parent)} to ${label(now.get(block.id))}`,
+        );
+      }
+    }
+
+    if (JSON.stringify(normalizeDepths(after)) !== JSON.stringify(after)) {
+      out.push(`${where}: depths not normalized`);
+    }
+
+    const order = before.filter((block) => ids.has(block.id)).map((block) => block.id);
+    const start = after.findIndex((block) => ids.has(block.id));
+    const landed = after.slice(start, start + order.length).map((block) => block.id);
+
+    if (JSON.stringify(landed) !== JSON.stringify(order)) {
+      out.push(`${where}: the group is not contiguous and in order`);
+    }
+
+    return out;
+  }
+
+  /**
+   * Every selection of every document of up to 6 blocks, and selections of
+   * every shape in random documents of up to 9, moved to every gap.
+   */
+  function fuzz(): { cases: number; failures: string[] } {
+    const random = seeded(20261128);
+    const failures: string[] = [];
+    let cases = 0;
+
+    for (const blocks of documents(20261128, 6, 400)) {
+      const picks = blocks.length <= 6 ? subsets(blocks) : selections(random, blocks);
+
+      for (const ids of picks) {
+        for (let gap = 0; gap <= blocks.length; gap += 1) {
+          cases += 1;
+          const found = violations(blocks, ids, moveBlocks(blocks, ids, gap), `to ${gap}`);
+
+          if (found.length > 0) {
+            failures.push(found.join('; '));
+          }
+        }
+      }
+    }
+
+    return { cases, failures };
+  }
+
+  // VV-1, literally: G and M selected, with a gap between them, dragged above
+  // N. Y's parent was X, and neither moved; the group landed at G's depth 0,
+  // and Y went to G.
+  test('a group with a gap dropped among a moved parent’s children adopts none of the rest', () => {
+    const { blocks, ids } = build(['G', 0], ['P', 0], ['X', 1], ['M', 2], ['N', 3], ['Y', 2]);
+
+    expect(violations(blocks, ids('G', 'M'), moveBlocks(blocks, ids('G', 'M'), 4), 'to 4')).toEqual(
+      [],
+    );
+    expect(texts(moveBlocks(blocks, ids('G', 'M'), 4))).toEqual(['P', 'X', 'G', 'M', 'N', 'Y']);
+  });
+
+  /**
+   * `moveBlocks` and `moveVisibleBlocks` as they were before VV-1, copied
+   * verbatim but for comments, so that the keyboard's move can be held to
+   * exactly what it did: it picks its gap so that the drop's lift never
+   * applies, and the new rule must not change a single one of its answers.
+   */
+  function parentIndexesBefore(blocks: readonly Block[]): number[] {
+    const open: number[] = [];
+
+    return blocks.map((block, at) => {
+      while (open.length > 0 && blocks[open.at(-1)!]!.depth >= block.depth) {
+        open.pop();
+      }
+
+      const parent = open.at(-1) ?? -1;
+      open.push(at);
+
+      return parent;
+    });
+  }
+
+  function moveBlocksBefore(
+    blocks: readonly Block[],
+    ids: ReadonlySet<string>,
+    gapIndex: number,
+  ): Block[] {
+    const moving = blocks.filter((block) => ids.has(block.id));
+
+    if (moving.length === 0) {
+      return [...blocks];
+    }
+
+    const rest = blocks.filter((block) => !ids.has(block.id));
+    const gap = Math.max(0, Math.min(gapIndex, blocks.length));
+    const removedBefore = blocks.slice(0, gap).filter((block) => ids.has(block.id)).length;
+    const at = gap - removedBefore;
+    let after = gap;
+
+    while (after < blocks.length && ids.has(blocks[after]!.id)) {
+      after += 1;
+    }
+
+    const next = blocks[after];
+    const floor = moving.reduce((low, block) => Math.min(low, block.depth), Infinity);
+    const lift =
+      next && next.depth > floor && !ids.has(blocks[parentIndexesBefore(blocks)[after]!]?.id ?? '')
+        ? next.depth - floor
+        : 0;
+    const landing =
+      lift === 0 ? moving : moving.map((block) => ({ ...block, depth: block.depth + lift }));
+
+    return normalizeDepths([...rest.slice(0, at), ...landing, ...rest.slice(at)]);
+  }
+
+  function moveVisibleBlocksBefore(
+    blocks: readonly Block[],
+    ids: ReadonlySet<string>,
+    direction: 1 | -1,
+  ): Block[] {
+    const moving = withHiddenDescendants(blocks, ids);
+    const visible = visibleBlocks(blocks);
+    const selected = visible.filter((block) => moving.has(block.id));
+    const first = selected[0];
+    const last = selected.at(-1);
+
+    if (!first || !last) {
+      return [...blocks];
+    }
+
+    const from = findBlockIndex(visible, first.id);
+    const to = findBlockIndex(visible, last.id);
+
+    if (from === -1 || to === -1) {
+      return [...blocks];
+    }
+
+    if (!visible[direction === -1 ? from - 1 : to + 1]) {
+      return [...blocks];
+    }
+
+    const depth = selected.reduce((low, block) => Math.min(low, block.depth), Infinity);
+    let landingAt = direction === -1 ? from - 1 : to + 2;
+
+    if (direction === -1) {
+      while (landingAt > 0 && visible[landingAt]!.depth > depth) {
+        landingAt -= 1;
+      }
+    } else {
+      const parents = parentIndexesBefore(visible);
+
+      while (
+        visible[landingAt] &&
+        visible[landingAt]!.depth > depth &&
+        !moving.has(visible[parents[landingAt]!]?.id ?? '')
+      ) {
+        landingAt += 1;
+      }
+    }
+
+    const landing = visible[landingAt];
+
+    return moveBlocksBefore(
+      blocks,
+      moving,
+      landing ? findBlockIndex(blocks, landing.id) : blocks.length,
+    );
+  }
+
+  // The keyboard picks its gap so that the drop's lift does not apply -- but
+  // one case escaped that, and it is VV-1 by keyboard: with a gap in the
+  // selection, ↓ lands just before a moving block's second child, the walk
+  // stopping there because that child stays its parent's, and a block after
+  // it whose parent is above the selection went to the group's first block.
+  // G0 P0 X1 M2 N3 O3 Y2 with G and M, ↓, gave P0 X1 N2 G0 M1 O2 Y1, and Y
+  // left X for G. So the answers are held to the old ones exactly, except
+  // where the old one broke the rule going down and the new one keeps it;
+  // and every answer keeps it.
+  test('the keyboard’s move gives the answers it gave before, but where they broke the rule', () => {
+    const random = seeded(20261129);
+    const differ: string[] = [];
+    let cases = 0;
+    let mended = 0;
+
+    for (const blocks of documents(20261129, 7, 400)) {
+      const shown = visibleBlocks(blocks);
+      // The editor's selection holds only blocks the reader can see.
+      const picks = blocks.length <= 7 ? subsets(shown) : selections(random, shown);
+
+      for (const ids of picks) {
+        const moving = withHiddenDescendants(blocks, ids);
+
+        for (const direction of [1, -1] as const) {
+          cases += 1;
+          const now = moveVisibleBlocks(blocks, ids, direction);
+          const was = moveVisibleBlocksBefore(blocks, ids, direction);
+          const step = direction === 1 ? 'down' : 'up';
+          // Against an edge the move is a no-op and gathers nothing, so only
+          // the parents and the depths are asked of every answer.
+          const broken = violations(blocks, moving, now, step).filter(
+            (line) => !line.endsWith('the group is not contiguous and in order'),
+          );
+
+          if (broken.length > 0) {
+            differ.push(broken.join('; '));
+          }
+
+          if (JSON.stringify(now) === JSON.stringify(was)) {
+            continue;
+          }
+
+          if (
+            direction === 1 &&
+            violations(blocks, moving, was, step).length > 0 &&
+            violations(blocks, moving, now, step).length === 0
+          ) {
+            mended += 1;
+          } else {
+            differ.push(`${name(blocks)} | ${step} -> ${name(now)}, was ${name(was)}`);
+          }
+        }
+      }
+    }
+
+    expect(cases).toBeGreaterThan(100_000);
+    expect({ differing: differ.length, first: differ.slice(0, 5) }).toEqual({
+      differing: 0,
+      first: [],
+    });
+    // The exception is real, and it is all the change there is.
+    expect(mended).toBeGreaterThan(0);
+  });
+
+  test('the keyboard’s move keeps every parent it did not move', () => {
+    const { blocks, ids } = build(
+      ['G', 0],
+      ['P', 0],
+      ['X', 1],
+      ['M', 2],
+      ['N', 3],
+      ['O', 3],
+      ['Y', 2],
+    );
+    const moved = moveVisibleBlocks(blocks, ids('G', 'M'), 1);
+
+    expect(violations(blocks, ids('G', 'M'), moved, 'down')).toEqual([]);
+    expect(name(moved)).toBe('P0 X1 N2 G2 M3 O3 Y2');
+  });
+
+  test('over every gap of a seeded fuzz', () => {
+    const { cases, failures } = fuzz();
+
+    expect(cases).toBeGreaterThan(100_000);
+    expect({ failing: failures.length, first: failures.slice(0, 5) }).toEqual({
+      failing: 0,
+      first: [],
+    });
   });
 });

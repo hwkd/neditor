@@ -1141,3 +1141,29 @@ describe('a URL holding a dollar', () => {
     }
   });
 });
+
+describe('a stored relative destination is no host (CB1)', () => {
+  test('a link or image source with no scheme is not promoted to https://<name>/', () => {
+    const doc = normalizeDocument({
+      blocks: [
+        {
+          id: 'p',
+          type: 'paragraph',
+          depth: 0,
+          content: [{ text: 'see the guide', link: 'README.md' }],
+        },
+        { id: 'i', type: 'image', depth: 0, content: [], src: 'logo.png', alt: 'logo' },
+        {
+          id: 'q',
+          type: 'paragraph',
+          depth: 0,
+          content: [{ text: 'site', link: 'https://example.com/' }],
+        },
+      ],
+    } as unknown as Parameters<typeof normalizeDocument>[0]);
+    const [p, i, q] = doc.blocks;
+    expect(p!.content).toEqual([{ text: 'see the guide' }]);
+    expect((i as { src?: string }).src).toBe('');
+    expect(q!.content[0]!.link).toBe('https://example.com/');
+  });
+});

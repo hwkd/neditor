@@ -182,6 +182,86 @@ test.describe('09 · gutter & block drag', () => {
     expect(await editor.ids()).toEqual(['before', 'after', 'tg', 'child1', 'child2']);
   });
 
+  // BL-2: dropped among a parent's children, a block kept its own depth and
+  // took the children after the gap from their parent.
+  test('G8b a block dropped among a parent’s children joins them and adopts none', async ({
+    editor,
+    page,
+  }) => {
+    await editor.load({ doc: 'toggle-open' });
+    await editor.dragBlock('before', 'child1', 'after');
+    expect(await editor.outline()).toEqual([
+      'toggle:Toggle head',
+      '  paragraph:Child one',
+      '  paragraph:Before',
+      '  paragraph:Child two',
+      'paragraph:After',
+    ]);
+    await page.keyboard.press(`${MOD}+z`);
+    expect(await editor.ids()).toEqual(['before', 'tg', 'child1', 'child2', 'after']);
+
+    // Between a list item and its own child.
+    await editor.remount({}, 'nested');
+    await editor.dragBlock('after', 'l1', 'after');
+    expect(await editor.outline()).toEqual([
+      'bulleted_list:Level zero',
+      '  bulleted_list:Level one',
+      '    paragraph:After the list',
+      '    bulleted_list:Level two',
+    ]);
+
+    // A toggle dropped among its own children keeps the ones after the gap,
+    // as Mod+Shift+↓ leaves them.
+    await editor.remount({}, 'toggle-open');
+    await editor.dragBlock('tg', 'child1', 'after');
+    expect(await editor.outline()).toEqual([
+      'paragraph:Before',
+      '  paragraph:Child one',
+      'toggle:Toggle head',
+      '  paragraph:Child two',
+      'paragraph:After',
+    ]);
+  });
+
+  // VV-1: a selection with a gap in it, dropped among the children a moved
+  // parent left behind, landed at its own depth and took the siblings after
+  // them: Y's parent was X, neither moved, and Y went to G.
+  test('G8c a selection with a gap dropped under a moved parent’s child adopts none of the rest', async ({
+    editor,
+    page,
+  }) => {
+    await editor.load({ doc: 'five' });
+    await page.evaluate(() => {
+      const item = (id: string, depth: number) => ({
+        id,
+        type: 'bulleted_list' as const,
+        depth,
+        content: [{ text: id.toUpperCase() }],
+      });
+      const ed = window.__e2e.editor;
+      ed.setDocument({
+        blocks: [
+          item('g', 0),
+          item('p', 0),
+          item('x', 1),
+          item('m', 2),
+          item('n', 3),
+          item('y', 2),
+        ],
+      });
+      ed.selectBlocks(['g', 'm']);
+    });
+    await editor.dragBlock('g', 'n', 'before');
+    expect(await editor.outline()).toEqual([
+      'bulleted_list:P',
+      '  bulleted_list:X',
+      '    bulleted_list:G',
+      '      bulleted_list:M',
+      '      bulleted_list:N',
+      '    bulleted_list:Y',
+    ]);
+  });
+
   test('G10 dragging the block you are typing in leaves block mode whole, with no caret behind', async ({
     editor,
   }) => {

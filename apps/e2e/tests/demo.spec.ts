@@ -118,4 +118,22 @@ test.describe('27 · demo site smoke', () => {
     await expect(page.locator('[data-action="undo"]')).toBeDisabled();
     await expect(page.locator('[data-action="redo"]')).toBeDisabled();
   });
+
+  test('DS5 the lede keeps the space before every element that opens a source line', async ({
+    page,
+  }) => {
+    // Astro's compression dropped the line break before them: "Type**bold**".
+    await page.goto(DEMO_URL);
+    const lede = (await page.locator('.lede').innerText()).replace(/\s+/g, ' ');
+    for (const phrase of [
+      'Type **bold**',
+      'or [text](url)',
+      '# , - ,',
+      'indents, ',
+      'reorder. Esc',
+      'type $x^2$',
+    ]) {
+      expect(lede).toContain(phrase);
+    }
+  });
 });

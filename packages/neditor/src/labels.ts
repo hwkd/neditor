@@ -103,6 +103,12 @@ export interface NEditorLabels {
   /** Formatting toolbar's own name. */
   formatToolbar: string;
 
+  /**
+   * Name of a table wider than a read-only view, which is then a tab stop of
+   * its own so that the keyboard can scroll it sideways.
+   */
+  tableScrollRegion: string;
+
   /** Table toolbar. */
   tableToolbar: string;
   insertRowAbove: string;
@@ -397,6 +403,7 @@ export const DEFAULT_LABELS: NEditorLabels = {
 
   formatToolbar: 'Text formatting',
 
+  tableScrollRegion: 'Scrollable table',
   tableToolbar: 'Table',
   insertRowAbove: 'Insert row above',
   insertRowBelow: 'Insert row below',
@@ -512,10 +519,37 @@ export function resolveLabels(overrides?: Partial<NEditorLabels>): NEditorLabels
     ...later('blocksDuplicated'),
     placeholders: { ...DEFAULT_LABELS.placeholders, ...overrides?.placeholders },
     // Per entry, like placeholders: translating one command must not blank the
-    // other fourteen.
-    slashCommands: { ...DEFAULT_LABELS.slashCommands, ...overrides?.slashCommands },
+    // other fourteen. And per field within an entry: `labels` is a runtime
+    // option, a JavaScript host translates the label alone, and a missing
+    // `keywords` threw out of the menu's filter on every keystroke.
+    slashCommands: slashCommandsWith(overrides?.slashCommands),
     blockTypeNames: { ...typeNames, ...overrides?.blockTypeNames },
   };
+}
+
+/** The default menu with each overridden field of each entry laid over it. */
+function slashCommandsWith(
+  overrides: NEditorLabels['slashCommands'] | undefined,
+): Record<BlockType, SlashCommandLabel> {
+  const merged = { ...DEFAULT_SLASH_COMMANDS };
+
+  for (const [type, entry] of Object.entries(overrides ?? {}) as Array<
+    [BlockType, Partial<SlashCommandLabel> | undefined]
+  >) {
+    const fallback = DEFAULT_SLASH_COMMANDS[type];
+
+    if (entry === undefined || fallback === undefined) {
+      continue;
+    }
+
+    merged[type] = {
+      label: entry.label ?? fallback.label,
+      description: entry.description ?? fallback.description,
+      keywords: entry.keywords ?? fallback.keywords,
+    };
+  }
+
+  return merged;
 }
 
 /**

@@ -92,6 +92,34 @@ test.describe('22 · IME composition', () => {
     expect((await editor.texts())[0]).toBe('Alpha one');
   });
 
+  // TY-2: over a block selection focus is on the root, which is no editing
+  // host, so a composition had nowhere to start: the composed text was lost
+  // and the blocks stayed selected. The IME's own keydown ("Process", 229)
+  // opens an empty paragraph in their place, and the word is composed there.
+  test('IM1c a word composed over a block selection replaces the blocks', async ({
+    editor,
+    page,
+  }) => {
+    await editor.load({ doc: 'paragraphs' });
+    const ime = await Ime.attach(page);
+    await editor.placeCaret('p1', 2);
+    await page.keyboard.press(`${MOD}+a`);
+    await page.keyboard.press(`${MOD}+a`);
+    const selected = await editor.selected();
+    expect(selected.length).toBeGreaterThan(1);
+
+    await ime.imeKey('KeyK');
+    await ime.compose(['か'], '火');
+
+    expect(await editor.texts()).toEqual(['火']);
+    expect(await editor.selected()).toEqual([]);
+
+    // The composition is its own step, and the replacement the one before it.
+    await page.keyboard.press(`${MOD}+z`);
+    await page.keyboard.press(`${MOD}+z`);
+    expect((await editor.ids()).slice(0, selected.length)).toEqual(selected);
+  });
+
   test('IM1b a cancelled candidate changes and records nothing', async ({ editor, page }) => {
     await editor.load({ doc: 'paragraphs' });
     const ime = await Ime.attach(page);

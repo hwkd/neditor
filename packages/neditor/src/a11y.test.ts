@@ -129,6 +129,25 @@ describe('accessible names', () => {
     expect(document.getElementById(labelledBy)?.textContent).toBe('Buy milk');
   });
 
+  // UX P3-3: in a read-only view the checkbox still announced as a checkbox to
+  // press, and pressing it did nothing. "A control is an offer" -- this one
+  // says it cannot be taken, and says so again once the view is editable.
+  test('a read-only to-do checkbox says it is read-only, and stops saying it once editable', () => {
+    const editor = mount([block({ type: 'todo', content: [{ text: 'Buy milk' }] })], {
+      editable: false,
+    });
+    const checkbox = () => editor.element.querySelector('.neditor-block__checkbox')!;
+
+    expect(checkbox().getAttribute('role')).toBe('checkbox');
+    expect(checkbox().getAttribute('aria-readonly')).toBe('true');
+
+    editor.setEditable(true);
+    expect(checkbox().hasAttribute('aria-readonly')).toBe(false);
+
+    editor.setEditable(false);
+    expect(checkbox().getAttribute('aria-readonly')).toBe('true');
+  });
+
   test('the image is a focusable, named control', () => {
     const editor = mount([block({ type: 'image', src: 'https://a.test/x.png', alt: 'A cat' })]);
     const trigger = editor.element.querySelector<HTMLElement>('.neditor-image__trigger')!;

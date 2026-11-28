@@ -76,9 +76,17 @@ export const NEDITOR_STYLES: string = `
   -webkit-font-smoothing: antialiased;
 }
 
+/* The two dark blocks keep the base's specificity, 0,1,0: the theme test sits
+   in :where(), which adds none. They still beat the light base above, being
+   later in this sheet, and a page's own .neditor rule beats them, being later
+   than this sheet (see injectStyles) -- so one host override holds in both
+   themes. At 0,2,0, as plain :not() and attribute selectors made them, every
+   dark-OS visitor lost the host's accent, text and surface. A host that wants
+   a different value in dark mode matches the same condition itself, as the
+   README's Theming section shows. */
 @media (prefers-color-scheme: dark) {
-  .neditor:not([data-neditor-theme='light']),
-  .neditor-portal:not([data-neditor-theme='light']) {
+  .neditor:where(:not([data-neditor-theme='light'])),
+  .neditor-portal:where(:not([data-neditor-theme='light'])) {
     --neditor-text: rgb(255 255 255 / 0.9);
     --neditor-text-muted: rgb(255 255 255 / 0.68);
     --neditor-placeholder: rgb(255 255 255 / 0.64);
@@ -87,8 +95,9 @@ export const NEDITOR_STYLES: string = `
        host happens to paint: on an ordinary light-only page the whole document
        renders at 1.00:1 and disappears. A widget that flips its own ink has to
        own the ground it flips it onto. Consumers who want it to blend can set
-       --neditor-surface back to transparent, which now works from their own
-       stylesheet -- see injectStyles. */
+       --neditor-surface back to transparent from their own stylesheet: this
+       block's specificity is the base's, and the page's sheet comes later --
+       see injectStyles. */
     --neditor-surface: rgb(25 25 25);
     --neditor-surface-raised: rgb(37 37 37);
     --neditor-border: rgb(255 255 255 / 0.11);
@@ -120,8 +129,8 @@ export const NEDITOR_STYLES: string = `
   }
 }
 
-.neditor[data-neditor-theme='dark'],
-.neditor-portal[data-neditor-theme='dark'] {
+.neditor:where([data-neditor-theme='dark']),
+.neditor-portal:where([data-neditor-theme='dark']) {
   --neditor-text: rgb(255 255 255 / 0.9);
   --neditor-text-muted: rgb(255 255 255 / 0.68);
   --neditor-placeholder: rgb(255 255 255 / 0.64);
@@ -1026,7 +1035,8 @@ export const NEDITOR_STYLES: string = `
   display: grid;
   grid-template-columns: repeat(8, 1fr);
   gap: 0.125rem;
-  margin-bottom: 0.375rem;
+  /* Below the field, which comes first in the dialog's order. */
+  margin-block-start: 0.375rem;
 }
 
 .neditor-icon-picker__icon {
@@ -1072,6 +1082,11 @@ export const NEDITOR_STYLES: string = `
 
 .neditor-table-toolbar {
   display: flex;
+  /* Wraps rather than running past the window: positionPortal clamps where a
+     portal goes, not how wide it is, and translated glyph labels made this
+     one wider than a 320px phone. */
+  flex-wrap: wrap;
+  max-inline-size: calc(100vw - 1rem);
   align-items: stretch;
   gap: 0.125rem;
   padding: 0.25rem;
@@ -1265,6 +1280,7 @@ export const NEDITOR_STYLES: string = `
 .neditor-block__checkbox:focus-visible,
 .neditor-image__trigger:focus-visible,
 .neditor-gutter__button:focus-visible,
+.neditor-table:focus-visible,
 .neditor-portal button:focus-visible {
   outline: 2px solid var(--neditor-accent);
   outline-offset: 2px;
@@ -1383,6 +1399,47 @@ export const NEDITOR_STYLES: string = `
     transition: none !important;
   }
 }
+
+/* ------------------------------------------------------- touch targets -- */
+
+/* A finger gets 24 by 24 CSS pixels for every control the renderer draws
+   (WCAG 2.2, 2.5.8). Measured at phone width they were 20 by 24 a pixel apart
+   (the gutter's + and handle), 16 by 16 (the to-do box), 24 by 20 (the
+   chevron) and 21 by 24 (the callout icon). A coarse pointer only: a mouse
+   keeps the compact layout. The gutter's two buttons grow, and the gutter by
+   what they need, a token a host can still set; the other three keep the box
+   they draw and take the press over a band around it, so the text beside them
+   does not move. */
+@media (pointer: coarse) {
+  .neditor {
+    --neditor-gutter-width: 3.375em;
+  }
+
+  .neditor-gutter__button {
+    min-width: 24px;
+    min-height: 24px;
+  }
+
+  .neditor-block__checkbox,
+  .neditor-block__chevron,
+  .neditor-block__icon {
+    position: relative;
+  }
+
+  .neditor-block__checkbox::before,
+  .neditor-block__chevron::before,
+  .neditor-block__icon::before {
+    content: '';
+    position: absolute;
+    inset: -4px;
+  }
+
+  /* Measured from inside the border: 16px less two 1.25px borders, and 5.25px
+     around that, is 24. */
+  .neditor-block__checkbox::before {
+    inset: -5.25px;
+  }
+}
 `;
 
 const STYLE_MARKER = 'data-neditor-styles';
@@ -1407,8 +1464,9 @@ function styleRootFor(node: Node): Document | ShadowRoot {
  *
  * The element goes *first* in its container, so the page's own stylesheet comes
  * after it and wins on equal specificity. That is what makes the documented
- * `.neditor { --neditor-*: ... }` theming recipe work; appending it last meant
- * the package silently overrode every consumer theme.
+ * `.neditor { --neditor-*: ... }` theming recipe work, in the dark themes too,
+ * whose token blocks are held at the base's specificity by `:where()`;
+ * appending it last meant the package silently overrode every consumer theme.
  *
  * `nonce` is forwarded to the `<style>` element, which a `style-src` policy
  * without `'unsafe-inline'` requires — otherwise the editor renders unstyled.

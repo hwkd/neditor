@@ -1239,6 +1239,69 @@ describe('round 2 of the math audit: typing, pasting and copying around formulas
     expect(getSelectionRange(host)).toEqual({ start: 2, end: 2 });
   });
 
+  // MA1: a scroll or a resize -- a software keyboard opening -- closed the
+  // popover and handed focus back to the block, so the TeX being typed went
+  // into the prose. It follows its anchor while it is being typed into, as
+  // the link editor does, and one the reader has left closes where focus is.
+  test('a scroll keeps the popover the reader is typing in, and follows the formula', () => {
+    const editor = mount([block({ id: 'p', content: [{ text: 'a' }, m('x'), { text: 'b' }] })]);
+    const host = hostOf(editor);
+    let top = 300;
+    host.getBoundingClientRect = () => new DOMRect(20, top, 400, 24);
+    const formula = host.querySelector<HTMLElement>('.neditor-math')!;
+    formula.getBoundingClientRect = () => new DOMRect(40, top, 20, 24);
+
+    formula.click();
+    const dialog = document.querySelector<HTMLElement>('.neditor-math-editor')!;
+    const field = dialog.querySelector<HTMLInputElement>('input')!;
+    expect(document.activeElement).toBe(field);
+    const before = dialog.style.top;
+
+    top = 100;
+    document.body.dispatchEvent(new Event('scroll', { bubbles: false }));
+    window.dispatchEvent(new Event('resize'));
+
+    expect(dialog.hidden).toBe(false);
+    expect(document.activeElement).toBe(field);
+    expect(dialog.style.top).not.toBe(before);
+
+    // Left for a page control, a scroll closes it and leaves focus there.
+    const button = document.createElement('button');
+    document.body.append(button);
+    button.focus();
+    document.body.dispatchEvent(new Event('scroll', { bubbles: false }));
+
+    expect(dialog.hidden).toBe(true);
+    expect(document.activeElement).toBe(button);
+  });
+
+  // MA1's other half, and MA2: the click, Escape and Apply each revealed the
+  // whole host, so a click on a formula in a block the window cut scrolled
+  // the page -- and closed the popover it had just opened -- and Escape or
+  // Apply in a block taller than the window scrolled it by the block's edge.
+  test('a click, Escape and Apply place the caret without revealing the host', () => {
+    const editor = mount([block({ id: 'p', content: [{ text: 'a' }, m('x'), { text: 'b' }] })]);
+    const host = hostOf(editor);
+    const scroll = vi.spyOn(HTMLElement.prototype, 'scrollIntoView');
+    const field = (): HTMLInputElement =>
+      document.querySelector<HTMLInputElement>('.neditor-math-editor input')!;
+
+    host.querySelector<HTMLElement>('.neditor-math')!.click();
+    expect(scroll, 'click').not.toHaveBeenCalled();
+
+    field().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(getSelectionRange(host)).toEqual({ start: 2, end: 2 });
+    expect(scroll, 'Escape').not.toHaveBeenCalled();
+
+    host.querySelector<HTMLElement>('.neditor-math')!.click();
+    field().value = 'y';
+    field().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(editor.getDocument().blocks[0]?.content[1]).toEqual(m('y'));
+    expect(getSelectionRange(host)).toEqual({ start: 2, end: 2 });
+    expect(scroll, 'Apply').not.toHaveBeenCalled();
+    scroll.mockRestore();
+  });
+
   test('a digit typed with Shift still takes the formula back (AZERTY)', () => {
     const editor = mount([block({ id: 'p' })]);
     const host = hostOf(editor);
@@ -2048,6 +2111,41 @@ describe('round 2 of the math audit: typing, pasting and copying around formulas
     host.dispatchEvent(event);
 
     expect(event.defaultPrevented).toBe(false);
+  });
+
+  // Firefox's word deletion beside a formula in mid-text names the formula and
+  // the word past it as its target: left to the browser, Alt+Backspace after
+  // "Area ⟨π r²⟩" took "Area " too, and Alt+Delete before it " and".
+  test('a word deletion takes the formula alone, whatever its target ranges reach', () => {
+    for (const [inputType, caret, expected] of [
+      ['deleteWordBackward', 6, 'Area  and '],
+      ['deleteWordForward', 5, 'Area  and '],
+    ] as const) {
+      const editor = mount([
+        block({ id: 'p', content: [{ text: 'Area ' }, m('\\pi r^2'), { text: ' and ' }] }),
+      ]);
+      const host = hostOf(editor);
+      editor.focusRange('p', caret, caret);
+
+      const texts = [...host.childNodes].filter((node) => node.nodeType === 3);
+      const reach = document.createRange();
+
+      if (inputType === 'deleteWordBackward') {
+        reach.setStart(texts[0]!, 0);
+        reach.setEnd(texts[1]!, 0);
+      } else {
+        reach.setStart(texts[0]!, 5);
+        reach.setEnd(texts[1]!, 4);
+      }
+
+      const event = new InputEvent('beforeinput', { inputType, bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'getTargetRanges', { value: () => [reach] });
+      host.dispatchEvent(event);
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(editor.getDocument().blocks[0]?.content).toEqual([{ text: expected }]);
+      editor.destroy();
+    }
   });
 
   test('marks and links are refused in a code block, as in an equation', () => {

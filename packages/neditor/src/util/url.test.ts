@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import { sanitizeImageUrl, sanitizeUrl } from './url.ts';
+import { sanitizeImageUrl, sanitizeReadImageUrl, sanitizeReadUrl, sanitizeUrl } from './url.ts';
 
 /**
  * The README makes explicit promises about which sources are accepted, and
@@ -270,5 +270,38 @@ describe('a user name before the host is dropped', () => {
 
   test('nor is an image source left holding one', () => {
     expect(sanitizeImageUrl('https://a.test@evil.test/x.png')).toBe('https://evil.test/x.png');
+  });
+});
+
+describe('a destination read out of content is never taken for a host', () => {
+  // CB1: `[Contributing](CONTRIBUTING.md)` pasted from a README linked to
+  // `https://contributing.md/`, a stranger's domain, because a file name
+  // passes the host test: `.md`, `.py`, `.zip` and `.png` look like TLDs.
+  test.each(['README.md', 'setup.py', 'release.zip', 'logo.png', 'CHANGELOG.md', 'example.com'])(
+    '%j is a relative path there, so no link',
+    (input) => {
+      expect(sanitizeReadUrl(input)).toBeNull();
+      expect(sanitizeReadImageUrl(input)).toBeNull();
+    },
+  );
+
+  test('typed, a bare host is still assumed to be one', () => {
+    // What people type into the link editor: `example.com/docs`.
+    expect(sanitizeUrl('example.com/docs')).toBe('https://example.com/docs');
+    expect(sanitizeImageUrl('example.com/a.png')).toBe('https://example.com/a.png');
+  });
+
+  test.each([
+    'https://a.test/x',
+    'mailto:hi@a.test',
+    '/docs',
+    '#anchor',
+    '//evil.example/x',
+    '/\\evil.example',
+    'me@example.com',
+    'javascript:alert(1)',
+    'https://google.com@evil.test',
+  ])('%j reads as it does typed', (input) => {
+    expect(sanitizeReadUrl(input)).toBe(sanitizeUrl(input));
   });
 });

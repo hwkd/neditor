@@ -45,6 +45,11 @@ export default defineConfig({
   },
   test: {
     include: ['src/**/*.test.ts'],
+    // The growth tests time their own work and assert a ratio, never a
+    // duration; a per-test timeout is a duration all the same. At the default
+    // 5 s a growth test measured at 2 s alone timed out on CI's four-core
+    // runner once the full suite ran beside it, so the ceiling is wide.
+    testTimeout: 60_000,
     coverage: {
       // `include` alone makes v8 count every matching file, not just the ones
       // the tests happened to import — which is what flattered the number

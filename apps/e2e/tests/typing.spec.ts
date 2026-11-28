@@ -1493,4 +1493,23 @@ test.describe('02b · arrows across block edges', () => {
       expect((await editor.selection())?.blockId).toBe('c');
     });
   }
+  /**
+   * R1-TYPING P3-5. The input rule leaves the caret after `bold` with the mark
+   * switched off, armed for that caret only. A Backspace moves the caret, and
+   * Chromium kept the armed marks in `getSelectionState()` where Firefox and
+   * WebKit dropped them: the state is the model's, in every engine.
+   */
+  test("T14 the marks at a caret after a Backspace are the model's, in every engine", async ({
+    editor,
+    page,
+  }) => {
+    await editor.load({ doc: 'empty' });
+    await editor.clickAt('p1', 0);
+    await page.keyboard.type('**bold**');
+    expect((await editor.selection())?.marks).toEqual([]);
+
+    await page.keyboard.press('Backspace');
+    expect((await editor.texts())[0]).toBe('bol');
+    expect((await editor.selection())?.marks).toEqual(['bold']);
+  });
 });

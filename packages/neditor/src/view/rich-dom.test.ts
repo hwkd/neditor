@@ -4927,8 +4927,16 @@ describe('the plain text decides what a stylesheet preserved', () => {
     };
 
     time({});
-    const without = Math.min(time({}), time({}));
-    const withPlain = Math.min(time({ plain }), time({ plain }));
+    // Up to four readings, keeping the best of each, as `growthOf` does: a
+    // single reading under the full parallel suite failed on bounded code, and
+    // a whole-text search is over the bound on every reading.
+    let without = Infinity;
+    let withPlain = Infinity;
+
+    for (let round = 0; round < 4 && !(withPlain / without < 4); round += 1) {
+      without = Math.min(without, time({}), time({}));
+      withPlain = Math.min(withPlain, time({ plain }), time({ plain }));
+    }
 
     expect(withPlain / without).toBeLessThan(4);
   });
@@ -5088,8 +5096,16 @@ describe('the plain text is read where each block stands in it', () => {
     };
 
     time({});
-    const without = Math.min(time({}), time({}));
-    const withPlain = Math.min(time({ plain }), time({ plain }));
+    // Up to four readings, keeping the best of each, as `growthOf` does: a
+    // single reading under the full parallel suite failed on bounded code, and
+    // a whole-text search is over the bound on every reading.
+    let without = Infinity;
+    let withPlain = Infinity;
+
+    for (let round = 0; round < 4 && !(withPlain / without < 4); round += 1) {
+      without = Math.min(without, time({}), time({}));
+      withPlain = Math.min(withPlain, time({ plain }), time({ plain }));
+    }
 
     expect(withPlain / without).toBeLessThan(4);
   });
@@ -6661,8 +6677,16 @@ describe('a cell spelled differently costs the cells after it in its row nothing
     };
 
     time({});
-    const without = Math.min(time({}), time({}));
-    const withPlain = Math.min(time({ plain }), time({ plain }));
+    // Up to four readings, keeping the best of each, as `growthOf` does: a
+    // single reading under the full parallel suite failed on bounded code, and
+    // a whole-text search is over the bound on every reading.
+    let without = Infinity;
+    let withPlain = Infinity;
+
+    for (let round = 0; round < 4 && !(withPlain / without < 4); round += 1) {
+      without = Math.min(without, time({}), time({}));
+      withPlain = Math.min(withPlain, time({ plain }), time({ plain }));
+    }
 
     expect(withPlain / without).toBeLessThan(4);
   });
@@ -12139,5 +12163,76 @@ describe('the reader builds nothing in the live document', () => {
       '<script type="math/tex" id="MathJax-Element-1">x</script> be.';
 
     expect(madeBy(() => parseRichTextFromHtml(document, html))).toEqual(parsing(html));
+  });
+});
+
+describe('a relative href or src is no URL (CB1)', () => {
+  test('a link to a file keeps its text and no link', () => {
+    const [block] = blocksFromHtml(document, '<p>See <a href="CHANGELOG.md">the log</a>.</p>');
+
+    expect(block!.content).toEqual([{ text: 'See the log.' }]);
+  });
+
+  test('an image with a relative source is no image block', () => {
+    expect(blocksFromHtml(document, '<img src="rel.png">').some((b) => b.type === 'image')).toBe(
+      false,
+    );
+    expect(blocksFromHtml(document, '<img src="https://a.test/rel.png">')[0]?.src).toBe(
+      'https://a.test/rel.png',
+    );
+  });
+});
+
+describe('an ordered list keeps the numbers the model cannot draw (CB3)', () => {
+  const shownHtml = (html: string): Array<readonly [string, number, string]> =>
+    blocksFromHtml(document, html).map((b) => [b.type, b.depth, blockText(b)]);
+
+  test('<ol start="5"> keeps 5 and 6 as text', () => {
+    expect(shownHtml('<ol start="5"><li>five</li><li>six</li></ol>')).toEqual([
+      ['paragraph', 0, '5. five'],
+      ['paragraph', 0, '6. six'],
+    ]);
+  });
+
+  test('a start the model draws anyway stays a list', () => {
+    expect(shownHtml('<ol><li>a</li></ol><ol start="2"><li>b</li></ol>')).toEqual([
+      ['numbered_list', 0, 'a'],
+      ['numbered_list', 0, 'b'],
+    ]);
+  });
+
+  test('an item’s own value keeps it and what follows it', () => {
+    expect(shownHtml('<ol><li>a</li><li value="9">i</li><li>j</li></ol>')).toEqual([
+      ['numbered_list', 0, 'a'],
+      ['paragraph', 0, '9. i'],
+      ['paragraph', 0, '10. j'],
+    ]);
+  });
+
+  test('a nested list from 4 keeps its number; its parent list stays one', () => {
+    expect(shownHtml('<ol><li>a<ol start="4"><li>s</li></ol></li><li>b</li></ol>')).toEqual([
+      ['numbered_list', 0, 'a'],
+      ['paragraph', 1, '4. s'],
+      ['numbered_list', 0, 'b'],
+    ]);
+  });
+
+  test('the writer’s own start is the number it drew, so its lists come back lists', () => {
+    const blocks: Block[] = [
+      { id: 'a', type: 'numbered_list', depth: 0, content: [{ text: 'one' }] },
+      { id: 'b', type: 'paragraph', depth: 1, content: [{ text: 'note' }] },
+      { id: 'c', type: 'numbered_list', depth: 0, content: [{ text: 'two' }] },
+      { id: 'd', type: 'quote', depth: 0, content: [{ text: 'q' }] },
+      { id: 'e', type: 'numbered_list', depth: 0, content: [{ text: 'again' }] },
+      { id: 'f', type: 'paragraph', depth: 0, content: [{ text: '5. kept' }] },
+    ];
+
+    expect(
+      blocksFromHtml(document, blocksToHtml(document, blocks)).map((b) => [
+        b.type,
+        b.depth,
+        blockText(b),
+      ]),
+    ).toEqual(blocks.map((b) => [b.type, b.depth, blockText(b)]));
   });
 });

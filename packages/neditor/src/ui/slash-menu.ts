@@ -208,6 +208,16 @@ export class SlashMenu {
 
       case 'Enter':
       case 'Tab': {
+        // With Shift these are the editor's: a soft break, an outdent or the
+        // way out at depth 0. Taken here, " /quo" and Shift+Enter made the
+        // block a quote. The reader is writing on, not choosing, so the menu
+        // closes, as Escape closes it, and leaves the text and the key alone.
+        if (event.shiftKey) {
+          this.close();
+          this.#hooks.onDismiss();
+          return false;
+        }
+
         const command = this.#commands[this.#activeIndex];
 
         if (command) {

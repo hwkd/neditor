@@ -7,17 +7,21 @@ import Layout from '../layouts/Layout.astro';
     <header class="masthead">
       <p class="eyebrow">@neditor/core</p>
       <h1>A block-based editor, in vanilla JavaScript.</h1>
+      {/* Astro's compression drops the line break before an element that
+           opens a source line, so each such line's space is written out at
+           the end of the line above: left to the break, the copy read
+           "Type**bold**" and "reorder.Esc". */}
       <p class="lede">
         No framework, no runtime dependencies. <strong>Select text</strong> for the format toolbar, or
-        press <kbd>⌘B</kbd> <kbd>⌘I</kbd> <kbd>⌘U</kbd> <kbd>⌘E</kbd> <kbd>⌘K</kbd>. Type
-        <code>**bold**</code>, <code>*italic*</code>, <code>`code`</code> or
-        <code>[text](url)</code> inline — and <kbd>/</kbd>, <code>#&nbsp;</code>,
-        <code>-&nbsp;</code>, <code>[]&nbsp;</code> for blocks. <kbd>Tab</kbd> indents,
+        press <kbd>⌘B</kbd> <kbd>⌘I</kbd> <kbd>⌘U</kbd> <kbd>⌘E</kbd> <kbd>⌘K</kbd>. Type{' '}
+        <code>**bold**</code>, <code>*italic*</code>, <code>`code`</code> or{' '}
+        <code>[text](url)</code> inline — and <kbd>/</kbd>, <code>#&nbsp;</code>,{' '}
+        <code>-&nbsp;</code>, <code>[]&nbsp;</code> for blocks. <kbd>Tab</kbd> indents,{' '}
         <kbd>⌘⇧↑</kbd> moves a block, <kbd>⌘Z</kbd> undoes — a run of typing at a time.{' '}
-        <strong>Hover a block</strong> for its handle: click to select, drag to reorder.
+        <strong>Hover a block</strong> for its handle: click to select, drag to reorder.{' '}
         <kbd>Esc</kbd> steps up from text to the block itself. Paste Markdown or rich
         HTML and it arrives as real blocks. Inside a table, <kbd>Tab</kbd> walks the
-        cells and adds a row at the end. Math is TeX, drawn here by KaTeX: type
+        cells and adds a row at the end. Math is TeX, drawn here by KaTeX: type{' '}
         <code>$x^2$</code> inline or <code>$$</code> for an equation, press <kbd>⌘⇧E</kbd>,
         and click a formula to edit it.
       </p>

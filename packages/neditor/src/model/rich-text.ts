@@ -1,4 +1,4 @@
-import { sanitizeUrl } from '../util/url.ts';
+import { sanitizeReadUrl } from '../util/url.ts';
 
 /**
  * Rich text.
@@ -125,7 +125,7 @@ function makeRun(
   // Every run in the system is built here, which makes this the one place that
   // can guarantee no unsafe href ever enters the model — including runs coming
   // straight out of a database via normalizeDocument.
-  const safeLink = typeof link === 'string' ? sanitizeUrl(link) : null;
+  const safeLink = typeof link === 'string' ? sanitizeReadUrl(link) : null;
 
   if (safeLink) {
     run.link = safeLink;

@@ -8,6 +8,7 @@ import {
   blocksToHtml,
   createEditor,
   normalizeDocument,
+  richToPlainText,
   toMarkdown,
 } from './index.ts';
 import { LINEAR, growth } from './test-timing.ts';
@@ -2355,8 +2356,18 @@ describe('audit 24', () => {
     ]);
   });
 
+  // Not one image whose destination runs to the last `)`. Read inline, it is
+  // the image, then the `(c)` written after it, as CommonMark reads it.
   test('an image line whose parens do not balance is no image', () => {
-    expect(blocksFromMarkdown('![a](https://a.test/x.png)(c)')[0]?.type).toBe('paragraph');
+    expect(
+      blocksFromMarkdown('![a](https://a.test/x.png)(c)').map((block) => [
+        block.type,
+        block.src ?? richToPlainText(block.content),
+      ]),
+    ).toEqual([
+      ['image', 'https://a.test/x.png'],
+      ['paragraph', '(c)'],
+    ]);
   });
 
   test('a URL holding ~~ keeps the escaped spelling', () => {
@@ -2737,7 +2748,9 @@ describe('audit 28', () => {
         blocksFromHtml(document, `<h1>a${'<ul></ul><b> </b>'.repeat(size)}</h1>`);
       }, 12000),
     ).toBeLessThan(LINEAR);
-  }, 60_000);
+    // The largest growth test (a 3 GB heap at the large size): 37 s in the
+    // full suite on a twelve-core machine, so 60 s was not enough on CI's four.
+  }, 120_000);
 
   // Text beside images in a deep chain of formatting carries the chain's
   // formatting in one shell per piece, worked out a level at a time: a copy
@@ -2934,5 +2947,212 @@ describe('formula atom in a link destination', () => {
 
     expect(start([image])[0]?.src).toBe('/i\uFFFC.png');
     expect(blocksFromMarkdown(toMarkdown({ blocks: [image] }))[0]?.src).toBe('/i\uFFFC.png');
+  });
+});
+
+describe('foreign Markdown read once, then round-tripped (CB1-CB3)', () => {
+  const view = (blocks: readonly Block[]): unknown[] =>
+    blocks.map((block) => [
+      block.type,
+      block.depth,
+      block.src ?? '',
+      block.alt ?? '',
+      block.content.map((run) => [run.text, run.link ?? '']),
+    ]);
+
+  test.each([
+    // A README's badge row, its relative links and a numbered step list.
+    '[![ci](https://ci.test/b.png)](https://ci.test/) Build ![cov](https://c.test/c.svg) ok',
+    // A badge whose link is a file in the repository is its picture too (VR1).
+    '[![License](https://img.shields.io/badge/l-MIT-blue.svg)](LICENSE) [![ci](https://ci.test/b.png)](CONTRIBUTING.md) ok',
+    'See [the guide](README.md) and ![logo](logo.png)',
+    '5. five\n6. six\n\nnote\n\n1. one\n2. two',
+    '- item ![x](https://i.test/x.png) after',
+  ])('%j', (markdown) => {
+    const blocks = blocksFromMarkdown(markdown);
+
+    expect(view(blocksFromMarkdown(toMarkdown({ blocks })))).toEqual(view(blocks));
+    expect(view(blocksFromHtml(document, blocksToHtml(document, blocks)))).toEqual(view(blocks));
+  });
+});
+
+describe("an image's `!` is the source's, generated (VX-1)", () => {
+  /**
+   * A seeded fuzz over the characters an inline image is spelled with, beside
+   * every span that can end in one of them: bold, italic, strikethrough and
+   * code runs, links whose label ends in `!` (relative destinations among
+   * them), formulas whose TeX holds `!`, `[` and `]` -- which puts a raw `![`
+   * on the line and turns the reader's image mode on -- and image blocks
+   * between the text blocks. The generator stays inside the round trip's
+   * bounds, the classes `KNOWN_MARKDOWN_FAILURES` names: no empty text
+   * block, no `$` and no trailing backslash in TeX, nothing near
+   * `INLINE_SPAN_LIMIT`, no U+FFFC in a destination. So every case is held
+   * to the property itself, as `survives` asks it. Seeded, so a failure
+   * names its case.
+   */
+  let seed = 20261128;
+  const random = (): number => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+
+    return seed / 0x7fffffff;
+  };
+  const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)]!;
+  const WORDS = [
+    'a',
+    'Hi',
+    'x y',
+    '!',
+    '[',
+    ']',
+    '(',
+    ')',
+    '[x]',
+    '(y)',
+    '*',
+    '_',
+    '$',
+    '\\',
+    '<',
+    '>',
+    '![',
+    '](',
+    '![a](b)',
+    '[c](d)',
+    'x!',
+    '!x',
+  ];
+  const LINKS = [
+    'https://a.test/p',
+    'https://a.test/x.png',
+    'p',
+    'docs/x.png',
+    '../q',
+    'https://a.test/?q=!',
+  ];
+  const TEX = ['a![b]', '!', '[x]', 'a!', '![b](c)', 'x_1', '[0,1)'];
+  const MARKS = [['bold'], ['italic'], ['strikethrough'], ['code']] as const;
+  const word = (): string => pick(WORDS) + (random() < 0.4 ? '!' : '');
+
+  const runs = (): TextRun[] => {
+    const out: TextRun[] = [{ text: word() }];
+
+    for (let at = Math.floor(random() * 5); at > 0; at -= 1) {
+      if (random() < 0.5) {
+        out.push({ text: ' ' });
+      }
+
+      const kind = random();
+
+      if (kind < 0.15) {
+        out.push(m(pick(TEX)) as TextRun);
+      } else if (kind < 0.4) {
+        out.push({ text: word(), link: pick(LINKS) });
+      } else if (kind < 0.7) {
+        out.push({ text: word(), marks: [...pick(MARKS)] });
+      } else {
+        out.push({ text: word() });
+      }
+    }
+
+    return out;
+  };
+  const TYPES = ['paragraph', 'bulleted_list', 'heading1'] as const;
+  const cases = Array.from({ length: 3000 }, (_, at) => {
+    const blocks: Block[] = [];
+
+    for (let count = 1 + Math.floor(random() * 3); count > 0; count -= 1) {
+      blocks.push(b({ type: pick(TYPES), content: runs() }));
+
+      if (count > 1 && random() < 0.3) {
+        blocks.push(
+          b({
+            type: 'image',
+            src: pick(['https://a.test/i.png', 'i.png']),
+            alt: pick(['', 'a!', 'x[y]']),
+          }),
+        );
+      }
+    }
+
+    return [at, blocks] as const;
+  });
+
+  test('every generated document round-trips through Markdown', () => {
+    const failed = cases
+      .filter(([, blocks]) => !survives(blocks, throughMarkdown))
+      .map(([at, blocks]) => `${at}: ${toMarkdown({ blocks: start(blocks) })}`);
+
+    expect(failed.slice(0, 10)).toEqual([]);
+  });
+
+  // The finding's literal inputs, and the same spans with and without a raw
+  // `![` on the line (a formula's TeX), which is what turns image mode on.
+  test.each([
+    [
+      [
+        { text: 'Hi!', link: 'https://a.test/p' },
+        { text: 'next', link: 'https://a.test/q' },
+        { text: ' and ' },
+        m('a![b]'),
+      ],
+    ],
+    [
+      [
+        { text: 'Done!', marks: ['bold'] },
+        { text: 'docs', link: 'https://docs.test/x.png' },
+      ],
+    ],
+    [
+      [
+        { text: 'Done!', marks: ['bold'] },
+        { text: 'docs', link: 'https://docs.test/x.png' },
+        { text: ' ' },
+        m('a![b]'),
+      ],
+    ],
+    [
+      [
+        { text: 'Done!', marks: ['italic'] },
+        { text: 'docs', link: 'https://docs.test/' },
+      ],
+    ],
+    [
+      [
+        { text: 'Done! ', marks: ['bold'] },
+        { text: 'docs', link: 'https://docs.test/' },
+      ],
+    ],
+    [
+      [
+        { text: 'Hi!', link: 'p' },
+        { text: 'next', link: 'q' },
+      ],
+    ],
+    [[{ text: 'Hi!', marks: ['strikethrough'] }, { text: 'next', link: 'q' }, m('[x]!')]],
+  ] as const)('%j round-trips', (content) => {
+    expect(survives([b({ content: content as unknown as TextRun[] })], throughMarkdown)).toBe(true);
+  });
+
+  test("foreign Markdown: a `!` that ends a span is no image's", () => {
+    const [block] = blocksFromMarkdown(
+      '**Done!**[docs](https://docs.test/x.png) ![a](https://a.test/a.png)',
+    );
+
+    expect(block!.content.slice(0, 2)).toEqual([
+      { text: 'Done!', marks: ['bold'] },
+      { text: 'docs', link: 'https://docs.test/x.png' },
+    ]);
+    // A `!` the source puts before the `[` is still an image's, after a span.
+    expect(
+      blocksFromMarkdown('**Done**![a](https://a.test/a.png) ok').map((block) => [
+        block.type,
+        block.src ?? '',
+        richToPlainText(block.content),
+      ]),
+    ).toEqual([
+      ['paragraph', '', 'Done'],
+      ['image', 'https://a.test/a.png', ''],
+      ['paragraph', '', 'ok'],
+    ]);
   });
 });

@@ -169,7 +169,7 @@ inlines the chunk for that path.
 | `injectStyles`    | `boolean`                                  | `true`               | Set `false` to supply your own CSS.                               |
 | `theme`           | `'light' \| 'dark' \| 'auto'`              | `'auto'`             | `auto` follows `prefers-color-scheme`.                            |
 | `toolbar`         | `boolean`                                  | `true`               | Set `false` to suppress the selection toolbar.                    |
-| `historyLimit`    | `number`                                   | `200`                | Undo steps retained.                                              |
+| `historyLimit`    | `number`                                   | `200`                | Undo steps retained; at least 1, so `0` keeps one.                |
 | `dragHandles`     | `boolean`                                  | `true`               | Set `false` to suppress the hover gutter.                         |
 | `onChange`        | `(doc) => void`                            | —                    | Shorthand for `editor.on('change', …)`.                           |
 | `onError`         | `(error) => void`                          | `console.error`      | Called when one of your listeners throws.                         |
@@ -527,7 +527,9 @@ an image" button at all, since a disabled prompt is still an authoring prompt.
 views out of the page, and afterwards `setDocument`, `setEditable` and the edit
 methods do nothing — the instance often outlives the mount point by a callback
 or two, and rendering into a root that has no listeners left produces content
-nothing can edit, style, or remove.
+nothing can edit, style, or remove. One editor mounts on an element at a time:
+constructing a second on an element another editor holds throws until that one
+is destroyed, since both would draw into the same root.
 
 Every getter returns a copy, so callers cannot mutate editor state by reference.
 `getSelectionState()` gives you what you need to drive your own toolbar:
@@ -545,14 +547,14 @@ They compose freely — text can be bold, italic and linked at once.
 
 Select text and the format toolbar appears, or use the keyboard:
 
-| Key                        | Action             |
-| -------------------------- | ------------------ |
-| `⌘`/`Ctrl` + `B`           | Bold               |
-| `⌘`/`Ctrl` + `I`           | Italic             |
-| `⌘`/`Ctrl` + `U`           | Underline          |
-| `⌘`/`Ctrl` + `E`           | Inline code        |
-| `⌘`/`Ctrl` + `Shift` + `X` | Strikethrough      |
-| `⌘`/`Ctrl` + `K`           | Add or edit a link |
+| Key                        | Action                                                       |
+| -------------------------- | ------------------------------------------------------------ |
+| `⌘`/`Ctrl` + `B`           | Bold                                                         |
+| `⌘`/`Ctrl` + `I`           | Italic                                                       |
+| `⌘`/`Ctrl` + `U`           | Underline                                                    |
+| `⌘`/`Ctrl` + `E`           | Inline code                                                  |
+| `⌘`/`Ctrl` + `Shift` + `X` | Strikethrough                                                |
+| `⌘`/`Ctrl` + `K`           | Add or edit a link (with a caret in a link, that whole link) |
 
 With nothing selected, a mark shortcut _arms_ the formatting and the next text
 you type picks it up — the same as any word processor. A partially bold
@@ -675,9 +677,9 @@ Typing these at the start of a paragraph converts the block:
 
 `[x] ` makes a to-do that starts checked. `---` becomes a divider the moment the
 third dash is typed; `***` waits for the space after it, because `***` is also
-how `***bold italic***` begins. None of these fire in a code block, and the
-slash menu does not open there or in an image caption, where `/` is ordinary
-text and a command would retype the block.
+how `***bold italic***` begins. None of these fire in a code block or a display
+equation, and the slash menu does not open in either, or in an image caption,
+where `/` is ordinary text and a command would retype the block.
 
 ` ``` ` opens a code block only when nothing after it on its line holds a
 backtick, as a fence's info string may not in CommonMark: ` ``` ` typed in
@@ -713,7 +715,11 @@ indicator, and `Escape` mid-drag abandons it and does nothing else: the dragged
 blocks stay selected and focus stays in the editor. Dragging a handle that
 belongs to an existing selection moves the whole selection, and a selection with
 gaps in it moves as one contiguous group — the blocks land together at the drop,
-in document order, and whatever sat between them stays where it was. Holding
+in document order, and whatever sat between them stays where it was. Dropped
+among a parent's children, the blocks join them at their depth, and a block
+that was not moved keeps its parent -- the nearest shallower block above it --
+unless that parent was moved; one whose parent was moved goes with the block
+before it. Holding
 the pointer near the top or bottom edge of the visible part of a scroll
 container scrolls it, faster the closer the pointer is, so a block can be moved
 further than one screen. The nearest scrolling ancestor goes first (a `<body>`
@@ -784,18 +790,18 @@ block's text, and a second `⌘A` takes every block.
 
 With blocks selected:
 
-| Key                            | Action                                     |
-| ------------------------------ | ------------------------------------------ |
-| `↑` / `↓`                      | Move the selection.³                       |
-| `Shift` + `↑`/`↓`              | Extend it.                                 |
-| `⌘`/`Ctrl` + `Shift` + `↑`/`↓` | Move the blocks, as one contiguous group.⁴ |
-| `Tab` / `Shift` + `Tab`        | Indent / outdent each one.²                |
-| `Backspace` / `Delete`         | Delete them.                               |
-| `⌘`/`Ctrl` + `D`               | Duplicate them, after what they hold.      |
-| `⌘`/`Ctrl` + `C` / `X`         | Copy or cut, as Markdown and HTML.         |
-| Any character                  | Replace them with a paragraph holding it.  |
-| `Enter`                        | Drop back into the text of the last one.¹  |
-| `Escape`                       | Leave the editor.                          |
+| Key                            | Action                                                                            |
+| ------------------------------ | --------------------------------------------------------------------------------- |
+| `↑` / `↓`                      | Move the selection.³                                                              |
+| `Shift` + `↑`/`↓`              | Extend it.                                                                        |
+| `⌘`/`Ctrl` + `Shift` + `↑`/`↓` | Move the blocks, as one contiguous group.⁴                                        |
+| `Tab` / `Shift` + `Tab`        | Indent / outdent each one.²                                                       |
+| `Backspace` / `Delete`         | Delete them.                                                                      |
+| `⌘`/`Ctrl` + `D`               | Duplicate them, after what they hold.                                             |
+| `⌘`/`Ctrl` + `C` / `X`         | Copy or cut, as Markdown and HTML.                                                |
+| Any character                  | Replace them with a paragraph holding it (an IME or a dead key composes into it). |
+| `Enter`                        | Drop back into the text of the last one.¹                                         |
+| `Escape`                       | Leave the editor.                                                                 |
 
 ¹ The last one that has text: a divider has no caret to take, so `Enter` walks
 back through the selection and, if none of it can hold one, keeps the selection
@@ -861,7 +867,19 @@ the cell, with the caret or range it had there (backward ranges included). The
 toolbar follows its table while the page scrolls -- holding focus, even once the
 table is out of sight, since a scroll does not move focus. Only `F10` itself: with
 `Shift` (the keyboard's context menu), `Ctrl`, `Alt` or `⌘` the key is left to
-the browser and the page.
+the browser and the page. A table wider than a read-only view is a tab stop of
+its own, a region named by `labels.tableScrollRegion` ("Scrollable table"),
+which the arrow keys scroll sideways; it stops being one once the table fits or
+the view is editable, where the cells are the stops. A read-only to-do's
+checkbox stays in the tab order, since it is the to-do's state, and says
+`aria-readonly="true"`. The callout icon picker opens in its field; `Tab` goes
+on into its grid of icons, where the arrows, `Home` and `End` move.
+
+**Touch.** Under a coarse pointer every control the renderer draws takes a press
+over at least 24 by 24 CSS pixels (WCAG 2.2, 2.5.8): the gutter's `+` and handle
+grow, and `--neditor-gutter-width` with them (to `3.375em`); the to-do box, the
+toggle chevron and the callout icon keep the size they are drawn at and take the
+press over a band around it. A mouse keeps the compact layout.
 
 A known limit of read-only mode: its text cannot take a caret, so a click into
 it focuses the nearest focusable thing, which is the editor as a whole (it
@@ -944,7 +962,9 @@ createEditor({
 
 `DEFAULT_LABELS` and the `NEditorLabels` type are exported; anything you leave
 out keeps its default. `placeholders`, `slashCommands` and `blockTypeNames` merge
-per entry, so translating one of them does not blank the rest. `blockTypeNames`
+per entry, so translating one of them does not blank the rest, and a
+`slashCommands` entry merges field by field: one that gives only its `label`
+keeps the default `description` and `keywords`. `blockTypeNames`
 is what a selected block is called in announcements; a type without an entry is
 called by its slash-menu label, and the one default entry (`paragraph:
 'Paragraph'`, since the menu's "Text" is an instruction rather than a name) gives
@@ -1039,30 +1059,31 @@ one pointer per block and there is no inverse operation to get wrong.
 
 ## Keyboard
 
-| Key                              | Action                                                         |
-| -------------------------------- | -------------------------------------------------------------- |
-| `Enter`                          | Split the block. Lists and to-dos continue themselves.         |
-| `Enter` at the start of a block  | Open an empty line above; the block keeps its text.            |
-| `Enter` in a code block          | A newline. Leave with `↓` on its last line, or a click.        |
-| `Enter` on an empty list item    | Leave the list.                                                |
-| `Shift` + `Enter`                | Soft line break inside the block.                              |
-| `Backspace` at the start         | Outdent, then revert to paragraph, then merge upward.          |
-| `Backspace` in an image caption  | Select the image. Reverting it would delete the picture.       |
-| `Backspace` after an image       | Select it (an empty line is removed); a new press deletes it.³ |
-| `Delete` at the end              | Merge the next block in.                                       |
-| `Delete` before an image         | Select it (an empty line is removed), as `Backspace` does.³    |
-| `Tab` / `Shift` + `Tab`          | Indent / outdent.                                              |
-| `↑` / `↓` on a first / last line | Move to the previous / next block, keeping the column.¹        |
-| `←` / `→` at a block's edge      | Move to the end / start of the previous / next block.²         |
-| `⌘`/`⌥`/`Ctrl` + `↑`/`↓`         | The platform's own: start or end of the block, never across.   |
-| `↓` at the end of the document   | After a code block, table or divider, open a paragraph.        |
-| `⌘`/`Ctrl` + `Shift` + `↑`/`↓`   | Move the block itself.                                         |
-| `⌘`/`Ctrl` + `Enter`             | Toggle a to-do.                                                |
-| `⌘`/`Ctrl` + `Shift` + `E`       | Insert or edit an inline equation.                             |
-| `⌘`/`Ctrl` + `Z`                 | Undo.                                                          |
-| `⌘⇧Z` / `Ctrl` + `Y`             | Redo.                                                          |
-| `Escape`                         | Step up from text to the block.                                |
-| `/`                              | Open the command menu.                                         |
+| Key                                               | Action                                                                                                 |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `Enter`                                           | Split the block. Lists and to-dos continue themselves.                                                 |
+| `Enter` at the start of a block                   | Open an empty line above; the block keeps its text.                                                    |
+| `Enter` in a code block                           | A newline. Leave with `↓` on its last line, or a click.                                                |
+| `Enter` on an empty list item                     | Leave the list.                                                                                        |
+| `Shift` + `Enter`                                 | Soft line break inside the block.                                                                      |
+| `Backspace` at the start                          | Outdent, then revert to paragraph, then merge upward.                                                  |
+| `Backspace` in an image caption                   | Select the image. Reverting it would delete the picture.                                               |
+| `Backspace` after an image                        | Select it (an empty line is removed); a new press deletes it.³                                         |
+| `Delete` at the end                               | Merge the next block in; from an empty paragraph, remove it instead, so the next block keeps its type. |
+| `Backspace` after a divider / `Delete` before one | Delete the divider (it holds no text; undo brings it back).                                            |
+| `Delete` before an image                          | Select it (an empty line is removed), as `Backspace` does.³                                            |
+| `Tab` / `Shift` + `Tab`                           | Indent / outdent.                                                                                      |
+| `↑` / `↓` on a first / last line                  | Move to the previous / next block, keeping the column.¹                                                |
+| `←` / `→` at a block's edge                       | Move to the end / start of the previous / next block.²                                                 |
+| `⌘`/`⌥`/`Ctrl` + `↑`/`↓`                          | The platform's own: start or end of the block, never across.                                           |
+| `↓` at the end of the document                    | After a code block, equation, table or divider, open a paragraph.                                      |
+| `⌘`/`Ctrl` + `Shift` + `↑`/`↓`                    | Move the block itself.                                                                                 |
+| `⌘`/`Ctrl` + `Enter`                              | Toggle a to-do.                                                                                        |
+| `⌘`/`Ctrl` + `Shift` + `E`                        | Insert or edit an inline equation.                                                                     |
+| `⌘`/`Ctrl` + `Z`                                  | Undo.                                                                                                  |
+| `⌘⇧Z` / `Ctrl` + `Y`                              | Redo.                                                                                                  |
+| `Escape`                                          | Step up from text to the block.                                                                        |
+| `/`                                               | Open the command menu.                                                                                 |
 
 ¹ Lines as laid out: a wrapped paragraph, a `Shift`+`Enter` break and a code
 block's lines are each walked by the browser first, and the press on the first
@@ -1402,11 +1423,16 @@ Content arriving from outside the editor is **parsed, never inserted as
 markup**. `<script>`, `<style>` and `<iframe>` are dropped entirely, and only
 `http`, `https`, `mailto` and `tel` links survive — `javascript:` and `data:`
 hrefs are stripped while their text is kept. A destination with no scheme that
-looks like a host (`example.com/docs`) becomes `https://…`, and one that is only
-an email address (`me@example.com`), or an address and a query or fragment
+looks like a host (`example.com/docs`) becomes `https://…` where it is typed --
+in the link editor, the image popover, `setLink`, or a Markdown link typed into
+a block. Read out of content -- a pasted or dropped Markdown destination, an
+HTML `href` or `src`, a stored document -- the same destination is a relative
+path (`README.md`, `logo.png`), which names no host and has no page to resolve
+against: an HTML link keeps its text and no link, and a Markdown link or image
+stays the text it was written. A destination that is only an email address
+(`me@example.com`), or an address and a query or fragment
 (`me@example.com?subject=Hello there`), becomes `mailto:…` with the query
-percent-encoded -- typed in the link editor, in Markdown or in pasted HTML
-alike. A user name or password in front of an
+percent-encoded, typed or read alike. A user name or password in front of an
 `http` or `https` host is dropped, because all it still does is disguise the
 host: `https://google.com@evil.test` links to `https://evil.test/`.
 
@@ -1598,6 +1624,20 @@ what is saved and what is loaded again.
 When the clipboard carries no HTML, the plain text is parsed as **Markdown** —
 `# `, `- `, `1. `, `> `, `- [x] `, `---`, fenced code and `$$` equations, plus the
 inline rules.
+So do setext headings (a line of `===` or `---` directly under a paragraph's
+line), `~~~` fences, and an image inside a line, which cuts a paragraph into
+text, picture and text as an inline `<img>` does (a linked badge is its
+picture; inside another link's label it is the inner link, so the outer
+brackets stay text), and goes inside any other block, after its text -- on
+paste only: typing makes no picture, so a typed
+`![a](https://a.test/b.png)` is a `!` and a link to that address (with a
+destination the link rule refuses, such as a bare `b`, it stays text). Indented code,
+reference links and footnotes are read as text. Indentation is nesting: a line
+indented under another becomes its child, so a pasted line's leading spaces
+become its depth. A numbered list the model would draw with numbers other than
+the ones written -- `5. five`, `<ol start="5">`, a lone `1986. A great year` --
+is read as paragraphs that keep their numbers as text, because the model
+numbers a list from 1.
 One line becomes one block, so soft-wrapped prose arrives as several paragraphs.
 Inline parsing replays the same rules used while typing, so pasting `**a**` and
 typing it give the same result. Three things differ, because a paste sees the
@@ -1768,7 +1808,7 @@ The model and both serializers are pure and import-safe with no DOM, so a server
 can read and write documents without a browser:
 
 ```js
-import { blocksFromMarkdown, normalizeDocument, toMarkdown } from '@neditor/core';
+import { blocksFromMarkdown, normalizeDocument, toMarkdown } from '@neditor/core/model';
 
 const doc = normalizeDocument({ blocks: blocksFromMarkdown(markdown) });
 const back = toMarkdown(doc);
@@ -1809,6 +1849,45 @@ touching the injected stylesheet:
   --neditor-indent: 2rem;
 }
 ```
+
+An override like this holds in every theme: the dark token blocks have the same
+specificity as `.neditor` itself, and your stylesheet comes after the injected
+one. So a colour tuned for a light page applies in dark mode too. To give dark
+mode values of its own, match the editor's own conditions after the rule above:
+
+```css
+@media (prefers-color-scheme: dark) {
+  .neditor:not([data-neditor-theme='light']) {
+    --neditor-accent: #ff8a5c;
+  }
+}
+
+.neditor[data-neditor-theme='dark'] {
+  --neditor-accent: #ff8a5c;
+}
+```
+
+The tokens, all on `.neditor` and `.neditor-portal`:
+
+| Token                                                 | What it colours or sizes                                                  |
+| ----------------------------------------------------- | ------------------------------------------------------------------------- |
+| `--neditor-font`, `--neditor-font-mono`               | Text, and code and TeX.                                                   |
+| `--neditor-text`, `--neditor-text-muted`              | Ink, and captions, completed to-dos and quiet controls.                   |
+| `--neditor-placeholder`                               | Placeholders in empty blocks.                                             |
+| `--neditor-surface`, `--neditor-surface-raised`       | The editor's ground (transparent in light, opaque in dark), and portals'. |
+| `--neditor-border`, `--neditor-hover`                 | Dividers and edges, and the tint under a hovered control.                 |
+| `--neditor-accent`, `--neditor-on-accent`             | Active glyphs, focus rings, primary buttons, a checked box, and its tick. |
+| `--neditor-selection`                                 | The tint of a selected block.                                             |
+| `--neditor-code-bg`, `--neditor-code-text`            | Code and equation grounds, and inline code.                               |
+| `--neditor-danger`                                    | Error text: an invalid URL or TeX.                                        |
+| `--neditor-callout-bg`                                | A callout's ground.                                                       |
+| `--neditor-table-border`, `--neditor-table-header-bg` | Table rules, and the header row's ground.                                 |
+| `--neditor-shadow`                                    | The portals' shadow.                                                      |
+| `--neditor-indent`, `--neditor-gutter-width`          | One level of nesting, and the room reserved for the gutter.               |
+
+A colour you change in either half of a pair (`--neditor-accent` and
+`--neditor-on-accent`, the text and the surfaces) has to keep its contrast with
+the other: the defaults are measured against each other, in both themes.
 
 The floating toolbar, slash menu and link editor render outside the editor
 element so they are never clipped. They carry the `.neditor-portal` class and

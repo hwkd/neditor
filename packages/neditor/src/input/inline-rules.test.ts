@@ -1094,9 +1094,36 @@ describe('the formula rule and the destination rules, together', () => {
 
     expect(typed(runsOf(3))).toMatchObject({ math: 'y' });
 
-    const short = elapsed(2000);
-    const long = elapsed(16000);
+    // Up to four readings, keeping the best ratio, as `growthOf` does: one
+    // reading under the full parallel suite failed on linear code (570 ms at
+    // the long size), and a quadratic matcher is over the bound on every one.
+    let short = Infinity;
+    let long = Infinity;
+
+    for (let round = 0; round < 4 && !(long / short < 20); round += 1) {
+      short = Math.min(short, elapsed(2000));
+      long = Math.min(long, elapsed(16000));
+    }
 
     expect(long / short, `${Math.round(short)}ms -> ${Math.round(long)}ms`).toBeLessThan(20);
+  });
+});
+
+describe("the image mode is the reader's alone", () => {
+  test('typing reads no picture and no badge', () => {
+    // Without the option a link behind a `!` is a link match, which the reader
+    // refuses and typing applies: a typed `![a](https://…)` is a `!` and a
+    // link to that address, never a picture. Only the reader asks for one.
+    const typed = matchInlineRule('see ![a](https://a.test/b.png)');
+
+    expect(typed).toMatchObject({ start: 5, link: 'https://a.test/b.png' });
+    expect(typed?.image).toBeUndefined();
+    expect(matchInlineRule('see ![](https://a.test/b.png)')).toBeNull();
+    expect(matchInlineRule('[﷖](https://a.test/)')?.badge).toBeUndefined();
+
+    const read = matchInlineRule('see ![a](https://a.test/b.png)', { images: true });
+
+    expect(read).toMatchObject({ start: 4, openLength: 2, image: true });
+    expect(matchInlineRule('[﷖](LICENSE)', { images: true })?.badge).toBe(true);
   });
 });

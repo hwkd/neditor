@@ -47,6 +47,7 @@ export interface IconPickerHooks {
 export class IconPicker {
   readonly #element: HTMLElement;
   readonly #input: HTMLInputElement;
+  readonly #grid: HTMLElement;
   readonly #hooks: IconPickerHooks;
 
   #open = false;
@@ -84,13 +85,18 @@ export class IconPicker {
 
     const grid = doc.createElement('div');
     grid.className = 'neditor-icon-picker__grid';
+    grid.addEventListener('keydown', (event) => {
+      this.#moveInGrid(event);
+    });
 
-    for (const icon of ICONS) {
+    for (const [index, icon] of ICONS.entries()) {
       const button = doc.createElement('button');
       button.type = 'button';
       button.className = 'neditor-icon-picker__icon';
       button.textContent = icon;
       button.setAttribute('aria-label', icon);
+      // One tab stop for the whole grid; the arrows move within it.
+      button.tabIndex = index === 0 ? 0 : -1;
       button.addEventListener('mousedown', (event) => {
         event.preventDefault();
       });
@@ -101,7 +107,11 @@ export class IconPicker {
       grid.append(button);
     }
 
-    this.#element.append(grid, this.#input);
+    // The field first, in the DOM as on screen. It is where the dialog opens,
+    // and it was last, so Tab from it left the dialog at once and the grid was
+    // reachable only backwards, by Shift+Tab.
+    this.#element.append(this.#input, grid);
+    this.#grid = grid;
   }
 
   get element(): HTMLElement {
@@ -164,6 +174,53 @@ export class IconPicker {
 
   destroy(): void {
     this.#element.remove();
+  }
+
+  /**
+   * Arrow keys, Home and End rove the grid, its one tab stop going with the
+   * focus. Up and down step by the columns the grid is drawn with; left and
+   * right follow the direction it is drawn in.
+   */
+  #moveInGrid(event: KeyboardEvent): void {
+    const buttons = [...this.#grid.querySelectorAll<HTMLButtonElement>('button')];
+    const from = buttons.findIndex((button) => button === event.target);
+
+    if (from === -1 || event.altKey || event.ctrlKey || event.metaKey) {
+      return;
+    }
+
+    const view = this.#grid.ownerDocument.defaultView;
+    const style = view?.getComputedStyle(this.#grid);
+    const columns = Math.max(1, style?.gridTemplateColumns.split(' ').filter(Boolean).length ?? 1);
+    const forward = style?.direction === 'rtl' ? -1 : 1;
+    const steps: Record<string, number> = {
+      ArrowRight: forward,
+      ArrowLeft: -forward,
+      ArrowDown: columns,
+      ArrowUp: -columns,
+      Home: -from,
+      End: buttons.length - 1 - from,
+    };
+    const step = steps[event.key];
+
+    if (step === undefined) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const to = buttons[Math.min(buttons.length - 1, Math.max(0, from + step))];
+
+    if (!to) {
+      return;
+    }
+
+    for (const button of buttons) {
+      button.tabIndex = button === to ? 0 : -1;
+    }
+
+    to.focus();
   }
 
   #commitInput(): void {

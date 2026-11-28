@@ -21,6 +21,23 @@ const AUTHORITY_SCHEMES = new Set(['http:', 'https:']);
  * rather than escaped.
  */
 export function sanitizeUrl(input: string): string | null {
+  return sanitize(input, true);
+}
+
+/**
+ * {@link sanitizeUrl} for a destination read out of content -- a Markdown
+ * destination, an HTML `href` -- rather than typed: one with no scheme is a
+ * relative reference there, never a host. `[Contributing](CONTRIBUTING.md)`
+ * linked to `https://contributing.md/`, a stranger's domain, because a file
+ * name passes for a host (`.md`, `.py`, `.zip` are all registrable). With no
+ * page to resolve it against, it is no link at all. `#…`, `/…`, `//host` and
+ * a bare email address are read as {@link sanitizeUrl} reads them.
+ */
+export function sanitizeReadUrl(input: string): string | null {
+  return sanitize(input, false);
+}
+
+function sanitize(input: string, bareHost: boolean): string | null {
   // TAB, LF and CR are stripped from anywhere in a URL before it is parsed, so
   // a test made on the raw string is a test on something no browser ever sees:
   // `/<TAB>/host` reads as a local path here and opens an authority there.
@@ -85,6 +102,13 @@ export function sanitizeUrl(input: string): string | null {
   const authority = relative.startsWith('//') ? relative.replace(/^\/+/, '') : relative;
   const host = authority.split(/[/?#]/, 1)[0] ?? '';
 
+  // Only typed input gets that assumption (see `sanitizeReadUrl`): read out of
+  // content, a scheme-less `name.ext` is a relative path, and `/^…$/` cannot
+  // tell `README.md` from `example.md`.
+  if (!hasScheme && !bareHost && !relative.startsWith('//')) {
+    return null;
+  }
+
   if (!hasScheme && !/^[^.\s]+(\.[^.\s]+)+$/.test(host)) {
     return null;
   }
@@ -127,6 +151,19 @@ const SAFE_IMAGE_DATA =
  * or a new tab would not.
  */
 export function sanitizeImageUrl(input: string): string | null {
+  return sanitizeImage(input, sanitizeUrl);
+}
+
+/**
+ * {@link sanitizeImageUrl} for a source read out of content: a scheme-less
+ * `logo.png` is a relative path there, as {@link sanitizeReadUrl} reads it,
+ * not the host `https://logo.png/`.
+ */
+export function sanitizeReadImageUrl(input: string): string | null {
+  return sanitizeImage(input, sanitizeReadUrl);
+}
+
+function sanitizeImage(input: string, link: (input: string) => string | null): string | null {
   const trimmed = input.trim();
 
   // Line-wrapped base64 is accepted, and unwrapped: the breaks mean nothing to
@@ -135,7 +172,7 @@ export function sanitizeImageUrl(input: string): string | null {
     return trimmed.replace(/\s+/g, '');
   }
 
-  const url = sanitizeUrl(trimmed);
+  const url = link(trimmed);
 
   if (url === null) {
     return null;

@@ -637,7 +637,8 @@ test.describe('05 · slash menu', () => {
       );
       await page.mouse.click(icon.x + icon.width / 2, icon.y + icon.height / 2);
       const picker = editor.portal('icon-picker');
-      await check('icon picker', picker, iconControl, picker.locator('button').first());
+      // Its field, which comes first and takes the focus as it opens.
+      await check('icon picker', picker, iconControl, picker.getByRole('textbox'));
       await page.keyboard.press('Escape');
 
       const trigger = editor.block('img').locator('.neditor-image__trigger');
@@ -846,5 +847,24 @@ test.describe('05 · slash menu', () => {
     expect(menu.y + menu.height).toBeLessThanOrEqual(block.y + 1);
     expect(menu.y).toBeGreaterThanOrEqual(0);
     await page.keyboard.press('Escape');
+  });
+
+  // BL P3-1, the finding's literal input: " /quo" then Shift+Enter made the
+  // paragraph a quote. Shift+Enter is a soft break in every block.
+  test('SL11 Shift+Enter with the menu open is a soft break, not a choice', async ({
+    editor,
+    page,
+  }) => {
+    await editor.load({ doc: 'paragraphs' });
+    await editor.caretAtEnd('p1');
+    const before = (await editor.blockData('p1'))!.content.map((run) => run.text).join('');
+    await editor.type(' /quo');
+    await expect(editor.portal('slash-menu')).toBeVisible();
+    await page.keyboard.press('Shift+Enter');
+    await expect(editor.portal('slash-menu')).toBeHidden();
+    await editor.type('x');
+    const block = (await editor.blockData('p1'))!;
+    expect(block.type).toBe('paragraph');
+    expect(block.content.map((run) => run.text).join('')).toBe(`${before} /quo\nx`);
   });
 });

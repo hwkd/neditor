@@ -153,6 +153,41 @@ test.describe('20 · theming & visual', () => {
     expect((await measure()).indent).toBeGreaterThan(0);
   });
 
+  /**
+   * The README's recipe is a page rule on `.neditor`, which comes after the
+   * injected sheet. The dark token blocks used to be 0,2,0 (`:not()` and an
+   * attribute selector on top of the class), so in a dark OS under the default
+   * `theme: 'auto'`, and under `theme: 'dark'` anywhere, the host's accent,
+   * text and surface silently lost to them.
+   */
+  test('V7 a host token override holds in every theme', async ({ editor, page }) => {
+    const host = `.neditor, .neditor-portal {
+      --neditor-accent: rgb(212, 56, 13);
+      --neditor-text: rgb(26, 26, 26);
+      --neditor-surface: transparent;
+    }`;
+
+    for (const [scheme, theme] of [
+      ['light', 'auto'],
+      ['dark', 'auto'],
+      ['light', 'dark'],
+      ['dark', 'light'],
+    ] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await editor.load({ doc: 'paragraphs', theme });
+      await page.addStyleTag({ content: host });
+      const where = `${scheme} OS, theme ${theme}`;
+
+      expect(await style(editor.content('p1'), 'color'), where).toBe('rgb(26, 26, 26)');
+      expect(await style(editor.root, 'background-color'), where).toBe('rgba(0, 0, 0, 0)');
+      expect((await style(editor.root, '--neditor-accent')).trim(), where).toBe('rgb(212, 56, 13)');
+      await editor.placeCaret('p1', 0, 5);
+      expect((await style(editor.portal('toolbar'), '--neditor-accent')).trim(), where).toBe(
+        'rgb(212, 56, 13)',
+      );
+    }
+  });
+
   test.describe('V6 screenshot baselines', () => {
     test.beforeEach(({ browserName }) => {
       // Recorded on Linux Chromium only (plan §5): fonts differ everywhere else.

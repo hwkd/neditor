@@ -240,43 +240,10 @@ test.describe('30 · math', () => {
       test(`M5f after a formula that ends a block, deleting ${name} takes the formula with it`, async ({
         editor,
         page,
-        browserName,
       }) => {
         await editor.load({ doc: 'math', math: 'katex' });
         await editor.placeCaret('m2', 11);
         await editor.press('End');
-        // Where this engine's own word rule starts the deletion, read from the
-        // input's target range before the editor sees it: the text before that
-        // start when it reaches past the formula, else null.
-        await page.evaluate(() => {
-          const w = window as unknown as { __wordStart?: string | null };
-          w.__wordStart = undefined;
-          window.addEventListener(
-            'beforeinput',
-            (event) => {
-              if (event.inputType !== 'deleteWordBackward') {
-                return;
-              }
-              const host = (event.target as Element).closest('.neditor-block__content')!;
-              const target = event.getTargetRanges()[0];
-              w.__wordStart = null;
-              if (!target) {
-                return;
-              }
-              const start = document.createRange();
-              start.setStart(target.startContainer, target.startOffset);
-              const formula = document.createRange();
-              formula.setStartBefore(host.querySelector('[data-neditor-math]')!);
-              if (start.compareBoundaryPoints(Range.START_TO_START, formula) < 0) {
-                const before = document.createRange();
-                before.setStart(host, 0);
-                before.setEnd(target.startContainer, target.startOffset);
-                w.__wordStart = before.toString();
-              }
-            },
-            { capture: true },
-          );
-        });
 
         if (chord === 'Shift+Home') {
           await page.keyboard.press(chord);
@@ -285,27 +252,44 @@ test.describe('30 · math', () => {
           await page.keyboard.press(chord);
         }
 
-        // A line deletion takes the line. A word deletion takes the formula:
-        // alone in Chromium and WebKit, and from past the separator in every
-        // engine (Firefox deleted nothing there; M5g). From just after the
-        // formula Firefox's own word rule is the platform's: on macOS its ⌥⌫
-        // asks for the word before the formula too, and the editor leaves a
-        // deletion wider than the formula to the browser; on Linux its
-        // Ctrl+Backspace asks for the formula alone, which the editor takes
-        // (ci-7). So Firefox's expectation is read from its own target range.
-        const wordStart = await page.evaluate(
-          () => (window as unknown as { __wordStart?: string | null }).__wordStart,
-        );
-        if (name === 'a word') {
-          // The chord was a word deletion, so the rule was asked.
-          expect(wordStart).not.toBeUndefined();
-        }
-        const word = browserName === 'firefox' && wordStart != null ? wordStart : 'Ends with ';
+        // A line deletion takes the line. A word deletion takes the formula
+        // alone, the formula being the word, in every engine: Firefox's own
+        // word rule on macOS asks for the word before the formula too (its
+        // target range reaches past it), and left to the browser ⌥⌫ took
+        // "Ends with " with it, as it took "Area " in mid-text (M5h).
         expect((await editor.blockData('m2'))?.content).toEqual(
-          name === 'a word' ? [{ text: word }] : [],
+          name === 'a word' ? [{ text: 'Ends with ' }] : [],
         );
       });
     }
+
+    test('M5h in mid-text, a word deletion either way takes the formula alone, in every engine', async ({
+      editor,
+      page,
+    }) => {
+      const word = process.platform === 'darwin' ? 'Alt' : 'Control';
+      await editor.load({ doc: 'math', math: 'katex' });
+      // Just after the first formula: "Area ⟨π r²⟩| and ⟨r⟩ end".
+      await editor.placeCaret('m1', 6);
+      await page.keyboard.press(`${word}+Backspace`);
+
+      expect((await editor.blockData('m1'))?.content).toEqual([
+        { text: 'Area  and ' },
+        { text: ATOM, math: 'r' },
+        { text: ' end' },
+      ]);
+
+      // Just before it, from a fresh document.
+      await editor.load({ doc: 'math', math: 'katex' });
+      await editor.placeCaret('m1', 5);
+      await page.keyboard.press(`${word}+Delete`);
+
+      expect((await editor.blockData('m1'))?.content).toEqual([
+        { text: 'Area  and ' },
+        { text: ATOM, math: 'r' },
+        { text: ' end' },
+      ]);
+    });
 
     test('M5g from past the separator, a word deletion takes the formula alone, in every engine', async ({
       editor,
@@ -425,6 +409,150 @@ test.describe('30 · math', () => {
       await editor.content('m1').locator('.neditor-math').first().click();
       await expect(editor.portal('math-editor')).toBeHidden();
       expect(await editor.canUndo()).toBe(false);
+    });
+
+    /** Thirty filler paragraphs on each side of `body`, so the page scrolls. */
+    async function scrolling(page: Page, body: unknown): Promise<void> {
+      await page.evaluate((body) => {
+        const fill = (tag: string) =>
+          Array.from({ length: 30 }, (_, i) => ({
+            id: `${tag}${i}`,
+            type: 'paragraph',
+            depth: 0,
+            content: [{ text: `filler ${i}` }],
+          }));
+        window.__e2e.editor.setDocument({
+          blocks: [...fill('f'), body, ...fill('g')],
+        } as never);
+      }, body);
+    }
+
+    const LONG = {
+      id: 't',
+      type: 'paragraph',
+      depth: 0,
+      content: [
+        { text: 'The area is ' },
+        { text: ATOM, math: '\\pi r^2' },
+        {
+          text: ', and the rest of this sentence wraps onto a second line of the paragraph because it is long enough to do that at this width.',
+        },
+      ],
+    };
+
+    // MA1: closed by any scroll, the popover threw away the TeX being typed
+    // and the rest of it went into the prose.
+    test('M6d a scroll keeps the popover being typed in, and the TeX goes on into it', async ({
+      editor,
+      page,
+    }) => {
+      await editor.load({ doc: 'math', math: 'katex' });
+      await scrolling(page, LONG);
+      await editor.content('t').scrollIntoViewIfNeeded();
+      await editor.content('t').locator('.neditor-math').click();
+      const dialog = editor.portal('math-editor');
+      const field = dialog.getByRole('textbox');
+      await expect(field).toBeFocused();
+      // To the field's end: on macOS `End` scrolls rather than moving the caret.
+      await page.keyboard.press('ArrowRight');
+      await page.keyboard.type('+1');
+
+      const box = await editor.content('t').boundingBox();
+      await page.mouse.move(box!.x + 20, box!.y - 40);
+      await page.mouse.wheel(0, 120);
+      await editor.settleScroll();
+      await page.keyboard.type('zz');
+
+      await expect(dialog).toBeVisible();
+      await expect(field).toHaveValue('\\pi r^2+1zz');
+      await field.press('Enter');
+      expect((await editor.blockData('t'))?.content[1]).toEqual({
+        text: ATOM,
+        math: '\\pi r^2+1zz',
+      });
+    });
+
+    // MA1's likeliest form: the click's reveal of a block the window cuts
+    // scrolled the page, and that scroll closed the popover the click opened.
+    test('M6e a click on a formula in a block the window cuts opens it and moves nothing', async ({
+      editor,
+      page,
+    }) => {
+      await editor.load({ doc: 'math', math: 'katex' });
+      await scrolling(page, LONG);
+      await page.evaluate(() => {
+        const host = document.querySelector('[data-block-id="t"] .neditor-block__content')!;
+        scrollBy(0, host.getBoundingClientRect().bottom - innerHeight - 15);
+      });
+      await editor.settleScroll();
+      const before = await page.evaluate(() => scrollY);
+
+      await editor.content('t').locator('.neditor-math').click();
+      await editor.settleScroll();
+
+      const dialog = editor.portal('math-editor');
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByRole('textbox')).toBeFocused();
+      expect(await page.evaluate(() => scrollY)).toBe(before);
+      await page.keyboard.type('+1');
+      expect((await editor.blockData('t'))?.content).toEqual(LONG.content);
+    });
+
+    // MA2: Escape and Apply revealed the whole host, and a block taller than
+    // the window scrolled the page by 430px.
+    test('M6f Escape and Apply in a block taller than the window move nothing', async ({
+      editor,
+      page,
+    }) => {
+      await editor.load({ doc: 'math', math: 'katex' });
+      await scrolling(page, {
+        id: 't',
+        type: 'paragraph',
+        depth: 0,
+        content: [{ text: 'tall '.repeat(1200) }],
+      });
+      await page.evaluate(() => {
+        const host = document.querySelector('[data-block-id="t"] .neditor-block__content')!;
+        scrollBy(0, host.getBoundingClientRect().top - 600);
+      });
+      await editor.settleScroll();
+      const box = await editor.content('t').boundingBox();
+      await page.mouse.click(box!.x + 30, box!.y + 8);
+      await editor.settleScroll();
+      const before = await page.evaluate(() => scrollY);
+      const dialog = editor.portal('math-editor');
+
+      await page.keyboard.press(`${MOD}+Shift+e`);
+      await expect(dialog).toBeVisible();
+      await page.keyboard.press('Escape');
+      await expect(dialog).toBeHidden();
+      await editor.settleScroll();
+      expect(await page.evaluate(() => scrollY), 'Escape').toBe(before);
+
+      await page.keyboard.press(`${MOD}+Shift+e`);
+      await page.keyboard.type('y');
+      await page.keyboard.press('Enter');
+      await expect(dialog).toBeHidden();
+      await editor.settleScroll();
+      expect(await page.evaluate(() => scrollY), 'Apply').toBe(before);
+      expect((await editor.blockData('t'))?.content.some((run) => run.math === 'y')).toBe(true);
+    });
+
+    // MA3: a Shift+click on a formula opened its popover over a caret after
+    // it, and the reader's range was gone. Shift extends the range over it.
+    test('M6g a Shift+click on a formula extends the range over it', async ({ editor }) => {
+      await editor.load({ doc: 'math', math: 'katex' });
+      // "Are" selected; the second formula, ⟨r⟩, is at 11.
+      await editor.placeCaret('m1', 0, 3);
+      await editor
+        .content('m1')
+        .locator('.neditor-math')
+        .nth(1)
+        .click({ modifiers: ['Shift'] });
+      await editor.settle();
+
+      await expect(editor.portal('math-editor')).toBeHidden();
+      expect((await editor.selection())?.range).toEqual({ start: 0, end: 12 });
     });
   });
 

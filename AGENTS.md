@@ -73,7 +73,7 @@ A monorepo for a block-based rich-text editor, packaged as a reusable, framework
 - **Foreign content enters through the parser or not at all — and pasting is not the only way in.** A drop carries the same flavours as a clipboard, and the browser's default for one is to write the dragged fragment straight into a live editing host; because typing is DOM-first, `#syncFromDom` then reads that fragment back as the block's own content, the model agrees with the DOM, and nothing later renders it away. So an `<iframe>`, a password form or a fixed full-viewport overlay dragged in from another page _persists_. `#handleDrop` cancels the drop unconditionally — before any check that might give up — and re-enters the payload through `#insertForeignContent`, the single path paste also takes; `#handleBeforeInput` refuses `UNPARSED_INPUT_TYPES` as the backstop for anything that slips past either handler. Any new way content can arrive belongs on that path, never on the browser's default.
 - **Input rules fire on insertion, not on deletion.** `#tryBlockRule`, `#tryInlineRule` and `#tryOpenSlashMenu` read the text before the caret and treat it as text just typed; a deletion leaves the identical text there without anyone having typed it, so backspacing the word after a `# ` converted the block and ate the prefix. `#handleInput` gates them on `isInsertion(event)`. `#updateSlashQuery` is deliberately ahead of that gate — an open menu reads the text rather than acting on it, and must still narrow on Backspace and close when the `/` goes. It is also asked on `compositionend`, because `#handleInput` stands down while composing and a query composed through an IME was otherwise never read. A character typed _into_ an inline code run closes no span (`#tryInlineRule` asks only the character that completes the match): typing a line from scratch never puts that character in code, so this cannot split typing from pasting -- hiding a code run's whole text from the rules would, and was reverted for exactly that.
 - Floating UI is portalled to the mount's root node (`document.body` for an ordinary mount, the shadow root otherwise, or `portalContainer`), so it sits outside `.neditor` and inherits neither its custom properties nor its direction — `#syncPortalDirection` copies `dir` across on focus and again as each portal opens. Use `ui/portal.ts`: it applies the `neditor-portal` class the theme tokens key off, and `positionPortal` measures the real element rather than estimating -- and lifts an anchor measured in the editor's window through the frames to the portal's own (`setAnchorView`), by each frame's offset and its drawn-over-layout scale, since a `transform` or `zoom` around the frame scales everything inside it (WebKit under `zoom` excepted, a documented limit), for a `portalContainer` in the page around an iframe mount -- and chooses the side of the anchor it goes on by what the pages around an iframe mount show of the frame (`setAnchorBand`, answered by `#frameBand`), not by the frame's whole window, which a pane around the frame or a page's window shorter than the frame cuts -- only what clips the page the portal is drawn in, though: a `portalContainer` in the page around the frame is cut by neither that page's panes nor the frame; the band chooses the side only, and the portal is clamped to its own viewport, never across its anchor. Never call `scrollIntoView` inside a fixed portal — it scrolls the page to the portal's layout origin. Portals follow the ground scrolling under them through `#handleViewportChange`, which listens in the capture phase on the document _and_ on every shadow root the editor is drawn inside -- climbed through the flat tree (`flatParent`: the `<slot>` an element is assigned to before its parent, so the shadow pane of an `<ion-content>` the editor is slotted into counts) and read once, at mount -- and, for an iframe mount, on every same-origin document around the frame and the shadow roots the frame is drawn in: a scroll inside a shadow tree is not composed, and the document never hears it. The clip climb (`clipChainOf`), the drag's auto-scroll (`#scrollTargets`) and these listeners climb the same flat tree; keep them in agreement.
-- Styles live as a string in `src/styles.ts` and are injected at runtime. This is what lets the package work with no CSS loader. Theme through the custom properties on `.neditor`.
+- Styles live as a string in `src/styles.ts` and are injected at runtime. This is what lets the package work with no CSS loader. Theme through the custom properties on `.neditor`. The dark token blocks are held at `.neditor`'s own specificity by `:where()`, so a host's `.neditor { --neditor-* }` rule, which comes after the injected sheet, wins in every theme.
 
 - **A formula is an atom, and its TeX is the whole of it.** An inline formula is
   one run, `{ text: MATH_ATOM, math: tex }`: one character of offset whatever it
@@ -91,9 +91,11 @@ A monorepo for a block-based rich-text editor, packaged as a reusable, framework
   `Backspace` after a formula and `Delete` before one -- and a word deletion
   either way, the formula being the word -- are taken model-first
   (`#deleteFormula`), or the first press deleted the separator and nothing else
-  (Firefox's word deletion, nothing at all). A deletion whose target ranges
-  reach past the formula, read in model offsets (`offsetAt`), is the
-  browser's: an IME taking back more than one character knows what it means. A display equation is a `math`
+  (Firefox's word deletion, nothing at all). A character deletion whose target
+  ranges reach past the formula, read in model offsets (`offsetAt`), is the
+  browser's: an IME taking back more than one character knows what it means.
+  A word deletion never is: Firefox's, in mid-text, names the word past the
+  formula too, and Alt+Backspace took it. A display equation is a `math`
   block whose content is its TeX, literal like a code block's: `isLiteralType`
   is the test, `contentForType` is how anything enters one.
 - **Rendering math is the host's, through `renderMath`, and its output is
@@ -571,7 +573,8 @@ Run `vp run ready` (check, test, build). `vp -C apps/web run check` additionally
   cancels nothing. It selects the link without revealing its host and
   brings only the link's own end into view where it is not wholly on
   screen (`#placeRangeInView`, as `#revealPlacedCaret`), and so do the
-  link editor's Escape and Apply when they put the range back: revealed,
+  link editor's Escape and Apply when they put the range back, and the
+  equation popover's click, Escape and Apply: revealed,
   a block taller than the window scrolled 100-300px and the link left the
   pointer, one cut at the window's edge 41-158px (R14-PTR-1). A link
   whose own line the window's edge cuts moves by what shows it, 2-10px
@@ -753,7 +756,8 @@ Run `vp run ready` (check, test, build). `vp -C apps/web run check` additionally
   and while it is operated a scroll still re-places it against that cell --
   even once the cell is out of sight, since hiding it would drop its focus on
   the page and a scroll is not a choice of where to go (the focused dialogs
-  follow their anchor the same way). With only the caret in the cell it is
+  follow their anchor the same way, the equation popover among them: closed
+  on a scroll, the TeX being typed went into the prose). With only the caret in the cell it is
   the format toolbar's sibling instead: hidden once the cell leaves the
   screen (`#onScreen`, which clips against every scroller that clips the
   editor -- `#visibleBand`, the climb (`clipChainOf`, through the flat
@@ -952,7 +956,11 @@ Run `vp run ready` (check, test, build). `vp -C apps/web run check` additionally
   covers read-only: the image trigger is `disabled` there rather than left as a
   tab stop that answers with silence, and an empty image's "Add an image"
   button is not drawn at all, because a disabled prompt is still an authoring
-  prompt.
+  prompt. A read-only to-do's checkbox stays a focusable `role="checkbox"`,
+  since it is the to-do's state, and says `aria-readonly="true"`. A table
+  wider than a read-only view is a tab stop and a named region
+  (`labels.tableScrollRegion`) only while it overflows, since nothing inside
+  it can take focus and WebKit never stops on a scroller.
 
 - **A newline at the end of a block has no line box of its own.** Under
   `white-space: pre-wrap` the last break ends the last line and there is nothing

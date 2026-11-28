@@ -388,4 +388,51 @@ test.describe('23 · touch', () => {
     expect(await editor.ids()).toEqual(ids);
     expect(await editor.selected()).toEqual([]);
   });
+
+  // UX P3-2, measured at phone width: the gutter's + and handle were 20 by 24 a
+  // pixel apart, the to-do box 16 by 16, the chevron 24 by 20, the callout
+  // icon 21 by 24. WCAG 2.2's 2.5.8 asks 24 by 24 of each. Measured by what a
+  // press lands on, since the to-do box, chevron and icon keep the box they draw.
+  test('TO6 every control the renderer draws takes a press over 24 by 24 CSS pixels', async ({
+    editor,
+    page,
+  }) => {
+    await editor.load({ doc: 'kitchen-sink' });
+    const finger = await Finger.attach(page);
+    const reach = (selector: string) =>
+      page.evaluate((selector) => {
+        const element = document.querySelector<HTMLElement>(selector)!;
+        element.scrollIntoView({ block: 'center' });
+        const box = element.getBoundingClientRect();
+        const [x, y] = [box.x + box.width / 2, box.y + box.height / 2];
+        const lands = (dx: number, dy: number) => {
+          const target = document.elementFromPoint(x + dx, y + dy);
+          return target !== null && element.contains(target);
+        };
+        // The band through the centre a press still lands on, each way.
+        let across = 0;
+        let down = 0;
+        while (lands(-across - 0.5, 0) && lands(across + 0.5, 0)) across += 0.5;
+        while (lands(0, -down - 0.5) && lands(0, down + 0.5)) down += 0.5;
+        return { across: 2 * across + 1, down: 2 * down + 1 };
+      }, selector);
+
+    for (const selector of [
+      '.neditor-block__checkbox',
+      '.neditor-block__chevron',
+      '.neditor-block__icon',
+    ]) {
+      const { across, down } = await reach(selector);
+      expect(across, `${selector} across`).toBeGreaterThanOrEqual(24);
+      expect(down, `${selector} down`).toBeGreaterThanOrEqual(24);
+    }
+
+    await tapBlock(editor, finger, (await editor.ids())[0]!);
+    await expect(editor.gutter).toHaveAttribute('data-visible', 'true');
+    for (const button of await editor.gutter.locator('button').all()) {
+      const box = (await button.boundingBox())!;
+      expect(box.width).toBeGreaterThanOrEqual(24);
+      expect(box.height).toBeGreaterThanOrEqual(24);
+    }
+  });
 });

@@ -171,4 +171,33 @@ test.describe('12 · drop', () => {
     expect(texts[0]).toBe('Alpha one');
     expect(texts[2]).toBe('CharlieAlpha three');
   });
+  /**
+   * R1-CLIPBOARD P3. A drop on a divider or on an image's picture is not on a
+   * text host: it was cancelled and inserted nothing.
+   */
+  test('D9 a drop on a divider or on a picture inserts the payload after that block', async ({
+    editor,
+    page,
+  }) => {
+    await editor.load({ doc: 'divider' });
+    await page.evaluate(() =>
+      window.__e2e.setDragPayload({ html: '<p>dropped</p>', text: 'dropped' }),
+    );
+    await page.locator('#foreign-source').dragTo(editor.root.locator('[data-block-id="hr"]'));
+    expect(await editor.texts()).toEqual(['Above', '', 'dropped', 'Below']);
+
+    await editor.load({ doc: 'image' });
+    await page.evaluate(() =>
+      window.__e2e.setDragPayload({ html: '<p>dropped</p>', text: 'dropped' }),
+    );
+    await page
+      .locator('#foreign-source')
+      .dragTo(editor.root.locator('[data-block-id="img"] .neditor-image__trigger'));
+    expect(await editor.texts()).toEqual([
+      'Before the image',
+      'A caption',
+      'dropped',
+      'After the image',
+    ]);
+  });
 });
