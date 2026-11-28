@@ -2748,7 +2748,9 @@ describe('audit 28', () => {
         blocksFromHtml(document, `<h1>a${'<ul></ul><b> </b>'.repeat(size)}</h1>`);
       }, 12000),
     ).toBeLessThan(LINEAR);
-  }, 60_000);
+    // The largest growth test (a 3 GB heap at the large size): 37 s in the
+    // full suite on a twelve-core machine, so 60 s was not enough on CI's four.
+  }, 120_000);
 
   // Text beside images in a deep chain of formatting carries the chain's
   // formatting in one shell per piece, worked out a level at a time: a copy
